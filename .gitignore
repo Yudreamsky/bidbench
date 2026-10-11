@@ -1,0 +1,44 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+
+# JavaScript dependencies and caches
+node_modules/
+.npm/
+.pnpm-store/
+.next/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and test output
+/build/
+/dist/
+/coverage/
+*.log
+
+# Local editor and OS files
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Claude local-only settings
+.claude/settings.local.json
+
+
+# bidbench 本地项目数据（图纸可能涉密，不入库）
+/projects/
+/demo-project/
+/samples/out/
+*.sqlite
