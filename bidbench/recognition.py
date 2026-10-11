@@ -16,7 +16,7 @@ from pathlib import Path
 import jsonschema
 
 from . import pdfpages
-from .store import Project, now_iso
+from .store import PLACEHOLDER_EXECUTORS, Project, now_iso
 
 TITLEBLOCK_CLIP = (0.62, 0.70, 1.0, 1.0)  # 图签常见位置：右下角
 
@@ -29,8 +29,42 @@ def _validator() -> jsonschema.Draft202012Validator:
     return jsonschema.Draft202012Validator(load_schema())
 
 
-def pages_to_recognize(con, include_done: bool = False) -> list:
-    """需要识别的页面：没有识别结果，且没有像素完全相同、已识别过的页面可以复用。"""
+SCOPES = {
+    "unrecognized": "尚未识别的页面",
+    "new": "尚未识别的页面，以及只有模拟执行器结果的页面",
+    "weak": "识别不完整的页面：模拟执行器结果、有问题记录、缺图号或图签把握低于 0.6",
+    "conflict": "涉及版本冲突、版次倒退或事实冲突的页面",
+    "all": "全部页面",
+}
+
+
+def _is_weak(rec: dict) -> bool:
+    if rec["run"]["executor"] in PLACEHOLDER_EXECUTORS or rec["issues"]:
+        return True
+    tb = rec["title_block"]
+    if not tb["drawing_no"]["value"]:
+        return True
+    return any((tb[k].get("confidence") or 0) < 0.6 for k in ("drawing_no", "drawing_title", "revision") if tb[k]["value"])
+
+
+def _conflict_pages(proj: Project) -> set[str]:
+    from .state import build  # 避免循环导入
+    st = build(proj, with_diff=False)
+    sheets = {s["no"]: s for s in st["sheets"]}
+    facts = {f["key"]: f for g in st["facts"]["groups"] for f in g["facts"]}
+    out: set[str] = set()
+    for i in st["issues"]:
+        if i["kind"] == "版本冲突" and i["target"].get("sheet") in sheets:
+            out |= {v["page_id"] for v in sheets[i["target"]["sheet"]]["versions"]}
+        if i["kind"] == "事实冲突" and i["target"].get("fact") in facts:
+            out |= {e["page_id"] for e in facts[i["target"]["fact"]]["evidence"] if e["active"]}
+    return out
+
+
+def pages_to_recognize(con, include_done: bool = False, scope: str = "new", only: set[str] | None = None) -> list:
+    """按范围挑选要识别的页面。像素完全相同的页面只挑一个，识别结果会被其他页面复用。"""
+    if include_done:
+        scope = "all"
     rows = con.execute(
         """
         SELECT p.*, f.stored_path,
@@ -40,26 +74,48 @@ def pages_to_recognize(con, include_done: bool = False) -> list:
         ORDER BY first_path, p.page_index
         """
     ).fetchall()
-    done_hashes = {r["render_hash"] for r in con.execute(
-        "SELECT p.render_hash FROM pages p JOIN recognitions r ON r.page_id = p.page_id")}
-    done_ids = {r[0] for r in con.execute("SELECT page_id FROM recognitions")}
+    rec_by_hash: dict[str, dict] = {}
+    for r in con.execute("SELECT p.render_hash, r.data FROM pages p JOIN recognitions r ON r.page_id = p.page_id"):
+        rec = json.loads(r["data"])
+        old = rec_by_hash.get(r["render_hash"])
+        if old is None or (old["run"]["executor"] in PLACEHOLDER_EXECUTORS and rec["run"]["executor"] not in PLACEHOLDER_EXECUTORS):
+            rec_by_hash[r["render_hash"]] = rec
     out, seen = [], set()
     for r in rows:
-        if not include_done and (r["page_id"] in done_ids or r["render_hash"] in done_hashes):
+        if r["render_hash"] in seen:
             continue
-        if r["render_hash"] in seen:  # 同一批任务里像素相同的页面只识别一次
+        rec = rec_by_hash.get(r["render_hash"])
+        if only is not None:
+            pick = r["page_id"] in only
+        elif scope == "all":
+            pick = True
+        elif scope == "unrecognized":
+            pick = rec is None
+        elif scope == "weak":
+            pick = rec is None or _is_weak(rec)
+        else:  # new
+            pick = rec is None or rec["run"]["executor"] in PLACEHOLDER_EXECUTORS
+        if not pick:
             continue
         seen.add(r["render_hash"])
         out.append(r)
     return out
 
 
-def make_task(proj: Project, include_done: bool = False, render: bool = True) -> Path | None:
+def make_task(proj: Project, include_done: bool = False, render: bool = True, scope: str = "new") -> Path | None:
+    if scope not in SCOPES:
+        raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(SCOPES)}")
+    only = _conflict_pages(proj) if scope == "conflict" else None
     with proj.connect() as con:
-        rows = pages_to_recognize(con, include_done)
+        rows = pages_to_recognize(con, include_done, scope, only)
     if not rows:
         return None
-    task = proj.dir("recognition", "tasks", datetime.now().strftime("%Y%m%d-%H%M%S"))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name, n = stamp, 1
+    while (proj.root / "recognition" / "tasks" / name).exists():
+        n += 1
+        name = f"{stamp}-{n}"
+    task = proj.dir("recognition", "tasks", name)
     spec = resources.files("bidbench").joinpath("spec")
     (task / "任务说明.md").write_text(spec.joinpath("任务说明.md").read_text(encoding="utf-8"), encoding="utf-8")
     (task / "schema.json").write_text(spec.joinpath("schema.json").read_text(encoding="utf-8"), encoding="utf-8")
@@ -91,7 +147,8 @@ def make_task(proj: Project, include_done: bool = False, render: bool = True) ->
             "text_lines": f"text/{pid}.json",
         })
     (task / "manifest_in.json").write_text(
-        json.dumps({"created_at": now_iso(), "project": proj.meta["name"], "pages": items}, ensure_ascii=False, indent=2),
+        json.dumps({"created_at": now_iso(), "project": proj.meta["name"], "scope": scope, "pages": items},
+                   ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (task / "results" / "pages").mkdir(parents=True, exist_ok=True)
@@ -113,7 +170,7 @@ def import_results(proj: Project, results_dir: Path) -> ImportResult:
     with proj.connect() as con:
         known = {r[0] for r in con.execute("SELECT page_id FROM pages")}
         for f in files:
-            if f.name in ("manifest.json", "manifest_in.json"):
+            if f.name in ("manifest.json", "manifest_in.json", "usage.json"):
                 continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))

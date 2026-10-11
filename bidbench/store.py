@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+PLACEHOLDER_EXECUTORS = {"simulated"}  # 只用于演示的执行器；真实执行器的结果出现后，它的结果让位
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS batches(
   seq INTEGER PRIMARY KEY,

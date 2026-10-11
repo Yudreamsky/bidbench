@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from . import pdfpages
-from .store import Project, latest_decisions, now_iso
+from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
 
 SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
 SAME_DHASH = 10       # 差值哈希距离阈值（256 位）
@@ -127,17 +127,25 @@ def _load(con, as_of: int):
     for o in con.execute("SELECT * FROM occurrences WHERE batch_seq<=? ORDER BY batch_seq, id", (as_of,)):
         occ[o["sha256"]].append(o)
     recs = {r["page_id"]: json.loads(r["data"]) for r in con.execute("SELECT * FROM recognitions")}
-    by_hash = {}
+    by_hash: dict[str, dict] = {}
     for r in pages_rows:
-        if r["page_id"] in recs:
-            by_hash.setdefault(r["render_hash"], recs[r["page_id"]])
+        rec = recs.get(r["page_id"])
+        if rec is None:
+            continue
+        old = by_hash.get(r["render_hash"])
+        if old is None or (old["run"]["executor"] in PLACEHOLDER_EXECUTORS
+                           and rec["run"]["executor"] not in PLACEHOLDER_EXECUTORS):
+            by_hash[r["render_hash"]] = rec
     out = []
     for r in pages_rows:
         o = occ[r["file_sha256"]]
         rec = recs.get(r["page_id"])
         borrowed = False
-        if rec is None and r["render_hash"] in by_hash:
-            rec, borrowed = by_hash[r["render_hash"]], True
+        best = by_hash.get(r["render_hash"])
+        # 像素相同的页面共用识别结果；有真实执行器的结果时，不用模拟结果
+        if best is not None and (rec is None or (rec["run"]["executor"] in PLACEHOLDER_EXECUTORS
+                                                 and best["run"]["executor"] not in PLACEHOLDER_EXECUTORS)):
+            rec, borrowed = best, best is not recs.get(r["page_id"])
         out.append(PageRec(
             page_id=r["page_id"], file_sha=r["file_sha256"], page_index=r["page_index"],
             render_hash=r["render_hash"], dhash=r["dhash"], text=r["text"],
