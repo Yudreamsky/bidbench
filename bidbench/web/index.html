@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投标图纸工作台</title>
+<style>
+/* 布局：顶部信息条 + 主画布 + 右侧详情面板（窄屏时面板落到下方）。本地工具，不加载任何外部资源。 */
+:root {
+  --bg: #eef1f4; --surface: #ffffff; --band: #f5f7f9; --ink: #18212b; --muted: #5a6573;
+  --line: #c9d1da; --edge: #8b97a5; --accent: #1d5fae; --accent-tint: #e3edf9;
+  --ok: #2b7a4b; --warn: #a8690f; --warn-tint: #fbf0de; --crit: #bd3326; --crit-tint: #fbe5e2;
+  --font-body: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11161c; --surface: #19212a; --band: #151c24; --ink: #e3e9ef; --muted: #96a2af;
+    --line: #314050; --edge: #6d7d8e; --accent: #6ea6ee; --accent-tint: #1c2f47;
+    --ok: #5cbf86; --warn: #e2a64b; --warn-tint: #3a2e1a; --crit: #f0776a; --crit-tint: #3d2220;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.55; }
+[hidden] { display: none !important; }
+.app { max-width: 1480px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+.top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.brand { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.eyebrow { font-size: 12px; letter-spacing: .08em; color: var(--muted); }
+h1 { margin: 0; font-size: 20px; }
+.meta { margin: 0; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tag-sim { display: inline-block; padding: 0 8px; border-radius: 4px; background: var(--warn-tint); color: var(--warn); font-weight: 500; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.controls select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+.tabs { display: flex; gap: 4px; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.tab { font: inherit; font-weight: 500; color: var(--muted); background: none; border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
+.tab[aria-selected="true"] { background: var(--accent); color: var(--surface); }
+button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-visible, .mm:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.node:focus:not(:focus-visible), .mm:focus:not(:focus-visible) { outline: none; }
+.work { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+@media (max-width: 980px) { .work { grid-template-columns: minmax(0, 1fr); } }
+.view { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; min-width: 0; display: flex; flex-direction: column; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.toolbar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.spacer { flex: 1; }
+.btn { font: inherit; font-size: 13px; color: var(--ink); background: var(--band); border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; text-decoration: none; display: inline-block; }
+.btn:hover { border-color: var(--edge); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 11px; border-radius: 3px; border: 1.5px solid var(--line); background: var(--surface); }
+.sw.s-updated, .sw.s-new { border: 2px solid var(--accent); }
+.sw.s-changed, .sw.s-pending_void { border: 2px solid var(--warn); }
+.sw.s-conflict { border: 2px solid var(--crit); }
+.sw.s-missing { border: 1.5px dashed var(--muted); background: none; }
+.ln { width: 22px; height: 0; border-top: 1.5px solid var(--edge); }
+.ln.cross { border-top-style: dashed; }
+.ln.catalog { border-top-style: dotted; border-top-width: 2px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+.c-confirmed { background: var(--ink); } .c-high { background: var(--ok); } .c-mid { background: var(--accent); }
+.c-low { background: var(--warn); } .c-conflict { background: var(--crit); }
+.canvas { overflow: auto; padding: 8px; }
+.canvas svg { display: block; }
+.hint { margin: 0; padding: 8px 14px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
+.empty { padding: 40px 16px; text-align: center; color: var(--muted); }
+.band { fill: var(--band); stroke: var(--line); }
+.band-label { fill: var(--muted); font-size: 12px; letter-spacing: .08em; }
+.edge { stroke: var(--edge); stroke-width: 1.25; fill: none; }
+.edge.cross { stroke-dasharray: 6 4; }
+.edge.catalog { stroke-dasharray: 2 4; stroke-width: 1.6; }
+.edge.dangling { stroke: var(--crit); }
+.edge.dim { opacity: .12; }
+.edge.on { stroke: var(--accent); stroke-width: 2; }
+.arrow { fill: var(--edge); } .arrow-crit { fill: var(--crit); } .arrow-on { fill: var(--accent); }
+.node { cursor: pointer; }
+.node .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.25; }
+.node.st-updated .box, .node.st-new .box { stroke: var(--accent); stroke-width: 2; }
+.node.st-changed .box, .node.st-pending_void .box { stroke: var(--warn); stroke-width: 2; }
+.node.st-conflict .box { stroke: var(--crit); stroke-width: 2; }
+.node.st-missing .box, .node.st-voided .box { fill: var(--band); stroke: var(--muted); stroke-dasharray: 5 4; }
+.node .num { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; fill: var(--ink); }
+.node .ttl { font-size: 12px; fill: var(--muted); }
+.node.st-missing .num, .node.st-voided .num, .node.st-missing .ttl, .node.st-voided .ttl { fill: var(--muted); }
+.node .tag { font-size: 11px; font-weight: 500; }
+.t-updated, .t-new { fill: var(--accent); } .t-changed, .t-pending_void { fill: var(--warn); }
+.t-conflict, .t-missing { fill: var(--crit); } .t-voided, .t-inner { fill: var(--muted); }
+.node .ring { fill: none; stroke: var(--accent); stroke-width: 2.5; opacity: 0; }
+.node.sel .ring { opacity: 1; }
+.node.hl .box { fill: var(--accent-tint); }
+.node.dim { opacity: .28; }
+.mm { cursor: pointer; }
+.mm-link { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.mm .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.25; }
+.mm-root .box { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 2; }
+.mm-root text { font-weight: 700; fill: var(--ink); font-size: 14px; }
+.mm-group text.lbl { font-weight: 600; fill: var(--ink); font-size: 13px; }
+.mm-group text.cnt { fill: var(--muted); font-size: 12px; font-family: var(--font-mono); }
+.mm-fact text { fill: var(--ink); font-size: 13px; }
+.mm-fact.conf-conflict .box { stroke: var(--crit); }
+.mm-fact.hl .box { fill: var(--accent-tint); stroke: var(--accent); }
+.mm-fact.sel .box { stroke: var(--accent); stroke-width: 2.5; }
+.mm-fact.dim { opacity: .35; }
+.cd-confirmed { fill: var(--ink); } .cd-high { fill: var(--ok); } .cd-mid { fill: var(--accent); } .cd-low { fill: var(--warn); } .cd-conflict { fill: var(--crit); }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.panel h2 { margin: 0; font-size: 16px; }
+.panel h3 { margin: 0 0 6px; font-size: 12px; font-weight: 500; letter-spacing: .08em; color: var(--muted); }
+.panel p { margin: 0; }
+.ptitle { display: flex; flex-direction: column; gap: 4px; }
+.pnum { font-family: var(--font-mono); font-size: 22px; font-weight: 600; line-height: 1.2; }
+.pill { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.pill.st-updated, .pill.st-new, .pill.conf-mid { color: var(--accent); border-color: var(--accent); }
+.pill.st-changed, .pill.st-pending_void, .pill.conf-low { color: var(--warn); border-color: var(--warn); }
+.pill.st-conflict, .pill.st-missing, .pill.conf-conflict { color: var(--crit); border-color: var(--crit); }
+.pill.conf-high { color: var(--ok); border-color: var(--ok); }
+.pill.conf-confirmed { color: var(--ink); border-color: var(--ink); }
+dl.kv { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; font-size: 13px; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.note { padding: 8px 10px; border-radius: 6px; font-size: 13px; background: var(--band); border-left: 3px solid var(--edge); }
+.note.warn { background: var(--warn-tint); border-left-color: var(--warn); }
+.note.crit { background: var(--crit-tint); border-left-color: var(--crit); }
+ul.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+ul.list li { min-width: 0; overflow-wrap: anywhere; }
+.issue { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--band); }
+.issue .head { display: flex; gap: 8px; align-items: flex-start; }
+.issue .head .dot { margin-top: 6px; }
+.issue .go { font: inherit; text-align: left; background: none; border: 0; padding: 0; color: var(--ink); cursor: pointer; font-weight: 500; }
+.issue .go:hover { color: var(--accent); }
+.issue small { color: var(--muted); display: block; font-size: 12px; }
+.opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.linkbtn { font: inherit; text-align: left; width: 100%; display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--band); color: var(--ink); cursor: pointer; }
+.linkbtn:hover { border-color: var(--accent); }
+.linkbtn .dot { margin-top: 6px; }
+.linkbtn small { color: var(--muted); display: block; }
+.chip { font: inherit; font-family: var(--font-mono); font-size: 12px; padding: 1px 8px; border-radius: 4px; border: 1px solid var(--accent); color: var(--accent); background: none; cursor: pointer; }
+.ev { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.ev.stale { opacity: .6; }
+.ev .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 12px; color: var(--muted); }
+.ev q { font-size: 13px; color: var(--ink); quotes: "「" "」"; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stat { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; display: flex; flex-direction: column; }
+.stat b { font-size: 20px; font-variant-numeric: tabular-nums; line-height: 1.3; }
+.stat span { font-size: 12px; color: var(--muted); }
+.stat.crit b { color: var(--crit); } .stat.warn b { color: var(--warn); }
+.versions li { display: grid; grid-template-columns: 34px 92px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; font-variant-numeric: tabular-nums; }
+.versions li.old { color: var(--muted); }
+.form { display: flex; gap: 6px; }
+.form input { font: inherit; flex: 1; min-width: 0; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--surface); padding: 8px 16px; border-radius: 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <span class="eyebrow">投标图纸工作台</span>
+      <h1 id="proj-name">加载中…</h1>
+      <p class="meta" id="proj-meta"></p>
+    </div>
+    <div class="controls">
+      <label class="meta" for="as-of">查看截至</label>
+      <select id="as-of"></select>
+      <nav class="tabs" role="tablist" aria-label="显示模式">
+        <button class="tab" role="tab" id="tab-graph" aria-controls="view-graph" aria-selected="true">图纸知识图谱</button>
+        <button class="tab" role="tab" id="tab-facts" aria-controls="view-facts" aria-selected="false">事实思维导图</button>
+      </nav>
+    </div>
+  </header>
+  <div class="work">
+    <div>
+      <section class="view" id="view-graph" role="tabpanel" aria-labelledby="tab-graph">
+        <div class="toolbar">
+          <label for="f-graph-issues"><input type="checkbox" id="f-graph-issues"> 只看有问题的图纸</label>
+          <div class="legend">
+            <span><i class="sw"></i>现行</span><span><i class="sw s-updated"></i>本批升版/新增</span>
+            <span><i class="sw s-changed"></i>有变更/待确认</span><span><i class="sw s-conflict"></i>冲突</span>
+            <span><i class="sw s-missing"></i>缺失/作废</span><span><i class="ln"></i>索引引用</span>
+            <span><i class="ln cross"></i>跨专业</span><span><i class="ln catalog"></i>目录列出</span>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn" id="clear" type="button">清除选择</button>
+        </div>
+        <div class="canvas"><svg id="graph" role="group" aria-label="图纸知识图谱"></svg></div>
+        <p class="hint">点击图纸查看详情；选中后只突出它的直接关联。红色连线指向缺失的图纸。</p>
+      </section>
+      <section class="view" id="view-facts" role="tabpanel" aria-labelledby="tab-facts" hidden>
+        <div class="toolbar">
+          <label for="f-facts-issues"><input type="checkbox" id="f-facts-issues"> 只看冲突和低置信度</label>
+          <div class="legend">
+            <span><i class="dot c-confirmed"></i>人工确认</span><span><i class="dot c-high"></i>高置信</span>
+            <span><i class="dot c-mid"></i>中置信</span><span><i class="dot c-low"></i>低置信</span><span><i class="dot c-conflict"></i>冲突</span>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn" id="mm-expand" type="button">全部展开</button>
+          <button class="btn" id="mm-collapse" type="button">全部收起</button>
+        </div>
+        <div class="canvas"><svg id="mind" role="group" aria-label="事实思维导图"></svg></div>
+        <p class="hint">点击分组展开或收起；点击事实查看证据，证据里的图号可跳回图谱。</p>
+      </section>
+    </div>
+    <aside class="panel" id="panel" aria-live="polite"><p class="meta">加载中…</p></aside>
+  </div>
+</div>
+<script>
+(() => {
+const NS = 'http://www.w3.org/2000/svg';
+const NW = 136, NH = 48;
+const STATUS = { current: '现行', new: '本批新增', updated: '本批升版', changed: '有变更单', conflict: '冲突',
+  pending_void: '作废还是漏发', voided: '已作废', missing: '缺失' };
+const CONF = { confirmed: '人工确认', high: '高置信', mid: '中置信', low: '低置信', conflict: '冲突' };
+const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '其他'];
+
+let S = null;
+const ui = { view: 'graph', selD: null, selF: null, focusSet: null, backTo: null, collapsed: new Set(),
+  graphIssues: false, factIssues: false, asOf: null };
+let nodeEls = {}, edgeEls = [], sheetBy = {}, factBy = {}, factGroupOf = {};
+
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null) continue;
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
+  }
+  kids.flat().forEach(c => { if (c != null) n.append(c instanceof Node ? c : document.createTextNode(c)); });
+  return n;
+}
+function sv(tag, attrs, ...kids) {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  kids.flat().forEach(c => n.append(c instanceof Node ? c : document.createTextNode(c)));
+  return n;
+}
+const ctx = document.createElement('canvas').getContext('2d');
+function textW(s, size, weight) {
+  ctx.font = `${weight || 400} ${size}px ${getComputedStyle(document.body).fontFamily}`;
+  return ctx.measureText(s).width;
+}
+function toast(msg) {
+  const t = el('div', { class: 'toast', role: 'status' }, msg);
+  document.body.append(t);
+  setTimeout(() => t.remove(), 2200);
+}
+
+async function load(asOf) {
+  const r = await fetch('/api/state' + (asOf ? `?as_of=${asOf}` : ''));
+  setState(await r.json());
+}
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) { toast(data.error || '操作失败'); return false; }
+  setState(data);
+  return true;
+}
+async function decide(opt) {
+  if (await post('/api/decision', { kind: opt.kind, key: opt.key, value: opt.value })) toast('已记录：' + opt.label);
+}
+
+function setState(st) {
+  S = st;
+  sheetBy = Object.fromEntries(S.sheets.map(s => [s.no, s]));
+  factBy = {}; factGroupOf = {};
+  S.facts.groups.forEach(g => g.facts.forEach(f => { factBy[f.key] = f; factGroupOf[f.key] = g.label; }));
+  if (ui.selD && !sheetBy[ui.selD]) ui.selD = null;
+  if (ui.selF && !factBy[ui.selF]) ui.selF = null;
+  renderHeader();
+  buildGraph();
+  renderMind();
+  if (ui.selD) renderSheet(ui.selD); else if (ui.selF) renderFact(ui.selF); else renderOverview();
+}
+
+function renderHeader() {
+  document.getElementById('proj-name').textContent = S.project.name;
+  const b = S.batches.find(x => x.seq === S.as_of);
+  const rec = S.recognition;
+  const ex = Object.entries(rec.executors).map(([k, v]) => `${k === 'simulated' ? '模拟执行器' : k} ${v} 页`).join('、') || '尚未识别';
+  const meta = document.getElementById('proj-meta');
+  meta.replaceChildren(`${S.batches.length} 个收图批次 · ${S.sheets.length} 个图号 · `,
+    b ? `截至 ${b.received_at} · ` : '', `已识别 ${rec.recognized}/${rec.pages} 页（${ex}）`,
+    rec.executors.simulated ? el('span', {}, ' · ', el('span', { class: 'tag-sim' }, '识别结果为模拟数据')) : '');
+  const sel = document.getElementById('as-of');
+  sel.replaceChildren(...S.batches.map(x => el('option', { value: x.seq }, `批次 #${x.seq}（${x.received_at}）`)));
+  sel.value = S.as_of;
+}
+
+/* ---------- 图谱 ---------- */
+const gsvg = document.getElementById('graph');
+function layout() {
+  const groups = {};
+  S.sheets.forEach(s => (groups[s.discipline] ||= []).push(s));
+  const discs = Object.keys(groups).sort((a, b) => DISC_ORDER.indexOf(a) - DISC_ORDER.indexOf(b));
+  const MAXW = 1040, GAPX = 20, GAPY = 24, PAD = 12, COLW = NW + 20, ROWH = NH + 28;
+  let x = 12, y = 20, rowH = 0, maxX = 0;
+  const bands = [], pos = {};
+  discs.forEach(d => {
+    const items = groups[d];
+    const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(items.length))));
+    const rows = Math.ceil(items.length / cols);
+    const bw = cols * COLW - 20 + PAD * 2, bh = rows * ROWH + 40;
+    if (x + bw > MAXW && x > 12) { x = 12; y += rowH + GAPY; rowH = 0; }
+    bands.push({ d, x, y, w: bw, h: bh });
+    items.forEach((s, i) => { pos[s.no] = { x: x + PAD + (i % cols) * COLW, y: y + 36 + Math.floor(i / cols) * ROWH }; });
+    x += bw + GAPX; rowH = Math.max(rowH, bh); maxX = Math.max(maxX, x);
+  });
+  return { bands, pos, w: Math.max(maxX, 400), h: y + rowH + 12 };
+}
+function clip(cx, cy, tx, ty) {
+  const dx = tx - cx, dy = ty - cy;
+  const s = Math.min((NW / 2 + 4) / Math.abs(dx || 1e-6), (NH / 2 + 4) / Math.abs(dy || 1e-6));
+  return [cx + dx * s, cy + dy * s];
+}
+function buildGraph() {
+  gsvg.textContent = ''; nodeEls = {}; edgeEls = [];
+  if (!S.sheets.length) {
+    gsvg.setAttribute('viewBox', '0 0 600 120'); gsvg.style.width = '100%';
+    gsvg.append(sv('text', { x: 300, y: 60, 'text-anchor': 'middle', class: 'band-label' }, '还没有图纸。先用 bidbench receive 收一个压缩包。'));
+    return;
+  }
+  const L = layout();
+  gsvg.setAttribute('viewBox', `0 0 ${L.w} ${L.h}`);
+  gsvg.style.width = '100%'; gsvg.style.minWidth = Math.min(L.w, 720) + 'px'; gsvg.style.height = 'auto';
+  const defs = sv('defs');
+  [['g-arrow', 'arrow'], ['g-arrow-crit', 'arrow-crit'], ['g-arrow-on', 'arrow-on']].forEach(([id, cls]) =>
+    defs.append(sv('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' },
+      sv('path', { d: 'M0 0L10 5L0 10z', class: cls }))));
+  gsvg.append(defs);
+  L.bands.forEach(b => {
+    gsvg.append(sv('rect', { class: 'band', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10 }));
+    gsvg.append(sv('text', { class: 'band-label', x: b.x + 12, y: b.y + 22 }, b.d));
+  });
+  const eg = sv('g');
+  const seen = new Set();
+  S.edges.forEach(e => {
+    const A = L.pos[e.from], B = L.pos[e.to];
+    const k = `${e.from}>${e.to}`;
+    if (!A || !B || seen.has(k)) return;
+    seen.add(k);
+    const ac = [A.x + NW / 2, A.y + NH / 2], bc = [B.x + NW / 2, B.y + NH / 2];
+    const p1 = clip(...ac, ...bc), p2 = clip(...bc, ...ac);
+    const dangling = sheetBy[e.to] && ['missing', 'voided'].includes(sheetBy[e.to].status);
+    const line = sv('line', { x1: p1[0], y1: p1[1], x2: p2[0], y2: p2[1], class: `edge ${e.type}${dangling ? ' dangling' : ''}` });
+    if (e.type !== 'cross') line.setAttribute('marker-end', `url(#${dangling ? 'g-arrow-crit' : 'g-arrow'})`);
+    line.append(sv('title', {}, `${e.from} → ${e.to}：${e.label}`));
+    eg.append(line);
+    edgeEls.push({ ...e, dangling, line });
+  });
+  gsvg.append(eg);
+  S.sheets.forEach(s => {
+    const p = L.pos[s.no];
+    const g = sv('g', { class: `node st-${s.status}`, tabindex: 0, role: 'button', 'aria-label': `${s.no} ${s.title || ''}，${STATUS[s.status]}` });
+    g.append(sv('rect', { class: 'ring', x: p.x - 4, y: p.y - 4, width: NW + 8, height: NH + 8, rx: 11 }));
+    g.append(sv('rect', { class: 'box', x: p.x, y: p.y, width: NW, height: NH, rx: 8 }));
+    g.append(sv('text', { class: 'num', x: p.x + 12, y: p.y + 20 }, s.no));
+    let title = s.title || (s.status === 'missing' ? '（图名未知）' : '');
+    while (title && textW(title, 12) > NW - 24) title = title.slice(0, -2) + '…';
+    g.append(sv('text', { class: 'ttl', x: p.x + 12, y: p.y + 38 }, title));
+    const tag = s.status !== 'current' ? [STATUS[s.status].replace('作废还是漏发', '待确认'), `t-${s.status}`] : s.inner ? ['内层包', 't-inner'] : null;
+    if (tag) g.append(sv('text', { class: `tag ${tag[1]}`, x: p.x + NW - 10, y: p.y + 19, 'text-anchor': 'end' }, tag[0]));
+    const open = () => { ui.focusSet = null; ui.backTo = null; selectSheet(s.no); };
+    g.addEventListener('click', open);
+    g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
+    gsvg.append(g);
+    nodeEls[s.no] = g;
+  });
+  paintGraph();
+}
+const hasIssue = s => s.status !== 'current' || s.inner;
+function neighbors(no) {
+  const n = new Set([no]);
+  S.edges.forEach(e => { if (e.from === no) n.add(e.to); if (e.to === no) n.add(e.from); });
+  return n;
+}
+function paintGraph() {
+  const focus = ui.focusSet || (ui.selD ? neighbors(ui.selD) : null);
+  S.sheets.forEach(s => {
+    const n = nodeEls[s.no]; if (!n) return;
+    n.classList.toggle('sel', s.no === ui.selD);
+    n.classList.toggle('hl', !!ui.focusSet && ui.focusSet.has(s.no));
+    n.classList.toggle('dim', (ui.graphIssues && !hasIssue(s)) || (!!focus && !focus.has(s.no)));
+  });
+  edgeEls.forEach(e => {
+    const on = !!ui.selD && !ui.focusSet && (e.from === ui.selD || e.to === ui.selD);
+    const inFocus = focus ? focus.has(e.from) && focus.has(e.to) : true;
+    const filtered = ui.graphIssues && !(hasIssue(sheetBy[e.from]) || hasIssue(sheetBy[e.to]));
+    e.line.classList.toggle('dim', !inFocus || filtered);
+    e.line.classList.toggle('on', on && !e.dangling);
+    if (e.type !== 'cross') e.line.setAttribute('marker-end', `url(#${e.dangling ? 'g-arrow-crit' : on ? 'g-arrow-on' : 'g-arrow'})`);
+  });
+}
+
+/* ---------- 思维导图 ---------- */
+const msvg = document.getElementById('mind');
+const factMatch = f => !ui.factIssues || ['conflict', 'low'].includes(f.conf);
+function renderMind() {
+  msvg.textContent = '';
+  const ROW = 40, TOP = 24, X0 = 16, X1 = 196;
+  const groups = S.facts.groups.map(g => ({ g, kids: g.facts.filter(factMatch) })).filter(o => o.kids.length);
+  if (!groups.length) {
+    msvg.setAttribute('viewBox', '0 0 600 120'); msvg.setAttribute('width', 600); msvg.setAttribute('height', 120);
+    msvg.append(sv('text', { x: 300, y: 60, 'text-anchor': 'middle', class: 'band-label' }, '还没有事实。识别并导入结果后，这里会显示交叉验证后的项目事实。'));
+    return;
+  }
+  let maxGW = 0;
+  groups.forEach(o => { maxGW = Math.max(maxGW, textW(o.g.label, 13, 600) + 58); });
+  const X2 = X1 + maxGW + 50;
+  let y = TOP;
+  const placed = groups.map(o => {
+    const collapsed = ui.collapsed.has(o.g.id);
+    const rows = [];
+    if (!collapsed) o.kids.forEach(f => { rows.push({ f, y }); y += ROW; }); else y += ROW;
+    const gy = collapsed ? y - ROW : (rows[0].y + rows.at(-1).y) / 2;
+    y += 12;
+    return { g: o.g, gy, rows, collapsed, count: o.kids.length };
+  });
+  const rootY = (placed[0].gy + placed.at(-1).gy) / 2;
+  const fromSheet = ui.selD ? new Set(S.facts.groups.flatMap(g => g.facts).filter(f => f.sources.includes(ui.selD)).map(f => f.key)) : null;
+  const links = sv('g'), nodes = sv('g');
+  const rootW = textW(S.project.name, 14, 700) + 28;
+  let maxX = X0 + rootW;
+  placed.forEach(p => {
+    const gW = textW(p.g.label, 13, 600) + 58;
+    links.append(sv('path', { class: 'mm-link', d: `M${X0 + rootW} ${rootY + 16}C${X0 + rootW + 40} ${rootY + 16},${X1 - 40} ${p.gy + 16},${X1} ${p.gy + 16}` }));
+    const gg = sv('g', { class: 'mm mm-group', tabindex: 0, role: 'button', 'aria-expanded': String(!p.collapsed), 'aria-label': `${p.g.label}，${p.count} 条事实` });
+    gg.append(sv('rect', { class: 'box', x: X1, y: p.gy, width: gW, height: 32, rx: 8 }));
+    gg.append(sv('text', { class: 'lbl', x: X1 + 12, y: p.gy + 21 }, p.g.label));
+    gg.append(sv('text', { class: 'cnt', x: X1 + gW - 12, y: p.gy + 21, 'text-anchor': 'end' }, p.collapsed ? `+${p.count}` : `${p.count}`));
+    const toggle = () => { ui.collapsed.has(p.g.id) ? ui.collapsed.delete(p.g.id) : ui.collapsed.add(p.g.id); renderMind(); };
+    gg.addEventListener('click', toggle);
+    gg.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
+    nodes.append(gg);
+    maxX = Math.max(maxX, X1 + gW);
+    p.rows.forEach(({ f, y: fy }) => {
+      const label = `${f.name}：${f.value}`;
+      const fw = textW(label, 13) + 40;
+      links.append(sv('path', { class: 'mm-link', d: `M${X1 + gW} ${p.gy + 16}C${X1 + gW + 30} ${p.gy + 16},${X2 - 30} ${fy + 16},${X2} ${fy + 16}` }));
+      const cls = ['mm', 'mm-fact', `conf-${f.conf}`];
+      if (ui.selF === f.key) cls.push('sel');
+      if (fromSheet) cls.push(fromSheet.has(f.key) ? 'hl' : 'dim');
+      const fg = sv('g', { class: cls.join(' '), tabindex: 0, role: 'button', 'aria-label': `${label}，${CONF[f.conf]}` });
+      fg.append(sv('rect', { class: 'box', x: X2, y: fy, width: fw, height: 32, rx: 16 }));
+      fg.append(sv('circle', { class: `cd-${f.conf}`, cx: X2 + 16, cy: fy + 16, r: 5 }));
+      fg.append(sv('text', { x: X2 + 28, y: fy + 21 }, label));
+      const open = () => selectFact(f.key);
+      fg.addEventListener('click', open);
+      fg.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
+      nodes.append(fg);
+      maxX = Math.max(maxX, X2 + fw);
+    });
+  });
+  const rg = sv('g', { class: 'mm mm-root' });
+  rg.append(sv('rect', { class: 'box', x: X0, y: rootY, width: rootW, height: 32, rx: 8 }));
+  rg.append(sv('text', { x: X0 + 14, y: rootY + 21 }, S.project.name));
+  nodes.append(rg);
+  msvg.append(links, nodes);
+  const w = Math.ceil(maxX + 24), h = y + 12;
+  msvg.setAttribute('viewBox', `0 0 ${w} ${h}`); msvg.setAttribute('width', w); msvg.setAttribute('height', h);
+}
+
+/* ---------- 面板 ---------- */
+const panel = document.getElementById('panel');
+const section = (title, ...body) => el('section', {}, el('h3', {}, title), ...body);
+const latest = () => S.as_of === Math.max(...S.batches.map(b => b.seq));
+function optionButtons(issue) {
+  if (!issue || !issue.options.length || !latest()) return null;
+  return el('div', { class: 'opts' }, issue.options.map(o => el('button', { class: 'btn', type: 'button', onclick: () => decide(o) }, o.label)));
+}
+function issueFor(target) {
+  return S.issues.filter(i => (target.sheet && i.target.sheet === target.sheet) || (target.fact && i.target.fact === target.fact));
+}
+function goTarget(t) {
+  if (t.fact) jumpFact(t.fact);
+  else if (t.sheet) jumpSheet(t.sheet);
+}
+
+function renderOverview() {
+  const count = k => S.issues.filter(i => i.kind === k).length;
+  const crit = S.issues.filter(i => i.level === 'crit').length;
+  const b = S.batches.find(x => x.seq === S.as_of);
+  const parts = [
+    el('div', { class: 'ptitle' }, el('h2', {}, '问题中心'),
+      el('p', { class: 'meta' }, b ? `批次 #${b.seq}（${b.received_at}）到图后，有 ${S.issues.filter(i => i.level !== 'info').length} 项需要处理，其中严重 ${crit} 项。` : '还没有收图。')),
+    el('div', { class: 'stats' },
+      el('div', { class: 'stat crit' }, el('b', {}, String(count('缺图'))), el('span', {}, '缺失图纸')),
+      el('div', { class: 'stat crit' }, el('b', {}, String(count('版本冲突') + count('事实冲突'))), el('span', {}, '冲突')),
+      el('div', { class: 'stat warn' }, el('b', {}, String(S.issues.filter(i => i.level === 'warn').length)), el('span', {}, '提醒'))),
+  ];
+  if (!latest()) parts.push(el('div', { class: 'note warn' }, '正在查看历史状态，只读。切回最新批次后才能做决定。'));
+  parts.push(section('待处理', S.issues.length ? el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, S.issues.map(i =>
+    el('div', { class: 'issue' },
+      el('div', { class: 'head' }, el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : i.level === 'warn' ? 'c-low' : 'c-mid'}` }),
+        el('div', {}, el('button', { class: 'go', type: 'button', onclick: () => goTarget(i.target) }, `${i.kind}：${i.title}`),
+          el('small', {}, i.detail + (i.confirmed ? '（已列入答疑）' : '')))),
+      optionButtons(i))))
+    : el('p', { class: 'meta' }, '没有待处理的问题。')));
+  if (b) {
+    const d = S.diff || {};
+    const lines = [];
+    if (d.upgraded?.length) lines.push('升版：' + d.upgraded.join('、'));
+    if (d.added?.length) lines.push('新增：' + d.added.join('、'));
+    if (d.resolved_missing?.length) lines.push('核销缺图：' + d.resolved_missing.join('、'));
+    if (d.new_missing?.length) lines.push('新发现缺图：' + d.new_missing.join('、'));
+    if (d.new_conflicts?.length) lines.push('新冲突：' + d.new_conflicts.join('、'));
+    if (d.pending_void?.length) lines.push('待确认作废：' + d.pending_void.join('、'));
+    if (d.fact_changes?.length) lines.push('事实变化：' + d.fact_changes.join('；'));
+    parts.push(section(`本批差异（批次 #${b.seq}：${b.kinds.join('、')}）`,
+      lines.length ? el('ul', { class: 'list' }, lines.map(t => el('li', {}, t))) : el('p', { class: 'meta' }, '与上一批相比没有变化。')));
+  }
+  parts.push(section('收图批次', el('ul', { class: 'list' }, S.batches.map(x => el('li', {},
+    el('b', { class: 'mono' }, `#${x.seq}`), ` ${x.received_at} ${x.archive}：${x.kinds.join('、')}（${x.sheets} 张图）`)))));
+  const bl = S.baselines.map(x => el('li', {}, `${x.name}（${x.sheets} 张图，批次 #${x.as_of_batch}）`,
+    x.outdated.length ? el('small', { style: 'color:var(--warn);display:block' }, '已过期：' + x.outdated.map(o => `${o.sheet} ${o.base_rev}→${o.current_rev}`).join('、')) : el('small', { style: 'color:var(--muted);display:block' }, '图纸均为现行版')));
+  const input = el('input', { id: 'bl-name', placeholder: '例如：3 层结构模型', 'aria-label': '基线名称' });
+  parts.push(section('建模任务的图纸基线', bl.length ? el('ul', { class: 'list' }, bl) : el('p', { class: 'meta' }, '还没有基线。开始建模前锁定一份，图纸升版时会提醒。'),
+    latest() ? el('div', { class: 'form', style: 'margin-top:8px' }, input,
+      el('button', { class: 'btn primary', type: 'button', onclick: async () => { if (input.value.trim() && await post('/api/baseline', { name: input.value.trim() })) toast('已锁定基线'); } }, '锁定当前图纸')) : null));
+  panel.replaceChildren(...parts);
+}
+
+function renderSheet(no) {
+  const s = sheetBy[no];
+  const parts = [];
+  if (ui.backTo && factBy[ui.backTo]) parts.push(el('button', { class: 'btn', type: 'button', onclick: () => jumpFact(ui.backTo) }, `← 返回事实：${factBy[ui.backTo].name}`));
+  else parts.push(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'));
+  parts.push(el('div', { class: 'ptitle' }, el('span', { class: 'pnum' }, s.no), el('h2', {}, s.title || '（图名未知）'),
+    el('span', { class: `pill st-${s.status}` }, STATUS[s.status])));
+  issueFor({ sheet: no }).forEach(i => parts.push(el('div', { class: `note ${i.level === 'crit' ? 'crit' : 'warn'}` }, el('p', {}, i.detail), optionButtons(i))));
+  if (s.status !== 'missing') {
+    parts.push(el('dl', { class: 'kv' }, el('dt', {}, '专业'), el('dd', {}, s.discipline),
+      el('dt', {}, '现行版次'), el('dd', {}, s.current_rev || '—'),
+      el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n'))));
+    if (s.current_page) parts.push(el('a', { class: 'btn', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, '打开现行版原图'));
+    if (s.borrowed) parts.push(el('p', { class: 'meta' }, '这一页与已识别过的页面像素完全相同，直接复用了识别结果。'));
+  }
+  s.notes.forEach(n => parts.push(el('div', { class: 'note' }, n)));
+  if (s.versions.length) parts.push(section('版本链', el('ul', { class: 'list versions' }, s.versions.map(v =>
+    el('li', { class: v.state === '现行' ? '' : 'old' }, el('b', { class: 'mono' }, v.rev), el('span', { class: 'mono' }, v.date || '—'),
+      el('span', {}, `批次#${v.batch} ${v.state}`), el('a', { href: `/api/page/${v.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '原图'))))));
+  const rel = S.edges.filter(e => e.from === no || e.to === no);
+  if (rel.length) parts.push(section('引用关系', el('ul', { class: 'list' }, rel.map(e => {
+    const other = e.from === no ? e.to : e.from;
+    return el('li', {}, el('button', { class: 'chip', type: 'button', onclick: () => { ui.focusSet = null; selectSheet(other); } }, other), ' ',
+      e.from === no ? e.label : `被引用：${e.label}`);
+  }))));
+  const fs = S.facts.groups.flatMap(g => g.facts).filter(f => f.sources.includes(no));
+  parts.push(section(`来自此图的事实（${fs.length}）`, fs.length ? el('ul', { class: 'list' }, fs.map(f => el('li', {},
+    el('button', { class: 'linkbtn', type: 'button', onclick: () => jumpFact(f.key) }, el('i', { class: `dot c-${f.conf}` }),
+      el('span', {}, `${f.name}：${f.value}`, el('small', {}, CONF[f.conf]))))))
+    : el('p', { class: 'meta' }, s.status === 'missing' ? '缺失图纸没有可抽取的内容。' : '暂未从此图抽取事实。')));
+  panel.replaceChildren(...parts);
+}
+
+function renderFact(key) {
+  const f = factBy[key];
+  const parts = [el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('span', { class: 'meta' }, factGroupOf[key]), el('h2', {}, `${f.name}：${f.value}`),
+      el('span', { class: `pill conf-${f.conf}` }, CONF[f.conf]))];
+  if (f.note) parts.push(el('div', { class: `note ${f.conf === 'conflict' ? 'crit' : f.note.includes('升版') ? 'warn' : ''}` }, f.note));
+  const iss = issueFor({ fact: key });
+  iss.forEach(i => { const o = optionButtons(i); if (o) parts.push(o); });
+  if (!iss.length && f.conf !== 'confirmed' && latest())
+    parts.push(el('div', { class: 'opts' }, el('button', { class: 'btn', type: 'button', onclick: () => decide({ kind: 'fact', key, value: f.value, label: `确认 ${f.name} = ${f.value}` }) }, '人工确认此值')));
+  parts.push(section(`证据（${f.evidence.length}）`, el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, f.evidence.map(e =>
+    el('div', { class: `ev${e.active ? '' : ' stale'}` },
+      el('div', { class: 'row' }, el('button', { class: 'chip', type: 'button', onclick: () => showSources(key, e.sheet) }, `${e.sheet} ${e.rev || ''}版`),
+        el('span', {}, e.source === 'text_layer' ? '文字层' : e.source === 'vision' ? '看图识别' : '文字层+看图'),
+        e.active ? null : el('span', {}, '已被新版替代'),
+        el('a', { href: `/api/page/${e.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '原图')),
+      el('q', {}, e.text || e.value))))));
+  parts.push(el('button', { class: 'btn', type: 'button', onclick: () => showSources(key, f.sources[0]) }, `在图谱中高亮全部 ${f.sources.length} 张出处图纸`));
+  panel.replaceChildren(...parts);
+}
+
+/* ---------- 动作 ---------- */
+function setView(v) {
+  ui.view = v;
+  document.getElementById('view-graph').hidden = v !== 'graph';
+  document.getElementById('view-facts').hidden = v !== 'facts';
+  document.getElementById('tab-graph').setAttribute('aria-selected', String(v === 'graph'));
+  document.getElementById('tab-facts').setAttribute('aria-selected', String(v === 'facts'));
+  try { history.replaceState(null, '', '#' + v); } catch (e) { /* 忽略 */ }
+  if (!S) return;
+  if (v === 'facts') renderMind(); else paintGraph();
+}
+function selectSheet(no) { ui.selD = no; ui.selF = null; paintGraph(); renderMind(); renderSheet(no); }
+function selectFact(key) { ui.selF = key; ui.selD = null; ui.focusSet = null; ui.backTo = null; renderMind(); paintGraph(); renderFact(key); }
+function jumpSheet(no) { ui.focusSet = null; ui.backTo = null; setView('graph'); selectSheet(no); }
+function jumpFact(key) {
+  ui.collapsed.delete(factGroupOf[key]);
+  if (ui.factIssues && !factMatch(factBy[key])) { ui.factIssues = false; document.getElementById('f-facts-issues').checked = false; }
+  ui.selD = null; setView('facts'); selectFact(key);
+}
+function showSources(key, no) {
+  ui.focusSet = new Set(factBy[key].sources); ui.backTo = key;
+  setView('graph'); ui.selD = no; ui.selF = key; paintGraph(); renderSheet(no);
+}
+function clearAll() { ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null; paintGraph(); renderMind(); renderOverview(); }
+
+document.getElementById('tab-graph').addEventListener('click', () => setView('graph'));
+document.getElementById('tab-facts').addEventListener('click', () => setView('facts'));
+document.getElementById('clear').addEventListener('click', clearAll);
+document.getElementById('f-graph-issues').addEventListener('change', e => { ui.graphIssues = e.target.checked; paintGraph(); });
+document.getElementById('f-facts-issues').addEventListener('change', e => { ui.factIssues = e.target.checked; renderMind(); });
+document.getElementById('mm-expand').addEventListener('click', () => { ui.collapsed.clear(); renderMind(); });
+document.getElementById('mm-collapse').addEventListener('click', () => { S.facts.groups.forEach(g => ui.collapsed.add(g.id)); renderMind(); });
+document.getElementById('as-of').addEventListener('change', e => { const v = Number(e.target.value); ui.asOf = v; load(v === Math.max(...S.batches.map(b => b.seq)) ? null : v); });
+
+setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');
+load(null).catch(() => { panel.replaceChildren(el('div', { class: 'note crit' }, '连接本地服务失败。请确认 bidbench serve 正在运行。')); });
+})();
+</script>
+</body>
+</html>

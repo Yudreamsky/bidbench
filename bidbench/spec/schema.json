@@ -1,0 +1,572 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "drawing-page-recognition/0.1",
+  "title": "图纸单页识别结果 v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "page_id",
+    "source",
+    "run",
+    "page_kind",
+    "title_block",
+    "references",
+    "catalog_entries",
+    "content",
+    "issues"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "page_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}-p[0-9]{3}$",
+      "description": "文件 SHA-256 前 12 位 + 三位页码"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_path",
+        "file_sha256",
+        "page_index",
+        "page_count",
+        "has_text_layer"
+      ],
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "相对输入目录的路径；重复文件取第一个"
+        },
+        "file_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "page_index": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "页码，从 1 开始"
+        },
+        "page_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "has_text_layer": {
+          "type": "boolean"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executor",
+        "model",
+        "instruction_version",
+        "finished_at"
+      ],
+      "properties": {
+        "executor": {
+          "type": "string",
+          "description": "执行器名称，如 codex"
+        },
+        "model": {
+          "type": "string",
+          "description": "实际使用的模型名称"
+        },
+        "instruction_version": {
+          "type": "string",
+          "description": "任务说明的版本号"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "page_kind": {
+      "enum": [
+        "图纸",
+        "图纸目录",
+        "设计说明",
+        "变更单",
+        "答疑或澄清",
+        "封面",
+        "其他"
+      ]
+    },
+    "title_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "drawing_no",
+        "drawing_title",
+        "discipline",
+        "revision",
+        "issue_date",
+        "scale",
+        "project_name",
+        "designer_org",
+        "revision_history",
+        "bbox"
+      ],
+      "properties": {
+        "drawing_no": {
+          "$ref": "#/$defs/field"
+        },
+        "drawing_title": {
+          "$ref": "#/$defs/field"
+        },
+        "discipline": {
+          "$ref": "#/$defs/field",
+          "description": "建筑、结构、给排水、暖通、电气等，按图上或图号判断"
+        },
+        "revision": {
+          "$ref": "#/$defs/field"
+        },
+        "issue_date": {
+          "$ref": "#/$defs/field",
+          "description": "尽量写成 YYYY-MM-DD；无法确定时保留原文"
+        },
+        "scale": {
+          "$ref": "#/$defs/field"
+        },
+        "project_name": {
+          "$ref": "#/$defs/field"
+        },
+        "designer_org": {
+          "$ref": "#/$defs/field"
+        },
+        "revision_history": {
+          "type": "array",
+          "description": "修改记录栏，每行一项",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "revision",
+              "date",
+              "description",
+              "source",
+              "confidence"
+            ],
+            "properties": {
+              "revision": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "date": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "$ref": "#/$defs/source"
+              },
+              "confidence": {
+                "$ref": "#/$defs/confidence"
+              }
+            }
+          }
+        },
+        "bbox": {
+          "$ref": "#/$defs/bbox_or_null",
+          "description": "图签区域位置"
+        }
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "raw_text",
+          "target_drawing_no",
+          "ref_type",
+          "bbox",
+          "source",
+          "confidence"
+        ],
+        "properties": {
+          "raw_text": {
+            "type": "string",
+            "description": "引用原文，如 ⑤/建施-12、详见建施-17"
+          },
+          "target_drawing_no": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "指向的图号；图集引用或无法判断时为 null"
+          },
+          "ref_type": {
+            "enum": [
+              "详图索引",
+              "大样引用",
+              "文字引用",
+              "图集引用",
+              "其他"
+            ]
+          },
+          "bbox": {
+            "$ref": "#/$defs/bbox_or_null"
+          },
+          "source": {
+            "$ref": "#/$defs/source"
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          }
+        }
+      }
+    },
+    "catalog_entries": {
+      "type": "array",
+      "description": "仅图纸目录页填写，其他页为空数组",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "drawing_no",
+          "drawing_title",
+          "revision",
+          "source",
+          "confidence"
+        ],
+        "properties": {
+          "drawing_no": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "drawing_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/$defs/source"
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          }
+        }
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "notes",
+        "tables",
+        "key_values",
+        "standards"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "一两句话说明这张图画的是什么"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "text",
+              "bbox",
+              "source",
+              "confidence"
+            ],
+            "properties": {
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "条目编号，如 3.2"
+              },
+              "text": {
+                "type": "string"
+              },
+              "bbox": {
+                "$ref": "#/$defs/bbox_or_null"
+              },
+              "source": {
+                "$ref": "#/$defs/source"
+              },
+              "confidence": {
+                "$ref": "#/$defs/confidence"
+              }
+            }
+          }
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "title",
+              "header",
+              "rows",
+              "bbox",
+              "source",
+              "confidence"
+            ],
+            "properties": {
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "bbox": {
+                "$ref": "#/$defs/bbox_or_null"
+              },
+              "source": {
+                "$ref": "#/$defs/source"
+              },
+              "confidence": {
+                "$ref": "#/$defs/confidence"
+              }
+            }
+          }
+        },
+        "key_values": {
+          "type": "array",
+          "description": "层数、层高、标高、建筑高度、面积、轴网尺寸、构件截面、墙厚、材料强度等级等",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "value",
+              "unit",
+              "raw_text",
+              "bbox",
+              "source",
+              "confidence"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "如 地上层数、1F 层高、KL3 截面"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "raw_text": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "图上原文"
+              },
+              "bbox": {
+                "$ref": "#/$defs/bbox_or_null"
+              },
+              "source": {
+                "$ref": "#/$defs/source"
+              },
+              "confidence": {
+                "$ref": "#/$defs/confidence"
+              }
+            }
+          }
+        },
+        "standards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "name",
+              "source",
+              "confidence"
+            ],
+            "properties": {
+              "code": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "如 GB 50016-2014（2018年版）"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "如 建筑设计防火规范"
+              },
+              "source": {
+                "$ref": "#/$defs/source"
+              },
+              "confidence": {
+                "$ref": "#/$defs/confidence"
+              }
+            }
+          }
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "description"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "字迹不清",
+              "图签缺失",
+              "疑似多张图",
+              "文字层与图像不一致",
+              "其他"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "bbox": {
+            "$ref": "#/$defs/bbox_or_null"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "enum": [
+        "text_layer",
+        "vision",
+        "both"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "bbox_or_null": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "[x0, y0, x1, y1]，相对整页宽高，原点左上角"
+        }
+      ]
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "source",
+        "confidence"
+      ],
+      "properties": {
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "raw_text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "图上原文，与 value 不同时填写"
+        },
+        "source": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/source"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confidence": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/confidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
