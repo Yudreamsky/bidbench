@@ -42,3 +42,4 @@ Desktop.ini
 /demo-project/
 /samples/out/
 *.sqlite
+*.egg-info/

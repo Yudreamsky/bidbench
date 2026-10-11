@@ -1,0 +1,649 @@
+"""派生状态：图纸台账、版本合并、批次性质、缺图、关系、事实层、问题清单。
+
+输入只有两类：收到的批次（及其识别结果）和人的决定。派生结果每次重新计算，
+因此“截至第 N 批”的状态可以随时还原，差异报告就是相邻两批状态的比较。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+from . import pdfpages
+from .store import Project, latest_decisions, now_iso
+
+SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
+SAME_DHASH = 10       # 差值哈希距离阈值（256 位）
+FULL_REISSUE = 0.8    # 图号覆盖率达到它，判断为整套重发
+
+STATUS_LABEL = {
+    "current": "现行", "new": "本批新增", "updated": "本批升版", "changed": "有变更单",
+    "conflict": "冲突", "pending_void": "作废还是漏发待确认", "voided": "已作废", "missing": "缺失",
+}
+CONF_LABEL = {"confirmed": "人工确认", "high": "高置信", "mid": "中置信", "low": "低置信", "conflict": "冲突"}
+
+DISCIPLINES = [("建", "建筑"), ("结", "结构"), ("水", "给排水"), ("暖", "暖通"), ("电", "电气"),
+               ("A", "建筑"), ("S", "结构"), ("P", "给排水"), ("M", "暖通"), ("N", "暖通"), ("E", "电气"), ("D", "电气")]
+FACT_GROUPS = [
+    ("工程概况", ("层数", "建筑高度", "屋面标高", "结构形式", "抗震", "面积", "耐火", "防水等级")),
+    ("楼层", ("层高",)),
+    ("结构构件", ("截面", "墙厚", "混凝土", "钢筋")),
+]
+
+
+# ---------------- 规范化 ----------------
+
+def norm_no(s: str | None) -> str | None:
+    """图号规范化：去空格，统一连接符，数字补到两位。建施05 / 建施 -5 / 建施－05 → 建施-05。"""
+    if not s:
+        return None
+    s = re.sub(r"\s+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
+    m = re.match(r"^(.*?)-?(\d+)([A-Z]?)$", s)
+    if not m or not m.group(1):
+        return s
+    return f"{m.group(1)}-{int(m.group(2)):02d}{m.group(3)}"
+
+
+def no_parts(no: str) -> tuple[str, int | None]:
+    m = re.match(r"^(.*)-(\d+)[A-Z]?$", no)
+    return (m.group(1), int(m.group(2))) if m else (no, None)
+
+
+def discipline_of(no: str) -> str:
+    for prefix, name in DISCIPLINES:
+        if no.startswith(prefix):
+            return name
+    return "其他"
+
+
+def rev_key(rev: str | None) -> tuple | None:
+    """版次排序键：A<B<C，0<1<2；无法比较返回 None。"""
+    if not rev:
+        return None
+    r = re.sub(r"[版第次\s]", "", rev).upper()
+    m = re.match(r"^([A-Z]*)(\d*)$", r)
+    if not m or not r:
+        return None
+    letters = sum((ord(c) - 64) * 27 ** i for i, c in enumerate(reversed(m.group(1))))
+    return (letters, int(m.group(2) or 0))
+
+
+def norm_value(v) -> str:
+    s = re.sub(r"\s+", "", str(v)).replace("－", "-").replace("—", "-")
+    try:
+        return format(float(s), "g")
+    except ValueError:
+        pass
+    s = s.replace("-", "")
+    return s[:-2] if s.endswith("结构") else s
+
+
+def norm_fact_key(name: str) -> str:
+    return re.sub(r"\s+", "", name).replace("～", "~")
+
+
+def fact_group(name: str, is_standard: bool) -> str:
+    if is_standard:
+        return "执行规范"
+    for g, words in FACT_GROUPS:
+        if any(w in name for w in words):
+            return g
+    return "其他"
+
+
+# ---------------- 数据装载 ----------------
+
+@dataclass
+class PageRec:
+    page_id: str
+    file_sha: str
+    page_index: int
+    render_hash: str
+    dhash: str
+    text: str
+    paths: list            # 截至当前批次的所有出处
+    batches: list          # 出现过的批次号
+    first_batch: int
+    rec: dict | None       # 识别结果（自己的或复用像素相同页面的）
+    rec_borrowed: bool = False
+
+
+@dataclass
+class Sheet:
+    no: str
+    title: str | None = None
+    discipline: str = "其他"
+    pages: list = field(default_factory=list)  # [(rev, PageRec)]
+
+
+def _load(con, as_of: int):
+    pages_rows = con.execute(
+        "SELECT p.* FROM pages p WHERE EXISTS (SELECT 1 FROM occurrences o WHERE o.sha256=p.file_sha256 AND o.batch_seq<=?)",
+        (as_of,),
+    ).fetchall()
+    occ = defaultdict(list)
+    for o in con.execute("SELECT * FROM occurrences WHERE batch_seq<=? ORDER BY batch_seq, id", (as_of,)):
+        occ[o["sha256"]].append(o)
+    recs = {r["page_id"]: json.loads(r["data"]) for r in con.execute("SELECT * FROM recognitions")}
+    by_hash = {}
+    for r in pages_rows:
+        if r["page_id"] in recs:
+            by_hash.setdefault(r["render_hash"], recs[r["page_id"]])
+    out = []
+    for r in pages_rows:
+        o = occ[r["file_sha256"]]
+        rec = recs.get(r["page_id"])
+        borrowed = False
+        if rec is None and r["render_hash"] in by_hash:
+            rec, borrowed = by_hash[r["render_hash"]], True
+        out.append(PageRec(
+            page_id=r["page_id"], file_sha=r["file_sha256"], page_index=r["page_index"],
+            render_hash=r["render_hash"], dhash=r["dhash"], text=r["text"],
+            paths=[x["path"] + (f"（第 {r['page_index']} 页）" if _multi_page(con, r["file_sha256"]) else "") for x in o],
+            batches=sorted({x["batch_seq"] for x in o}), first_batch=min(x["batch_seq"] for x in o),
+            rec=rec, rec_borrowed=borrowed,
+        ))
+    return out
+
+
+_mp_cache: dict = {}
+
+
+def _multi_page(con, sha: str) -> bool:
+    if sha not in _mp_cache:
+        _mp_cache[sha] = (con.execute("SELECT page_count FROM files WHERE sha256=?", (sha,)).fetchone() or [1])[0] > 1
+    return _mp_cache[sha]
+
+
+def _in_nested_archive(path: str) -> bool:
+    """出处路径形如“批次#3 / 外层.zip / 结构 / 补充图纸.zip / 结施-03.pdf”，中间再出现压缩包即为内层。"""
+    parts = path.split(" / ")
+    return any(p.lower().endswith((".zip", ".rar", ".7z", ".tar", ".tgz", ".gz")) for p in parts[2:-1])
+
+
+def _val(rec, key):
+    return (rec["title_block"].get(key) or {}).get("value")
+
+
+def _same_content(a: PageRec, b: PageRec) -> bool:
+    if a.render_hash == b.render_hash:
+        return True
+    return (pdfpages.text_similarity(a.text, b.text) >= SAME_TEXT
+            and pdfpages.dhash_distance(a.dhash, b.dhash) <= SAME_DHASH)
+
+
+# ---------------- 主计算 ----------------
+
+def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> dict:
+    with proj.connect() as con:
+        batches = [dict(b) for b in con.execute("SELECT * FROM batches ORDER BY seq")]
+        if not batches:
+            return {"project": proj.meta, "generated_at": now_iso(), "as_of": 0, "batches": [], "sheets": [],
+                    "edges": [], "issues": [], "facts": {"groups": []}, "baselines": [], "notices": [],
+                    "recognition": {"pages": 0, "recognized": 0, "executors": {}}}
+        as_of = as_of or batches[-1]["seq"]
+        batches = [b for b in batches if b["seq"] <= as_of]
+        decisions = latest_decisions(con)
+        pages = _load(con, as_of)
+        ext_issues = [dict(r) for r in con.execute(
+            "SELECT * FROM extraction_issues WHERE batch_seq<=? ORDER BY id", (as_of,))]
+        baselines_rows = [dict(r) for r in con.execute("SELECT * FROM baselines WHERE as_of_batch<=?", (as_of,))]
+        file_counts = {r["batch_seq"]: dict(r) for r in con.execute(
+            "SELECT o.batch_seq, COUNT(*) AS n, SUM(f.kind='pdf') AS pdf, SUM(o.depth>1) AS nested"
+            " FROM occurrences o JOIN files f ON f.sha256=o.sha256 WHERE f.kind!='archive' GROUP BY o.batch_seq")}
+
+    state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of)
+    if with_diff and as_of > 1:
+        prev = build(proj, as_of - 1, with_diff=False)
+        state["diff"] = diff_states(prev, state)
+    elif with_diff:
+        state["diff"] = diff_states(None, state)
+    return state
+
+
+def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of):
+    sheets: dict[str, Sheet] = {}
+    notices = []  # 变更单、答疑等非图纸文件
+    unrecognized = []
+    for p in pages:
+        if p.rec is None:
+            unrecognized.append(p)
+            continue
+        kind = p.rec["page_kind"]
+        no = norm_no(_val(p.rec, "drawing_no"))
+        if kind in ("变更单", "答疑或澄清"):
+            notices.append(p)
+            continue
+        if not no:
+            continue
+        s = sheets.setdefault(no, Sheet(no=no, discipline=discipline_of(no)))
+        s.pages.append((_val(p.rec, "revision"), p))
+
+    issues: list[dict] = []
+    current_page: dict[str, PageRec] = {}
+    sheet_out: dict[str, dict] = {}
+
+    # ---- 版本链与现行版 ----
+    for no, s in sorted(sheets.items()):
+        by_rev: dict[str, list[PageRec]] = defaultdict(list)
+        for rev, p in s.pages:
+            by_rev[rev or "?"].append(p)
+        revisions = []
+        for rev, plist in by_rev.items():
+            groups: list[list[PageRec]] = []
+            for p in sorted(plist, key=lambda x: x.first_batch):
+                for g in groups:
+                    if _same_content(g[0], p):
+                        g.append(p)
+                        break
+                else:
+                    groups.append([p])
+            first_batch = min(p.first_batch for p in plist)
+            date = next((_val(p.rec, "issue_date") for p in plist if _val(p.rec, "issue_date")), None)
+            revisions.append({"rev": rev, "key": rev_key(rev), "date": date, "first_batch": first_batch,
+                              "groups": groups})
+        revisions.sort(key=lambda r: (r["key"] is None, r["key"] or (0, 0), r["date"] or "", r["first_batch"]))
+        override = decisions.get(("sheet_current", no))
+        cur = revisions[-1]
+        if override:
+            cur = next((r for r in revisions if r["rev"] == override["value"]), cur)
+        status, notes = "current", []
+
+        # 同图号同版次但内容不同
+        pick = decisions.get(("sheet_pick", f"{no}|{cur['rev']}"))
+        conflict_groups = len(cur["groups"]) > 1
+        chosen_group = cur["groups"][-1]
+        if conflict_groups and pick:
+            chosen_group = next((g for g in cur["groups"] if any(p.page_id == pick["value"] for p in g)), chosen_group)
+            conflict_groups = False
+            notes.append(f"{cur['rev']} 版存在内容不同的多个文件，已按人工决定采用其中一份。")
+        cp = chosen_group[0]
+        current_page[no] = cp
+        title = _val(cp.rec, "drawing_title")
+        s.title = title
+        if conflict_groups:
+            status = "conflict"
+            batches_desc = "、".join(f"批次#{g[0].first_batch}" for g in cur["groups"])
+            issues.append(_issue("crit", "版本冲突", f"rev_dup:{no}", f"{no} {title or ''}".strip(),
+                                 f"{batches_desc} 的 {no} 都标为 {cur['rev']} 版，但内容不同，可能改图未升版。",
+                                 {"sheet": no},
+                                 [{"label": f"采用批次#{g[0].first_batch} 的文件", "kind": "sheet_pick",
+                                   "key": f"{no}|{cur['rev']}", "value": g[0].page_id} for g in cur["groups"]]))
+        # 版次倒退：更晚的批次带来更低的版次
+        for r in revisions:
+            if r is not cur and r["key"] and cur["key"] and r["key"] < cur["key"] and r["first_batch"] > cur["first_batch"]:
+                status = "conflict"
+                issues.append(_issue("crit", "版本冲突", f"rev_regress:{no}", f"{no} 版次倒退",
+                                     f"批次#{r['first_batch']} 带来 {r['rev']} 版，比批次#{cur['first_batch']} 的 {cur['rev']} 版更低。",
+                                     {"sheet": no},
+                                     [{"label": f"以 {x['rev']} 版为现行", "kind": "sheet_current", "key": no, "value": x["rev"]}
+                                      for x in (cur, r)]))
+        if status == "current":
+            if len(revisions) > 1 and cur["first_batch"] == as_of:
+                status = "updated"
+            elif cur["first_batch"] == as_of and as_of > 1 and min(r["first_batch"] for r in revisions) == as_of:
+                status = "new"
+        vlist = []
+        for r in revisions:
+            for g in r["groups"]:
+                state_txt = "现行" if (r is cur and g is chosen_group) else ("内容不同，待确认" if r is cur and conflict_groups else "已替代")
+                vlist.append({"rev": r["rev"], "date": r["date"], "batch": g[0].first_batch, "state": state_txt,
+                              "page_id": g[0].page_id, "paths": sorted({x for p in g for x in p.paths})})
+        sheet_out[no] = {
+            "no": no, "title": title, "discipline": s.discipline, "status": status,
+            "current_rev": cur["rev"], "current_page": cp.page_id, "versions": vlist,
+            "paths": cp.paths, "inner": all(_in_nested_archive(x) for x in cp.paths),
+            "notes": notes, "borrowed": cp.rec_borrowed,
+        }
+
+    # ---- 变更单 ----
+    notice_out = []
+    for p in notices:
+        affected = sorted({norm_no(r["target_drawing_no"]) for r in p.rec["references"] if r["target_drawing_no"]})
+        nid = re.sub(r"\s+", "", _val(p.rec, "drawing_no") or "") or p.page_id
+        notice_out.append({"id": nid, "title": _val(p.rec, "drawing_title"), "kind": p.rec["page_kind"],
+                           "page_id": p.page_id, "batch": p.first_batch, "affects": affected, "paths": p.paths})
+        for no in affected:
+            if no in sheet_out:
+                sheet_out[no]["notes"].append(f"{nid}（批次#{p.first_batch}）修改了此图的局部，相关内容以变更文件为准。")
+                if sheet_out[no]["status"] in ("current", "updated", "new"):
+                    sheet_out[no]["status"] = "changed"
+
+    # ---- 批次性质 ----
+    known_before: set[str] = set()
+    batch_out = []
+    sheets_in_batch = defaultdict(set)
+    for no, s in sheets.items():
+        for _, p in s.pages:
+            for b in p.batches:
+                sheets_in_batch[b].add(no)
+    catalog_in_batch = defaultdict(bool)
+    for s in sheets.values():
+        for _, p in s.pages:
+            if p.rec["page_kind"] == "图纸目录":
+                for b in p.batches:
+                    catalog_in_batch[b] = True
+    notice_batches = {n["batch"] for n in notice_out}
+    pending_void: dict[str, int] = {}
+    for b in batches:
+        seq = b["seq"]
+        here = sheets_in_batch[seq]
+        kinds, conf = [], "中"
+        if seq == 1 or not known_before:
+            kinds, conf = ["首次发图"], "高"
+        else:
+            cover = len(here & known_before) / max(len(known_before), 1)
+            name = b["name"] + b["archive_name"]
+            if cover >= FULL_REISSUE or (catalog_in_batch[seq] and cover >= 0.5):
+                kinds, conf = ["整套重发"], "高" if cover >= FULL_REISSUE else "中"
+                for no in sorted(known_before - here):
+                    pending_void[no] = seq
+            elif here & known_before:
+                kinds.append("部分修改")
+            if here - known_before and "整套重发" not in kinds:
+                kinds.append("补充图纸")
+            if seq in notice_batches:
+                kinds.append("变更单")
+            if re.search(r"作废", name):
+                kinds.append("作废通知")
+            if not kinds:
+                kinds, conf = ["无图纸"], "低"
+        for no in here:
+            pending_void.pop(no, None)  # 后来又出现了
+        known_before |= here
+        fc = file_counts.get(seq, {})
+        batch_out.append({
+            "seq": seq, "name": b["name"], "received_at": b["received_at"], "archive": b["archive_name"],
+            "kinds": kinds, "confidence": conf, "sheets": len(here),
+            "files": fc.get("n", 0), "pdf": fc.get("pdf", 0) or 0,
+            "issues": [i for i in ext_issues if i["batch_seq"] == seq],
+        })
+
+    for no, seq in pending_void.items():
+        d = decisions.get(("sheet_void", no))
+        if d and d["value"] == "voided":
+            sheet_out[no]["status"] = "voided"
+            continue
+        if d and d["value"] == "keep":
+            continue
+        sheet_out[no]["status"] = "pending_void"
+        issues.append(_issue("warn", "作废还是漏发", f"void:{no}", f"{no} {sheet_out[no]['title'] or ''}".strip(),
+                             f"批次#{seq} 判断为整套重发，但其中没有这张图。是作废了，还是漏发了？",
+                             {"sheet": no},
+                             [{"label": "确认已作废", "kind": "sheet_void", "key": no, "value": "voided"},
+                              {"label": "仍然有效（漏发）", "kind": "sheet_void", "key": no, "value": "keep"}]))
+
+    live = {no for no, s in sheet_out.items() if s["status"] != "voided"}
+
+    # ---- 关系 ----
+    edges, dangling = [], defaultdict(list)
+    for no, p in current_page.items():
+        if no not in live:
+            continue
+        for r in p.rec["references"]:
+            t = norm_no(r["target_drawing_no"])
+            if not t or t == no:
+                continue
+            etype = "cross" if discipline_of(t) != discipline_of(no) else "ref"
+            edges.append({"from": no, "to": t, "type": etype, "label": r["raw_text"], "bbox": r["bbox"],
+                          "page_id": p.page_id})
+            if t not in live:
+                dangling[t].append(no)
+
+    # ---- 缺图 ----
+    listed: dict[str, dict] = {}
+    for no, p in current_page.items():
+        if p.rec["page_kind"] == "图纸目录" and no in live:
+            for e in p.rec["catalog_entries"]:
+                t = norm_no(e["drawing_no"])
+                if t:
+                    listed[t] = {"catalog": no, "title": e["drawing_title"], "rev": e["revision"]}
+    missing: dict[str, dict] = {}
+    for t, info in listed.items():
+        if t not in sheet_out:
+            missing.setdefault(t, {"no": t, "title": info["title"], "evidence": [], "level": "高"})
+            missing[t]["evidence"].append(f"目录 {info['catalog']} 列出")
+            edges.append({"from": info["catalog"], "to": t, "type": "catalog", "label": "目录列出", "bbox": None,
+                          "page_id": current_page[info["catalog"]].page_id})
+    for t, froms in dangling.items():
+        if t in sheet_out:
+            continue  # 已作废的图仍被引用：在下面单独提示
+        missing.setdefault(t, {"no": t, "title": None, "evidence": [], "level": "高"})
+        missing[t]["evidence"].append("被 " + "、".join(sorted(set(froms))) + " 引用")
+    for t, froms in dangling.items():
+        if t in sheet_out and sheet_out[t]["status"] == "voided":
+            issues.append(_issue("warn", "引用已作废图纸", f"ref_void:{t}", f"{t} 已作废但仍被引用",
+                                 "引用它的图纸：" + "、".join(sorted(set(froms))), {"sheet": t}, []))
+    # 编号断号
+    by_prefix = defaultdict(set)
+    for no in list(sheet_out) + list(listed):
+        pre, n = no_parts(no)
+        if n is not None:
+            by_prefix[pre].add(n)
+    for pre, nums in by_prefix.items():
+        if len(nums) < 3:
+            continue
+        for n in range(min(nums), max(nums)):
+            t = f"{pre}-{n:02d}"
+            if n not in nums and t not in missing:
+                missing[t] = {"no": t, "title": None, "evidence": [f"{pre} 编号断号"], "level": "中", "gap": True}
+    for t, m in sorted(missing.items()):
+        d = decisions.get(("missing", t))
+        if d and d["value"] == "not_needed":
+            continue
+        if d and d["value"] == "ask":
+            m["confirmed"] = True
+        m["status"] = "missing"
+        desc = "；".join(m["evidence"]) + "，但截至目前所有批次中都没有。"
+        issues.append(_issue("crit" if m["level"] == "高" else "warn", "缺图",
+                             f"missing:{t}", f"{t} {m['title'] or ''}".strip(), desc, {"sheet": t},
+                             [{"label": "列入答疑，向招标方要图", "kind": "missing", "key": t, "value": "ask"},
+                              {"label": "确认不需要（作废或笔误）", "kind": "missing", "key": t, "value": "not_needed"}],
+                             level_word=m["level"], confirmed=bool(m.get("confirmed"))))
+    missing = {t: m for t, m in missing.items() if m.get("status") == "missing"}
+
+    # ---- 解包问题 ----
+    for i in ext_issues:
+        label = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷",
+                 "too_deep": "嵌套过深", "too_large": "超出上限"}.get(i["kind"], i["kind"])
+        issues.append(_issue("warn", "解包问题", f"extract:{i['id']}", f"{label}：{i['path'].split(' / ')[-1]}",
+                             f"{i['detail']}。位置：{i['path']}。这里面可能藏着缺失的图纸。", {"batch": i["batch_seq"]}, []))
+
+    # ---- 未识别页面 ----
+    if unrecognized:
+        issues.append(_issue("info", "待识别", "unrecognized", f"{len(unrecognized)} 页尚未识别",
+                             "运行 bidbench tasks 生成识别任务包，跑完后 bidbench import。", {}, []))
+    weak = [p for p in pages if p.rec and any(x["type"] in ("其他", "图签缺失") for x in p.rec["issues"])]
+    if weak:
+        issues.append(_issue("info", "识别不完整", "weak_rec", f"{len(weak)} 页识别不完整",
+                             "包括扫描件或缺少图签的页面，需要交给多模态执行器复核。", {}, []))
+
+    # ---- 事实层 ----
+    facts = _facts(sheets, sheet_out, current_page, notices, decisions, issues, live)
+
+    # ---- 图纸基线 ----
+    baselines = []
+    for b in baselines_rows:
+        snap = json.loads(b["snapshot"])
+        outdated = [{"sheet": no, "base_rev": rev, "current_rev": sheet_out[no]["current_rev"]}
+                    for no, rev in sorted(snap.items()) if no in sheet_out and sheet_out[no]["current_rev"] != rev]
+        voided = [no for no in snap if no in sheet_out and sheet_out[no]["status"] == "voided"]
+        baselines.append({"name": b["name"], "created_at": b["created_at"], "as_of_batch": b["as_of_batch"],
+                          "sheets": len(snap), "outdated": outdated, "voided": voided, "note": b["note"]})
+        if outdated or voided:
+            desc = "；".join(f"{o['sheet']} {o['base_rev']}→{o['current_rev']}" for o in outdated)
+            if voided:
+                desc += ("；" if desc else "") + "已作废：" + "、".join(voided)
+            issues.append(_issue("warn", "基线过期", f"baseline:{b['name']}", f"任务「{b['name']}」用的图纸已更新",
+                                 desc + "。", {"sheet": (outdated[0]["sheet"] if outdated else voided[0])}, []))
+
+    # ---- 汇总 ----
+    sheets_list = list(sheet_out.values())
+    for t, m in sorted(missing.items()):
+        sheets_list.append({"no": t, "title": m["title"], "discipline": discipline_of(t), "status": "missing",
+                            "current_rev": None, "current_page": None, "versions": [], "paths": [],
+                            "inner": False, "notes": m["evidence"], "missing_level": m["level"],
+                            "confirmed": bool(m.get("confirmed")), "borrowed": False})
+    sheets_list.sort(key=lambda s: (_disc_order(s["discipline"]), no_parts(s["no"])[0], no_parts(s["no"])[1] or 0, s["no"]))
+    order = {"crit": 0, "warn": 1, "info": 2}
+    issues.sort(key=lambda i: (order[i["level"]], i["kind"], i["title"]))
+    executors = defaultdict(int)
+    for p in pages:
+        if p.rec and not p.rec_borrowed:
+            executors[p.rec["run"]["executor"]] += 1
+    return {
+        "project": proj.meta, "generated_at": now_iso(), "as_of": as_of,
+        "batches": batch_out, "sheets": sheets_list, "edges": edges, "notices": notice_out,
+        "issues": issues, "facts": facts, "baselines": baselines,
+        "recognition": {"pages": len(pages), "recognized": sum(1 for p in pages if p.rec),
+                        "borrowed": sum(1 for p in pages if p.rec_borrowed), "executors": dict(executors)},
+    }
+
+
+def _disc_order(d: str) -> int:
+    order = ["建筑", "结构", "给排水", "暖通", "电气", "其他"]
+    return order.index(d) if d in order else len(order)
+
+
+def _issue(level, kind, iid, title, detail, target, options, level_word=None, confirmed=False):
+    return {"id": iid, "level": level, "kind": kind, "title": title, "detail": detail, "target": target,
+            "options": options, "level_word": level_word, "confirmed": confirmed}
+
+
+def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live):
+    ev_by_key: dict[str, list] = defaultdict(list)
+    names: dict[str, str] = {}
+    is_std: dict[str, bool] = {}
+
+    def add(key, name, value, unit, raw, sheet, rev, page, source, conf, active, std=False):
+        names.setdefault(key, name)
+        is_std[key] = std
+        ev_by_key[key].append({"sheet": sheet, "rev": rev, "page_id": page.page_id, "value": value, "unit": unit,
+                               "text": raw, "source": source, "confidence": conf, "active": active})
+
+    for no, s in sheets.items():
+        if no not in live:
+            continue
+        cur = current_page[no]
+        for rev, p in s.pages:
+            active = p.render_hash == cur.render_hash or (rev == sheet_out[no]["current_rev"] and p is cur)
+            for kv in p.rec["content"]["key_values"]:
+                if kv["value"] is None:
+                    continue
+                add(norm_fact_key(kv["name"]), kv["name"], str(kv["value"]), kv["unit"], kv["raw_text"],
+                    no, rev, p, kv["source"], kv["confidence"], active)
+            for st in p.rec["content"]["standards"]:
+                if not st["code"]:
+                    continue
+                key = re.sub(r"[（(].*$", "", st["code"]).replace(" ", "")
+                add(key, st["name"] or key, st["code"], None, st["code"] + (f" {st['name']}" if st["name"] else ""),
+                    no, rev, p, st["source"], st["confidence"], active, std=True)
+
+    groups: dict[str, list] = defaultdict(list)
+    for key, evs in ev_by_key.items():
+        # 同一页面重复出现的同值证据只算一次
+        uniq, seen = [], set()
+        for e in evs:
+            k = (e["sheet"], e["rev"], e["page_id"], norm_value(e["value"]))
+            if k not in seen:
+                seen.add(k)
+                uniq.append(e)
+        act = [e for e in uniq if e["active"]]
+        stale = [e for e in uniq if not e["active"]]
+        if not act:
+            continue
+        values = defaultdict(list)
+        for e in act:
+            values[norm_value(e["value"])].append(e)
+        ranked = sorted(values.values(), key=lambda es: (-len({e["sheet"] for e in es}), es[0]["sheet"]))
+        best = ranked[0]
+        display = best[0]["value"] + (f" {best[0]['unit']}" if best[0]["unit"] and best[0]["unit"] not in ("层", "度") else (best[0]["unit"] or ""))
+        note = None
+        d = decisions.get(("fact", key))
+        if d:
+            conf = "confirmed"
+            display = d["value"]
+            note = f"人工确认（{d['created_at'][:10]}）" + (f"：{d['note']}" if d["note"] else "")
+        elif len(values) > 1:
+            conf = "conflict"
+            parts = "；".join(f"{es[0]['value']}（{'、'.join(sorted({e['sheet'] for e in es}))}）" for es in ranked)
+            note = f"来源不一致：{parts}。"
+            issues.append(_issue("crit", "事实冲突", f"fact:{key}", f"{names[key]}：" + " / ".join(es[0]["value"] for es in ranked),
+                                 note, {"fact": key},
+                                 [{"label": f"采用 {es[0]['value']}", "kind": "fact", "key": key,
+                                   "value": es[0]["value"] + (f" {es[0]['unit']}" if es[0]["unit"] else "")} for es in ranked]))
+        else:
+            srcs = {e["sheet"] for e in best}
+            if len(srcs) >= 2:
+                conf = "high"
+            elif all(e["source"] in ("text_layer", "both") for e in best):
+                conf = "mid"
+            else:
+                conf = "low"
+        changed = [e for e in stale if norm_value(e["value"]) not in values]
+        if changed and conf != "confirmed":
+            old = changed[0]
+            up = f"来源已升版：{old['sheet']} {old['rev']} 版为 {old['value']}，现行版为 {best[0]['value']}。"
+            note = (note + " " if note else "") + up
+        groups[fact_group(names[key], is_std[key])].append({
+            "key": key, "name": names[key], "value": display, "conf": conf, "note": note,
+            "evidence": act + stale, "sources": sorted({e["sheet"] for e in act}),
+        })
+    order = ["工程概况", "楼层", "结构构件", "执行规范", "其他"]
+    return {"groups": [{"id": g, "label": g, "facts": sorted(groups[g], key=lambda f: f["name"])}
+                       for g in order if groups.get(g)]}
+
+
+# ---------------- 差异报告 ----------------
+
+def diff_states(prev: dict | None, cur: dict) -> dict:
+    ps = {s["no"]: s for s in (prev or {}).get("sheets", [])}
+    cs = {s["no"]: s for s in cur["sheets"]}
+    out = {"batch": cur["as_of"], "upgraded": [], "added": [], "resolved_missing": [], "new_missing": [],
+           "new_conflicts": [], "pending_void": [], "fact_changes": [], "baselines": []}
+    for no, s in cs.items():
+        p = ps.get(no)
+        if s["status"] == "missing":
+            if not p or p["status"] != "missing":
+                out["new_missing"].append(no)
+            continue
+        if p is None or p["status"] == "missing":
+            out["added"].append(no)
+            if p and p["status"] == "missing":
+                out["resolved_missing"].append(no)
+        elif p["current_rev"] != s["current_rev"]:
+            out["upgraded"].append(f"{no} {p['current_rev']}→{s['current_rev']}")
+        if s["status"] == "conflict" and (not p or p["status"] != "conflict"):
+            out["new_conflicts"].append(no)
+        if s["status"] == "pending_void" and (not p or p["status"] != "pending_void"):
+            out["pending_void"].append(no)
+    pf = {f["key"]: f for g in (prev or {}).get("facts", {}).get("groups", []) for f in g["facts"]}
+    for g in cur["facts"]["groups"]:
+        for f in g["facts"]:
+            old = pf.get(f["key"])
+            if old and (old["value"] != f["value"] or old["conf"] != f["conf"]):
+                out["fact_changes"].append(f"{f['name']}：{old['value']}（{CONF_LABEL[old['conf']]}）→ {f['value']}（{CONF_LABEL[f['conf']]}）")
+            elif not old and prev is not None:
+                out["fact_changes"].append(f"新增 {f['name']}：{f['value']}")
+    for b in cur["baselines"]:
+        if b["outdated"]:
+            out["baselines"].append(f"{b['name']}：" + "、".join(f"{o['sheet']} {o['base_rev']}→{o['current_rev']}" for o in b["outdated"]))
+    return out
+
+
+def create_baseline(proj: Project, name: str, sheets: list[str] | None = None, note: str | None = None) -> dict:
+    """锁定一份图纸基线：记下当前每张图的现行版次。以后图纸升版时，系统会提示这个任务用的图过期了。"""
+    st = build(proj, with_diff=False)
+    pick = {norm_no(x) for x in sheets} if sheets else None
+    snap = {s["no"]: s["current_rev"] for s in st["sheets"]
+            if s["current_rev"] and s["status"] not in ("missing", "voided") and (pick is None or s["no"] in pick)}
+    if pick:
+        unknown = pick - set(snap)
+        if unknown:
+            raise ValueError("这些图号不在现行图纸中：" + "、".join(sorted(unknown)))
+    with proj.connect() as con:
+        con.execute("INSERT OR REPLACE INTO baselines(name, created_at, as_of_batch, snapshot, note) VALUES (?,?,?,?,?)",
+                    (name, now_iso(), st["as_of"], json.dumps(snap, ensure_ascii=False), note))
+    return snap
