@@ -79,6 +79,7 @@ def main(argv=None) -> int:
     debuglog.setup("desktop", hooks=not args.smoke)
 
     appconfig.apply_secrets()
+    threading.Thread(target=release.cleanup_downloads, name="清理旧的更新下载", daemon=True).start()
     httpd = serve(_initial_project(args.project), port=0, mode="desktop")
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

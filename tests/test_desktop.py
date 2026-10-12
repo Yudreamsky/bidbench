@@ -3,10 +3,13 @@
 import hashlib
 import io
 import json
+import os
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -159,7 +162,7 @@ def test_settings_never_echo_the_key(running, demo_copy, monkeypatch):
 
 # ---------------- 安装版更新 ----------------
 
-def _fake_github(monkeypatch, builds, payload=b"installer-bytes", bad_sha=False):
+def _fake_github(monkeypatch, builds, payload=b"installer-bytes", bad_sha=False, broken=False):
     sha = hashlib.sha256(b"tampered" if bad_sha else payload).hexdigest()
     rels = [{"tag_name": f"b{n}", "name": f"0.2.0 构建 {n}", "published_at": f"2026-10-{n:02d}T00:00:00Z", "draft": False,
              "prerelease": False, "body": f"- 功能 {n}\n- 修复 {n}\n\n<!-- commit: abc{n} -->",
@@ -180,13 +183,17 @@ def _fake_github(monkeypatch, builds, payload=b"installer-bytes", bad_sha=False)
         def __exit__(self, *a):
             return False
 
+    class Broken(Resp):  # 下载到一半断网
+        def read(self, *a):
+            raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+
     def fake_open(url, timeout=30):
         seen.append(url)
         if "api.github.com" in url:
             return Resp(json.dumps(rels).encode())
         if url.endswith(".sha256"):
             return Resp(f"{sha}  x.exe\n".encode())
-        return Resp(payload)
+        return Broken(payload) if broken else Resp(payload)
 
     monkeypatch.setattr(release, "_open", fake_open)
     return seen
@@ -205,14 +212,23 @@ def test_release_check_apply_rollback(monkeypatch):
     assert release.check()["status"] == "up_to_date"
 
 
+def _downloads():
+    return sorted(Path(tempfile.gettempdir()).glob(release.DOWNLOAD_PREFIX + "*"))
+
+
 def test_release_rejects_bad_checksum_and_uses_mirror(monkeypatch):
     monkeypatch.setenv("BIDBENCH_BUILD_OVERRIDE", "1")
     _fake_github(monkeypatch, [2], bad_sha=True)
     with pytest.raises(release.UpdateError, match="校验不通过"):
         release.apply()
+    _fake_github(monkeypatch, [2], broken=True)
+    with pytest.raises(release.UpdateError, match="下载中断了"):
+        release.apply()
+    assert _downloads() == []  # 没成功的下载连临时文件夹一起删掉
     seen = _fake_github(monkeypatch, [2])
     appconfig.update_settings(download_prefix="https://mirror.example/")
     release.apply()
+    assert len(_downloads()) == 1
     assert any(u.startswith("https://mirror.example/https://github.com/") for u in seen)
     assert all(u.startswith("https://api.github.com") for u in seen if "api" in u)  # 查询接口不走加速前缀
 
@@ -233,7 +249,31 @@ def test_installed_update_job_launches_installer(running, demo_copy, monkeypatch
     assert j["status"] == "done" and launched and launched[0].endswith("bidbench-setup-b2.exe") and quits
 
 
-def test_desktop_smoke(demo_copy, capsys):
+def test_old_update_downloads_are_cleaned_up():
+    tmp, now = Path(tempfile.gettempdir()), time.time()
+
+    def make(name, dir_age, file_age=None):
+        d = tmp / name
+        d.mkdir()
+        f = d / "bidbench-setup-b3.exe"
+        f.write_bytes(b"x" * 1024)
+        os.utime(f, (now - (dir_age if file_age is None else file_age),) * 2)
+        os.utime(d, (now - dir_age,) * 2)  # 先写文件再改文件夹时间，写文件会刷新文件夹时间
+        return d
+
+    old = make("bidbench-update-old", 2 * 3600)
+    busy = make("bidbench-update-busy", 2 * 3600, file_age=60)  # 文件夹早就建了、文件还在写：正在下载
+    fresh = make("bidbench-update-new", 60)  # 刚装完，安装程序可能还没退出
+    other = make("someone-else", 2 * 3600)
+    assert release.cleanup_downloads() == 1
+    assert not old.exists() and busy.exists() and fresh.exists() and other.exists()
+    assert release.cleanup_downloads() == 0
+
+
+def test_desktop_smoke(demo_copy, capsys, monkeypatch):
+    cleaned = threading.Event()
+    monkeypatch.setattr(release, "cleanup_downloads", cleaned.set)
     assert desktop.main(["--smoke", str(demo_copy.root)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] and out["installed"] is False
+    assert cleaned.wait(5)  # 启动时在后台清掉以前的更新下载
