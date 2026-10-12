@@ -1,7 +1,7 @@
-"""安装版的更新：从公开的发布仓库下载新的安装包，校验后静默安装，装完自动重新打开。
+"""安装版的更新：从 GitHub Releases 下载新的安装包，校验后静默安装，装完自动重新打开。
 
 只有安装版（PyInstaller 打包）走这里；用 git clone 安装的继续用 updater.py 的 git 更新。
-发布仓库只放安装包，源码仓库可以保持私有，程序不需要任何密码。
+仓库是公开的，查询和下载都不需要任何密码。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from . import __version__, appconfig
 from ._build import BUILD, COMMIT
 from .updater import UpdateError
 
-RELEASES_REPO = "Yudreamsky/bidbench-releases"
+RELEASES_REPO = "Yudreamsky/bidbench"
 API = f"https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=30"
 TAG = re.compile(r"^b(\d+)$")
 TIMEOUT = 30
@@ -45,7 +45,7 @@ def _open(url: str, timeout: int = TIMEOUT):
         if e.code == 403:
             raise UpdateError("GitHub 暂时限制了查询次数，过一会儿再试。") from e
         if e.code == 404:
-            raise UpdateError(f"没有找到发布仓库 {RELEASES_REPO}，请确认它是公开的。") from e
+            raise UpdateError(f"没有找到 {RELEASES_REPO} 的发布，请确认仓库是公开的。") from e
         raise UpdateError(f"GitHub 返回错误 {e.code}，稍后再试。") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise UpdateError("连不上 GitHub，请检查网络后重试；下载慢可以在设置里填下载加速前缀。") from e

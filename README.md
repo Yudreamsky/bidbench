@@ -12,7 +12,7 @@
 
 ## 安装（Windows）
 
-到 [发布页](https://github.com/Yudreamsky/bidbench-releases/releases) 下载最新的 `bidbench-setup-b*.exe`，双击安装，
+到 [发布页](https://github.com/Yudreamsky/bidbench/releases) 下载最新的 `bidbench-setup-b*.exe`，双击安装，
 开始菜单里打开“投标图纸工作台”。这是一个独立窗口，收图、识别、导出、设置都在里面点按钮完成；
 有新版本时点“更新并重启”就能升级。详见 [docs/安装与更新.md](docs/安装与更新.md)。
 

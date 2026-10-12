@@ -1,5 +1,5 @@
-# Windows 安装包：每个 PR 都打包并自检（产物可在 Actions 页面下载试用）；合并到 main 后发布到公开的发布仓库。
-# 发布需要在仓库 Secrets 里配置 RELEASES_TOKEN（只对 bidbench-releases 有 Contents 读写权限的令牌）。
+# Windows 安装包：每个 PR 都打包并自检（产物可在 Actions 页面下载试用）；合并到 main 后发布到本仓库的 Releases。
+# 发布用 Actions 自带的 GITHUB_TOKEN，不需要另配令牌。
 name: windows-installer
 
 on:
@@ -16,13 +16,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASES_REPO: Yudreamsky/bidbench-releases
   PYTHONUTF8: "1"
 
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: write  # 只有推送到 main 时才用来建发布
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,24 +99,15 @@ jobs:
             dist/bidbench-setup-*.exe.sha256
           retention-days: 14
 
-      - name: 发布到 ${{ env.RELEASES_REPO }}
+      - name: 发布到 Releases
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::没有配置 RELEASES_TOKEN，本次只打包不发布"
-            exit 0
-          fi
-          # 发布仓库还是空的（没有任何提交）时，先放一个说明文件，否则无法建发布
-          if ! gh api "repos/$RELEASES_REPO/commits?per_page=1" >/dev/null 2>&1; then
-            printf '%s\n' "# 投标图纸工作台 安装包" "" "在 Releases 里下载最新的 bidbench-setup-b*.exe 安装。装好后在工作台里点“更新”即可升级。" > README.md
-            gh api -X PUT "repos/$RELEASES_REPO/contents/README.md" -f message="说明" -f content="$(base64 -w0 README.md)" >/dev/null
-          fi
-          prev=$(gh release view --repo "$RELEASES_REPO" --json body -q .body 2>/dev/null | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1)
+          prev=$(gh release view --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1 || true)  # 第一次发布时还没有任何 Release
           python packaging/release_notes.py "$prev" > notes.md
           cat notes.md
           b="b${{ github.run_number }}"
-          gh release create "$b" --repo "$RELEASES_REPO" --title "$APP_VERSION 构建 ${{ github.run_number }}" \
+          gh release create "$b" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$APP_VERSION 构建 ${{ github.run_number }}" \
             --notes-file notes.md "dist/bidbench-setup-$b.exe" "dist/bidbench-setup-$b.exe.sha256"
