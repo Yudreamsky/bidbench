@@ -89,6 +89,19 @@ bidbench recognize --executor claude --tier strong --scope weak       # 强档�
 - 中断后用 `--task <任务包>` 续跑，已完成的页面会跳过。凭据缺失、模型不可用时第一页就会停下。
 - 图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。
 
+## 压缩包支持
+
+| 格式 | 怎么解 | 需要安装什么 |
+| --- | --- | --- |
+| zip（含 GBK 文件名、ZipCrypto 加密）、tar | Python 自带 | 不需要 |
+| rar4 / rar5、7z（不加密） | 系统自带的 bsdtar | Windows 10 及以上、macOS 自带，不需要；Linux 装 `libarchive-tools` |
+| 加密的 rar | unrar 或 7-Zip | 装 WinRAR 或 7-Zip（Windows 会自动找默认安装目录） |
+| 加密的 7z | py7zr 或 7-Zip | `pip install -e ".[archives]"`（约 20 MB，主要是加密库），或装 7-Zip |
+
+默认安装不增加任何体积。按 bsdtar → unrar → 7-Zip 的顺序尝试，成功即停；任何工具失败都整体作废，不用解了一半的文件。
+压缩包里的符号链接一律跳过；含符号链接的压缩包只用 bsdtar 解，防止被链接带到压缩包以外。
+一个工具都没有时，解包报告会写明需要装什么。分卷压缩包（`.part1.rar`、`.z01`）目前仍需先手工合并。
+
 ## 楼层覆盖检查
 
 按图名（“一层平面图”“三层梁配筋图”“地下一层平面图”“屋顶平面图”“3~20层平面图”）读出每张图覆盖的楼层；
@@ -112,7 +125,7 @@ bidbench recognize --executor claude --tier strong --scope weak       # 强档�
 
 | 环节 | 说明 | 代码 |
 | --- | --- | --- |
-| 收图与解包 | 原件只读保存；zip / tar 原生支持，7z / rar 可选；GBK 文件名修复；加密、损坏、分卷、缺工具都登记为问题 | `bidbench/ingest.py` |
+| 收图与解包 | 原件只读保存；zip / tar 原生支持，rar / 7z 调用系统解压工具；GBK 文件名修复；加密、损坏、分卷、缺工具都登记为问题 | `bidbench/ingest.py`、`bidbench/extractors.py` |
 | 去重 | 文件级 SHA-256；页面级像素指纹（合订本中的一页能对上单独的 PDF）；内容级差值哈希 + 文字相似度 | `bidbench/pdfpages.py` |
 | 识别 | 任务包 + `spec/schema.json` 约定输出；执行器可替换；导入前严格校验 | `bidbench/recognition.py`、`bidbench/executors/` |
 | 派生状态 | 台账、版本链、现行版、冲突、作废还是漏发、缺图、关系、事实层、基线 | `bidbench/state.py` |

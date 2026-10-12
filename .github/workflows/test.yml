@@ -13,7 +13,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - name: 解压工具（bsdtar、7-Zip）
+        run: sudo apt-get update -q && sudo apt-get install -y -q libarchive-tools p7zip-full
+      - run: pip install -e ".[dev,archives]"
       - run: pytest -q
       - name: 演示流水线
         run: ./samples/run_demo.sh /tmp/demo-project

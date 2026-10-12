@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-archives = ["py7zr>=0.20", "rarfile>=4.1"]
+archives = ["py7zr>=0.20"]  # 可选：加密 7z；rar 和普通 7z 用系统自带的 tar / 7-Zip / WinRAR
 claude = ["anthropic>=1.13"]
 dev = ["pytest>=8", "anthropic>=1.13"]
 

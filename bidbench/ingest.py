@@ -17,7 +17,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import pdfpages
+from . import extractors, pdfpages
 from .store import Project, sha256_file
 
 MAX_DEPTH = 8
@@ -261,44 +261,74 @@ class _Receiver:
 
     def _open_7z(self, disk: Path, display: str, depth: int) -> None:
         try:
-            import py7zr  # type: ignore
+            import py7zr  # type: ignore  # 可选：装了就优先用（支持加密 7z）
         except ImportError:
-            self.issue(display, "no_tool", "7z 压缩包需要安装 py7zr（pip install bidbench[archives]）")
-            return
-        try:
-            with py7zr.SevenZipFile(disk, password=(self.passwords[0].decode() if self.passwords else None)) as z, \
-                    tempfile.TemporaryDirectory() as td:
-                if z.needs_password() and not self.passwords:
-                    self.issue(display, "encrypted", "压缩包已加密，需要密码")
+            py7zr = None
+        if py7zr is not None:
+            try:
+                with py7zr.SevenZipFile(disk) as z:
+                    needs_pw = z.needs_password()
+                    size = sum(f.uncompressed for f in z.list() if not f.is_directory)
+                if needs_pw and not self.passwords:
+                    self.issue(display, "encrypted", "压缩包已加密，需要密码（bidbench receive --password ...）")
                     return
-                z.extractall(td)
-                self._walk_dir(Path(td), display, depth)
-        except Exception as e:  # noqa: BLE001
-            self.issue(display, "corrupt", f"7z 解压失败：{e}")
+                if not self._budget(size, display):
+                    return
+                for pwd in ([p.decode() for p in self.passwords] if needs_pw else [None]):
+                    with tempfile.TemporaryDirectory() as td:
+                        try:
+                            with py7zr.SevenZipFile(disk, password=pwd) as z:
+                                z.extractall(td)
+                        except Exception:  # noqa: BLE001 - 密码不对等，换下一个
+                            continue
+                        self._walk_dir(Path(td), display, depth)
+                        return
+                self.issue(display, "encrypted", "提供的密码都不对，压缩包未能解开")
+                return
+            except Exception:  # noqa: BLE001 - py7zr 不支持的压缩方式等，交给系统工具
+                pass
+        self._open_external(disk, display, depth, "7z")
 
     def _open_rar(self, disk: Path, display: str, depth: int) -> None:
-        try:
-            import rarfile  # type: ignore
-        except ImportError:
-            self.issue(display, "no_tool", "rar 压缩包需要安装 rarfile 及 unrar/bsdtar 工具")
+        self._open_external(disk, display, depth, "rar")
+
+    def _open_external(self, disk: Path, display: str, depth: int, kind: str) -> None:
+        size = extractors.listed_size(disk)
+        if size is not None and not self._budget(size, display):
             return
-        try:
-            with rarfile.RarFile(disk) as rf, tempfile.TemporaryDirectory() as td:
-                if rf.needs_password() and not self.passwords:
-                    self.issue(display, "encrypted", "压缩包已加密，需要密码")
-                    return
-                if self.passwords:
-                    rf.setpassword(self.passwords[0].decode())
-                rf.extractall(td)
+        with tempfile.TemporaryDirectory() as td:
+            out = extractors.extract(disk, Path(td), kind, [p.decode() for p in self.passwords])
+            if out.ok:
                 self._walk_dir(Path(td), display, depth)
-        except Exception as e:  # noqa: BLE001
-            self.issue(display, "no_tool" if "unrar" in str(e).lower() else "corrupt", f"rar 解压失败：{e}")
+                return
+        if not out.tool:
+            self.issue(display, "no_tool", out.message)
+        elif out.encrypted and self.passwords:
+            self.issue(display, "encrypted", f"压缩包已加密，提供的密码没能解开，或本机解压工具不支持这种加密方式。{out.tool}：{out.message}")
+        elif out.encrypted:
+            self.issue(display, "encrypted", f"压缩包已加密，需要密码（bidbench receive --password ...）。{out.tool}：{out.message}")
+        else:
+            self.issue(display, "corrupt", f"{out.tool} 解压失败，可能是加密、分卷不全或文件损坏：{out.message}")
 
     def _walk_dir(self, root: Path, display: str, depth: int) -> None:
+        """登记解出的普通文件。符号链接一律跳过，防止借链接读到压缩包以外的文件。"""
+        root_r = root.resolve()
+        skipped = 0
         for p in sorted(root.rglob("*")):
-            if p.is_file():
-                rel = p.relative_to(root).parts
-                self.handle(p, display + SEP + SEP.join(rel), depth + 1)
+            if p.is_symlink():
+                skipped += 1
+                continue
+            if not p.is_file():
+                continue
+            try:
+                p.resolve().relative_to(root_r)
+            except ValueError:
+                skipped += 1
+                continue
+            rel = p.relative_to(root).parts
+            self.handle(p, display + SEP + SEP.join(rel), depth + 1)
+        if skipped:
+            self.issue(display, "symlink", f"压缩包里有 {skipped} 个符号链接，出于安全考虑已跳过")
 
 
 def receive(proj: Project, archive: Path, received_at: str, name: str | None = None,
