@@ -1,4 +1,5 @@
-; Inno Setup 安装脚本（需要 6.5 以上，自带简体中文）。
+﻿; Inno Setup 安装脚本（6.5 以上）。简体中文界面用同目录的 ChineseSimplified.isl（取自 Inno Setup 官方仓库）。
+; 本文件和 .isl 都用带 BOM 的 UTF-8 保存，Inno Setup 才不会按本地代码页读错中文。
 ; 用法：iscc /DAppVersion=0.2.0 /DBuild=42 packaging\bidbench.iss
 ; 装到当前用户目录，不需要管理员权限，所以更新时可以静默安装、不弹 UAC。
 
@@ -39,7 +40,7 @@ RestartApplications=no
 ChangesEnvironment=yes
 
 [Languages]
-Name: "chs"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chs"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "在桌面创建快捷方式"
