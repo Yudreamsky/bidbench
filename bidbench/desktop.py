@@ -19,7 +19,7 @@ from . import __version__, appconfig, release
 from .server import serve
 from .store import Project
 
-ARCHIVE_TYPES = ("压缩包 (*.zip;*.rar;*.7z;*.tar;*.tgz;*.gz)", "所有文件 (*.*)")
+RECEIVE_TYPES = ("压缩包和图纸 (*.zip;*.rar;*.7z;*.tar;*.tgz;*.gz;*.pdf;*.dwg;*.dxf)", "所有文件 (*.*)")
 
 
 class DesktopApi:
@@ -28,10 +28,11 @@ class DesktopApi:
     def __init__(self):
         self._window = None  # 下划线开头：pywebview 不会把它暴露给页面
 
-    def pick_archive(self):
+    def pick_files(self):
+        """收图用：可以一次选多个文件（同一次收到的放在一批）。"""
         import webview
-        r = self._window.create_file_dialog(webview.FileDialog.OPEN, file_types=ARCHIVE_TYPES)
-        return r[0] if r else None
+        r = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True, file_types=RECEIVE_TYPES)
+        return list(r) if r else None
 
     def pick_folder(self, start: str = ""):
         import webview

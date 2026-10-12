@@ -22,7 +22,12 @@ def cmd_init(args):
 
 
 def cmd_receive(args):
-    ops.receive(_proj(args), Path(args.archive), args.date, args.name, args.password, args.note, av=not args.no_av)
+    def progress(n, total):
+        if total >= 20:  # 文件多时显示进度
+            print(f"\r  已处理 {n}/{total} 个文件", end="" if n < total else "\n", flush=True)
+
+    ops.receive(_proj(args), [Path(a) for a in args.archive], args.date, args.name, args.password, args.note,
+                av=not args.no_av, progress=progress)
 
 
 def cmd_scan(args):
@@ -302,8 +307,8 @@ def main(argv=None):
     s.add_argument("--name", required=True)
     s.set_defaults(fn=cmd_init)
 
-    s = sub.add_parser("receive", help="收图：登记一个压缩包为新批次并递归解包")
-    s.add_argument("archive")
+    s = sub.add_parser("receive", help="收图：把一个压缩包、文件、文件夹（或同时收到的几个文件）登记为新批次并递归解包")
+    s.add_argument("archive", nargs="+", help="压缩包、文件或文件夹；给多个文件时算同一批")
     s.add_argument("--date", required=True, help="收图日期 YYYY-MM-DD")
     s.add_argument("--name")
     s.add_argument("--password", action="append", default=[], help="压缩包密码，可多次指定")

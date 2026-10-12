@@ -1,4 +1,4 @@
-"""生成一套合成的投标图纸收图批次（4 个压缩包），用来演示和测试整条流水线。
+"""生成一套合成的投标图纸收图批次（4 个压缩包 + 1 个文件夹），用来演示和测试整条流水线。
 
 覆盖的情况：
 - 批次1 首次发图：建施-09（目录列出）、结施-03（目录列出）缺失；建施-03 引用不存在的建施-12；立面剖面合订本；
@@ -9,6 +9,8 @@
   风险文件（内容都是无害的占位）：结构文件夹里的 acad.lsp、双扩展名的“查看说明.pdf.exe”、带宏的 xlsm、
   打开即运行脚本的结施-04 PDF
 - 批次4 补充：电施-01 同为 B 版但内容不同（改图未升版）；设计变更单；压缩包文件名为 GBK 编码
+- 批次5 文件夹（build_folder）：补发建施-09、建施-12；文件夹里直接放的“电气.zip”（外层包，不算内层）
+  里面再套一个压缩包（内层）；夹着系统缩略图缓存 Thumbs.db 和 Office 临时锁文件 ~$*.docx（不该收）
 
 用法：python samples/make_sample.py <输出目录>
 """
@@ -257,7 +259,33 @@ def build(out: Path) -> list[tuple[Path, str]]:
     return out_list
 
 
+FOLDER_NAME = "1020补充"
+
+
+def build_folder(out: Path) -> tuple[Path, str]:
+    """第 5 批：发图方直接给了一个文件夹（共享盘、网盘下载下来的那种），不是压缩包。"""
+    root = out / FOLDER_NAME
+    h = [("A", "2026-10-20", "补发")]
+    files = {
+        "建筑/建施-09 楼梯大样.pdf": sheet_pdf("建施-09", "楼梯大样", "A", "2026-10-20", ["梯段宽 1.30 m", "栏杆做法详见建施-08"], h, "1:50"),
+        "建筑/建施-12 幕墙节点详图.pdf": sheet_pdf("建施-12", "幕墙节点详图", "A", "2026-10-20", ["幕墙龙骨 120×60"], h, "1:10"),
+        "电气.zip": make_zip({
+            "电施-02 动力平面图.pdf": sheet_pdf("电施-02", "动力平面图", "A", "2026-10-20", ["动力回路 P1~P4"], h),
+            "补充/应急照明.zip": make_zip({
+                "电施-03 应急照明平面图.pdf": sheet_pdf("电施-03", "应急照明平面图", "A", "2026-10-20", ["应急照明回路 E1~E2"], h),
+            }),
+        }),
+        "建筑/Thumbs.db": b"\0" * 32,
+        "~$招标说明.docx": "（Office 打开文档时留下的临时锁文件）".encode("utf-8"),
+    }
+    for rel, data in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return root, "2026-10-20"
+
+
 if __name__ == "__main__":
     target = Path(sys.argv[1] if len(sys.argv) > 1 else "samples/out")
-    for p, date in build(target):
+    for p, date in [*build(target), build_folder(target)]:
         print(f"{date}  {p}")

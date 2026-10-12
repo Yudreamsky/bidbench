@@ -6,6 +6,7 @@
 - unrar（WinRAR 自带的 UnRAR）：支持加密、各版本 rar
 - 7-Zip（7z / 7za / 7zz）：支持 7z、加密；是否支持 rar 取决于发行版
 
+Windows 上除了 PATH 和默认安装目录，还按注册表找装在别处的 7-Zip、WinRAR。
 任何工具返回失败都整体作废，不使用解了一半的文件（加密包会解出乱码）。
 """
 
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TIMEOUT = 3600
+UNREADABLE_NAME = "unreadable filename"  # bsdtar：文件名里有本机字符集表示不了的字符（中文 Windows 上的 Ø 等）
 
 
 @dataclass
@@ -28,6 +30,7 @@ class Outcome:
     tool: str
     encrypted: bool = False
     message: str = ""
+    password: str | None = None  # 解开时用的密码
 
 
 def _env() -> dict:
@@ -51,29 +54,55 @@ def _first(*candidates: str) -> str | None:
     return None
 
 
+def _registry_values(subkey: str, names: tuple[str, ...]) -> list[str]:
+    """读 HKLM / HKCU 下软件登记的安装位置（64 位和 32 位视图都看）。不是 Windows 时返回空。"""
+    if os.name != "nt":
+        return []
+    import winreg
+
+    out = []
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ | view) as k:
+                    for name in names:
+                        try:
+                            value = winreg.QueryValueEx(k, name)[0]
+                        except OSError:
+                            continue
+                        if isinstance(value, str) and value and value not in out:
+                            out.append(value)
+            except OSError:
+                continue
+    return out
+
+
 @functools.lru_cache(maxsize=None)
 def find_unrar() -> str | None:
-    return _first("unrar", "UnRAR", r"C:\Program Files\WinRAR\UnRAR.exe", r"C:\Program Files (x86)\WinRAR\UnRAR.exe")
+    registered = [os.path.join(os.path.dirname(exe), "UnRAR.exe") for exe in _registry_values(r"SOFTWARE\WinRAR", ("exe64", "exe32"))]
+    return _first("unrar", "UnRAR", r"C:\Program Files\WinRAR\UnRAR.exe", r"C:\Program Files (x86)\WinRAR\UnRAR.exe", *registered)
 
 
 @functools.lru_cache(maxsize=None)
 def find_7z() -> str | None:
-    return _first("7zz", "7z", "7za", r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe")
+    registered = [os.path.join(d, "7z.exe") for d in _registry_values(r"SOFTWARE\7-Zip", ("Path64", "Path"))]
+    return _first("7zz", "7z", "7za", r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe", *registered)
 
 
 @functools.lru_cache(maxsize=None)
 def find_bsdtar() -> str | None:
-    p = shutil.which("bsdtar")
-    if p:
-        return p
-    tar = shutil.which("tar")
-    if not tar:
-        return None
-    try:
-        out = subprocess.run([tar, "--version"], capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return tar if "bsdtar" in out or "libarchive" in out else None
+    cands = []
+    if os.name == "nt":  # 系统自带的那个优先：PATH 里可能先排着 Git 等带来的 GNU tar
+        cands.append(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tar.exe"))
+    cands += [shutil.which("bsdtar"), shutil.which("tar")]
+    for tar in dict.fromkeys(c for c in cands if c and os.path.isfile(c)):
+        try:
+            out = subprocess.run([tar, "--version"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if "bsdtar" in out or "libarchive" in out:
+            return tar
+    return None
 
 
 def no_tool_hint(kind: str) -> str:
@@ -133,23 +162,23 @@ def extract(archive: Path, dest: Path, kind: str, passwords: list[str]) -> Outco
     压缩包含符号链接时，bsdtar 失败后不再换其他工具，避免老版本工具被链接带到压缩包以外。
     """
     _size, has_link = inspect(archive)
-    attempts: list[tuple[str, list[list[str]]]] = []
+    attempts: list[tuple[str, list[tuple[list[str], str | None]]]] = []
     pw = passwords or []
     if find_bsdtar():
-        attempts.append(("bsdtar", [[find_bsdtar(), "-x", "-f", str(archive), "-C", str(dest)]]))
+        attempts.append(("bsdtar", [([find_bsdtar(), "-x", "-f", str(archive), "-C", str(dest)], None)]))
     if not (has_link and find_bsdtar()):
         if kind == "rar" and find_unrar():
-            attempts.append(("unrar", [[find_unrar(), "x", "-y", "-idq", f"-p{p}" if p else "-p-", str(archive),
-                                        str(dest) + os.sep] for p in ([None] + pw)]))
+            attempts.append(("unrar", [([find_unrar(), "x", "-y", "-idq", f"-p{p}" if p else "-p-", str(archive),
+                                         str(dest) + os.sep], p) for p in ([None] + pw)]))
         if find_7z():
-            attempts.append(("7-Zip", [[find_7z(), "x", "-y", "-bd", f"-o{dest}", f"-p{p or ''}", str(archive)]
+            attempts.append(("7-Zip", [([find_7z(), "x", "-y", "-bd", f"-o{dest}", f"-p{p or ''}", str(archive)], p)
                                        for p in ([None] + pw)]))
     if not attempts:
         return Outcome(False, "", message=no_tool_hint(kind))
     last = Outcome(False, "")
-    encrypted = False
+    encrypted = bad_names = False
     for tool, cmds in attempts:
-        for cmd in cmds:
+        for cmd, pwd in cmds:
             _clean(dest)
             try:
                 r = _run(cmd)
@@ -157,12 +186,44 @@ def extract(archive: Path, dest: Path, kind: str, passwords: list[str]) -> Outco
                 last = Outcome(False, tool, message=f"{tool} 无法运行：{e}")
                 break
             if r.returncode == 0:
-                return Outcome(True, tool)
+                return Outcome(True, tool, password=pwd)
             msg = _short(r.stderr + "\n" + r.stdout)
             encrypted = encrypted or _looks_encrypted(msg)
+            bad_names = bad_names or (tool == "bsdtar" and UNREADABLE_NAME in r.stderr + r.stdout)
             last = Outcome(False, tool, encrypted, msg)
     _clean(dest)
     last.encrypted = encrypted
+    if bad_names and not encrypted and len(attempts) == 1:
+        last.message = ("Windows 自带的解压工具不认识压缩包里一些文件名中的字符（比如 Ø），整包没能解开。"
+                        "安装 7-Zip 或 WinRAR 后重新收图即可。" + last.message)
+        last.tool = ""  # 和“缺少解压工具”一样处理：装个工具就能解
     if has_link:
         last.message = "压缩包含有符号链接，出于安全考虑只用 bsdtar 尝试。" + last.message
     return last
+
+
+def count_files(archive: Path, tool: str, password: str | None = None) -> int | None:
+    """数一数压缩包里有几个普通文件（不含文件夹和链接），用来核对解出来的有没有少。数不出来时返回 None。"""
+    try:
+        if tool == "bsdtar" and find_bsdtar():
+            r = _run([find_bsdtar(), "-tvf", str(archive)])
+            if r.returncode != 0:
+                return None
+            return sum(1 for ln in r.stdout.splitlines() if ln.startswith("-"))
+        if tool == "7-Zip" and find_7z():
+            r = _run([find_7z(), "l", "-ba", "-slt", f"-p{password or ''}", str(archive)])
+            if r.returncode != 0:
+                return None
+            n = 0
+            for block in r.stdout.replace("\r\n", "\n").split("\n\n"):
+                fields = dict(ln.split(" = ", 1) for ln in block.splitlines() if " = " in ln)
+                if "Path" not in fields or fields.get("Folder") == "+":
+                    continue
+                attrs = fields.get("Attributes", "").split()
+                if attrs and ("D" in attrs[0] or any(len(a) == 10 and a[0] in "dl" for a in attrs)):
+                    continue
+                n += 1
+            return n
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return None

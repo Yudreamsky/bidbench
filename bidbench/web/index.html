@@ -370,7 +370,9 @@ function buildGraph() {
   gsvg.textContent = ''; nodeEls = {}; edgeEls = [];
   if (!S.sheets.length) {
     gsvg.setAttribute('viewBox', '0 0 600 120'); gsvg.style.width = '100%';
-    gsvg.append(sv('text', { x: 300, y: 60, 'text-anchor': 'middle', class: 'band-label' }, '还没有图纸。先用 bidbench receive 收一个压缩包。'));
+    const pages = (S.recognition && S.recognition.pages) || 0;
+    gsvg.append(sv('text', { x: 300, y: 60, 'text-anchor': 'middle', class: 'band-label' },
+      S.batches.length ? `已收 ${pages} 页，还没有识别出图纸。点上方的「识别」。` : '还没有图纸。点上方的「收图」，选压缩包、文件或文件夹。'));
     return;
   }
   const L = layout();
@@ -548,7 +550,7 @@ function renderOverview() {
       el('div', { class: 'stat warn' }, el('b', {}, String(S.issues.filter(i => i.level === 'warn').length)), el('span', {}, '提醒'))),
   ];
   if (!latest()) parts.push(el('div', { class: 'note warn' }, '正在查看历史状态，只读。切回最新批次后才能做决定。'));
-  if (!S.batches.length) parts.push(el('div', { class: 'note' }, '新项目还没有收图。每收到一个压缩包就登记一次。',
+  if (!S.batches.length) parts.push(el('div', { class: 'note' }, '新项目还没有收图。每收到一批图纸（压缩包、文件或文件夹）就登记一次。',
     el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn primary', type: 'button', onclick: renderReceive }, '收图'))));
   const sec = S.security || { files: [], scans: [], pending: 0 };
   if (sec.pending) parts.push(el('div', { class: 'note crit' }, `有 ${sec.pending} 个风险文件待确认。处理之前不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。`));
@@ -593,7 +595,7 @@ function renderOverview() {
     : `${x.engine} 扫描没有完成：${x.message}`;
   parts.push(section('文件安全', el('div', {},
     el('ul', { class: 'list' }, sec.scans.length ? sec.scans.slice(-3).map(x => el('li', {}, scanText(x), el('small', { style: 'display:block;color:var(--muted)' }, x.scanned_at.replace('T', ' '))))
-      : [el('li', {}, '还没有做过杀毒扫描。', el('small', { style: 'display:block;color:var(--muted)' }, 'Windows 上收图时会自动调用 Defender；也可以运行 bidbench scan。'))]),
+      : [el('li', {}, '还没有做过杀毒扫描。', el('small', { style: 'display:block;color:var(--muted)' }, 'Windows 上收图时会自动调用 Defender；也可以点上方的「安全扫描」。'))]),
     sec.files.length ? el('ul', { class: 'list', style: 'margin-top:6px' }, sec.files.map(f => el('li', {},
       el('span', { style: `color:var(${f.level === 'high' ? '--crit' : f.level === 'medium' ? '--warn' : '--muted'})` }, `${f.level_word}风险 `), f.name,
       el('small', { style: 'display:block;color:var(--muted)' }, (f.decision ? RD[f.decision] + '。' : '') + f.findings.join('；')))))
@@ -753,8 +755,11 @@ function showSources(key, no) {
 function clearAll() { ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null; paintGraph(); renderMind(); renderOverview(); }
 
 /* ---------- 桌面工作台：项目、操作、后台任务、设置 ---------- */
-const native = () => window.pywebview && window.pywebview.api;
+// 桌面窗口的本机功能（系统选文件对话框）要等窗口准备好才能用：页面可能先画出来，那时还没有“选择…”按钮，
+// 所以收到 pywebviewready 时把启动页重画一遍。
+const native = () => (window.pywebview && window.pywebview.api && typeof window.pywebview.api.pick_folder === 'function') ? window.pywebview.api : null;
 const launcherEl = document.getElementById('launcher');
+window.addEventListener('pywebviewready', () => { if (!launcherEl.hidden) showLauncher(); });
 const workEl = document.getElementById('work');
 const field = (label, input, hint) => el('label', { class: 'field' }, el('span', {}, label), input, hint ? el('small', {}, hint) : null);
 const input = (attrs) => el('input', { type: 'text', ...attrs });
@@ -825,18 +830,30 @@ function showLauncher() {
 }
 
 function renderReceive() {
-  const path = input({ id: 'rc-path', placeholder: '压缩包路径，例如 D:\\下载\\投标图纸.zip', 'aria-label': '压缩包路径' });
+  let picked = null;  // 用系统对话框选中的文件或文件夹（可以是多个文件）
+  const path = input({ id: 'rc-path', placeholder: '压缩包、文件或文件夹的路径，例如 D:\\下载\\投标图纸.zip', 'aria-label': '收图来源', style: 'width:100%;box-sizing:border-box' });
+  const list = el('small', { id: 'rc-list', class: 'meta' });
+  path.addEventListener('input', () => { picked = null; list.textContent = ''; });
   const day = el('input', { type: 'date', id: 'rc-date', value: APP.today, 'aria-label': '收图日期' });
   const pw = input({ id: 'rc-pw', placeholder: '没有就留空；多个用空格分开', 'aria-label': '压缩包密码' });
   const note = input({ id: 'rc-note', placeholder: '例如：招标代理 9 月 15 日邮件', 'aria-label': '备注' });
-  const pick = async () => { const p = await native().pick_archive(); if (p) path.value = p; };
+  const show = paths => {
+    picked = paths;
+    path.value = paths.length > 1 ? `${paths[0]} 等 ${paths.length} 个文件` : paths[0];
+    list.textContent = paths.length > 1 ? '一起收为一批：' + paths.map(p => p.split(/[\\/]/).pop()).join('、') : '';
+  };
+  const pickFiles = async () => { const r = await native().pick_files(); if (r && r.length) show(r); };
+  const pickFolder = async () => { const p = await native().pick_folder(''); if (p) show([p]); };
+  const btn = (label, fn) => el('button', { class: 'btn', type: 'button', onclick: fn }, label);
   panel.replaceChildren(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
-    el('div', { class: 'ptitle' }, el('h2', {}, '收图'), el('p', { class: 'meta' }, '每收到一个压缩包登记一次。会自动解开内层压缩包、去重、检查风险文件，原件只读保存。')),
-    field('压缩包', el('div', { class: 'form' }, path, native() ? el('button', { class: 'btn', type: 'button', onclick: pick }, '选择…') : null)),
-    field('收图日期', day), field('压缩包密码', pw), field('备注', note),
+    el('div', { class: 'ptitle' }, el('h2', {}, '收图'), el('p', { class: 'meta' }, '每收到一批图纸登记一次。会自动解开（内层）压缩包、去重、检查风险文件，原件只读保存。')),
+    field('收图来源', el('div', {}, path, native() ? el('div', { class: 'opts', style: 'margin-top:6px' }, btn('选择文件…', pickFiles), btn('选择文件夹…', pickFolder)) : null),
+      '压缩包、单个文件、同一次收到的几个文件（在对话框里一起选中），或者整个文件夹（连子文件夹一起收）都可以。'),
+    list, field('收图日期', day), field('压缩包密码', pw), field('备注', note),
     el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => {
-      if (!path.value.trim()) { toast('请先选择压缩包'); return; }
-      startJob('receive', { path: path.value.trim(), date: day.value, passwords: pw.value.split(/\s+/).filter(Boolean), note: note.value.trim(), av: true });
+      const paths = picked || [path.value.trim()];
+      if (!paths[0]) { toast('请先选择压缩包、文件或文件夹'); return; }
+      startJob('receive', { paths, date: day.value, passwords: pw.value.split(/\s+/).filter(Boolean), note: note.value.trim(), av: true });
     } }, '开始收图')),
     el('p', { class: 'meta' }, APP.antivirus ? `收图时会用 ${APP.antivirus} 扫描新文件。` : '本机没有找到杀毒软件，只做静态检查。'));
 }
