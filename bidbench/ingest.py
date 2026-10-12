@@ -17,7 +17,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import extractors, pdfpages
+from . import extractors, pdfpages, risk
 from .store import Project, sha256_file
 
 MAX_DEPTH = 8
@@ -28,6 +28,7 @@ KIND_BY_EXT = {
     ".pdf": "pdf",
     ".dwg": "cad", ".dxf": "cad", ".dwf": "cad",
     ".doc": "office", ".docx": "office", ".xls": "office", ".xlsx": "office", ".wps": "office", ".et": "office",
+    ".docm": "office", ".xlsm": "office", ".ppt": "office", ".pptx": "office", ".pptm": "office",
     ".jpg": "image", ".jpeg": "image", ".png": "image", ".tif": "image", ".tiff": "image", ".bmp": "image",
     ".txt": "text", ".md": "text",
 }
@@ -45,6 +46,7 @@ class ReceiveResult:
     issues: list = field(default_factory=list)
     duplicates: int = 0
     new_pages: int = 0
+    risky: set = field(default_factory=set)  # 有风险的文件（SHA-256）
 
 
 def _ext_of(name: str) -> str:
@@ -55,7 +57,9 @@ def _ext_of(name: str) -> str:
     return os.path.splitext(low)[1]
 
 
-NOT_ARCHIVE_EXTS = (".docx", ".xlsx", ".pptx", ".dwfx", ".xps", ".ofd", ".odt", ".ods")  # 本身是 zip 格式的文档
+NOT_ARCHIVE_EXTS = (".docx", ".xlsx", ".pptx", ".dwfx", ".xps", ".ofd", ".odt", ".ods",  # 本身是 zip 格式的文档
+                    ".docm", ".dotx", ".dotm", ".xlsm", ".xltx", ".xltm", ".xlam", ".pptm", ".potx", ".potm",
+                    ".ppsx", ".ppsm", ".ppam", ".vsdx", ".vsdm", ".jar")
 
 
 def _archive_type(path: Path, name: str) -> str | None:
@@ -113,6 +117,12 @@ class _Receiver:
 
     # ---------- 入口 ----------
     def handle(self, disk: Path, display: str, depth: int) -> None:
+        try:
+            self._handle(disk, display, depth)
+        except OSError as e:
+            self.issue(display, "blocked", f"文件读不出来（{e.strerror or e}），可能已被杀毒软件拦截或隔离")
+
+    def _handle(self, disk: Path, display: str, depth: int) -> None:
         name = display.split(SEP)[-1]
         low = name.lower()
         if any(low.endswith(h) for h in VOLUME_HINTS) or low.endswith((".z02", ".7z.002", ".part2.rar", ".part02.rar")):
@@ -150,9 +160,12 @@ class _Receiver:
         if kind != "archive":
             self.result.files += 1
             self.result.by_kind[kind] = self.result.by_kind.get(kind, 0) + 1
+            self._risk(sha, display, risk.check_name(display.split(SEP)[-1], risk.read_head(disk)))
         if exists:
             return
         stored = self.proj.store_blob(disk, sha, ext)
+        if kind != "archive":
+            self._risk(sha, display, risk.check_content(stored, ext, kind))
         page_count = has_text = None
         attachments = []
         if kind == "pdf":
@@ -181,6 +194,11 @@ class _Receiver:
                 p = Path(td) / (_safe_parts(att_name) or ["附件"])[-1]
                 p.write_bytes(data)
                 self.handle(p, f"{display}{SEP}[附件] {p.name}", depth + 1)
+
+    def _risk(self, sha: str, display: str, findings: list) -> None:
+        risk.record(self.con, self.seq, sha, display, "static", findings)
+        if findings:
+            self.result.risky.add(sha)
 
     def _budget(self, n: int, display: str) -> bool:
         self.total += n

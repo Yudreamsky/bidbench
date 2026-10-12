@@ -147,3 +147,40 @@ def single_page_pdf(path: Path, page_index: int) -> bytes:
         return data
     finally:
         src.close()
+
+
+UNSAFE_ACTIONS = {"/JavaScript", "/Launch", "/RichMediaExecute", "/ImportData", "/SubmitForm", "/Rendition", "/GoToE"}
+
+
+def clean_pdf(path: Path, page_index: int | None = None) -> bytes:
+    """另存一份去掉脚本、启动程序、自动动作和附件的 PDF（图面内容不变）。page_index 为空时保留全部页面。"""
+    src = pymupdf.open(path)
+    try:
+        dst = pymupdf.open()
+        if page_index is None:
+            dst.insert_pdf(src)
+        else:
+            dst.insert_pdf(src, from_page=page_index - 1, to_page=page_index - 1)
+    finally:
+        src.close()
+    try:
+        for x in range(1, dst.xref_length()):
+            try:
+                keys = dst.xref_get_keys(x)
+            except Exception:  # noqa: BLE001 - 非字典对象
+                continue
+            for k in ("AA", "OpenAction", "JS", "JavaScript", "RichMediaContent", "EmbeddedFiles"):
+                if k in keys:
+                    dst.xref_set_key(x, k, "null")
+            if "S" in keys and dst.xref_get_key(x, "S")[1] in UNSAFE_ACTIONS:
+                dst.xref_set_key(x, "S", "null")
+                for k in ("F", "Win", "Mac", "Unix"):
+                    if k in keys:
+                        dst.xref_set_key(x, k, "null")
+            if "FS" in keys:  # 文件附件注释
+                dst.xref_set_key(x, "FS", "null")
+        for name in list(dst.embfile_names()):
+            dst.embfile_del(name)
+        return dst.tobytes(garbage=3, deflate=True)
+    finally:
+        dst.close()

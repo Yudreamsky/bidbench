@@ -8,7 +8,7 @@ import shutil
 from datetime import date
 from pathlib import Path
 
-from . import pdfpages
+from . import pdfpages, risk
 from .recognition import page_markdown
 from .state import CONF_LABEL, STATUS_LABEL
 from .store import Project
@@ -18,16 +18,20 @@ def _safe(s: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", s).strip()
 
 
-def _page_source(proj: Project, page_id: str) -> tuple[Path, int, int]:
+def _page_source(proj: Project, page_id: str) -> tuple[Path, int, int, bool]:
     with proj.connect() as con:
         r = con.execute(
-            "SELECT p.page_index, f.stored_path, f.page_count FROM pages p JOIN files f ON f.sha256=p.file_sha256"
+            "SELECT p.page_index, p.file_sha256, f.stored_path, f.page_count FROM pages p JOIN files f ON f.sha256=p.file_sha256"
             " WHERE p.page_id=?", (page_id,)).fetchone()
-    return proj.root / r["stored_path"], r["page_index"], r["page_count"]
+        unsafe = risk.needs_cleaning(con, r["file_sha256"])
+    return proj.root / r["stored_path"], r["page_index"], r["page_count"], unsafe
 
 
 def page_pdf_bytes(proj: Project, page_id: str) -> bytes:
-    path, idx, count = _page_source(proj, page_id)
+    """单页 PDF。原文件带脚本等风险内容时，给出去掉这些内容的副本。"""
+    path, idx, count, unsafe = _page_source(proj, page_id)
+    if unsafe:
+        return pdfpages.clean_pdf(path, idx if count > 1 else None)
     return path.read_bytes() if count == 1 else pdfpages.single_page_pdf(path, idx)
 
 
@@ -47,7 +51,8 @@ def export_current(proj: Project, state: dict, target: Path | None = None) -> Pa
         d = target / s["discipline"]
         d.mkdir(exist_ok=True)
         (d / name).write_bytes(page_pdf_bytes(proj, s["current_page"]))
-        rows.append(f"| {s['discipline']} | {s['no']} | {s['title'] or ''} | {s['current_rev']} | {STATUS_LABEL[s['status']]} | {s['discipline']}/{name} |")
+        cleaned = "（原文件带脚本，已去除）" if _page_source(proj, s["current_page"])[3] else ""
+        rows.append(f"| {s['discipline']} | {s['no']} | {s['title'] or ''} | {s['current_rev']} | {STATUS_LABEL[s['status']]} | {s['discipline']}/{name}{cleaned} |")
     missing = [s for s in state["sheets"] if s["status"] == "missing"]
     if missing:
         rows += ["", "## 缺失图纸", ""] + [f"- {s['no']} {s['title'] or ''}：{'；'.join(s['notes'])}" for s in missing]

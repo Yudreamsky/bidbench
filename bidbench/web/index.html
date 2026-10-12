@@ -517,6 +517,8 @@ function renderOverview() {
       el('div', { class: 'stat warn' }, el('b', {}, String(S.issues.filter(i => i.level === 'warn').length)), el('span', {}, '提醒'))),
   ];
   if (!latest()) parts.push(el('div', { class: 'note warn' }, '正在查看历史状态，只读。切回最新批次后才能做决定。'));
+  const sec = S.security || { files: [], scans: [], pending: 0 };
+  if (sec.pending) parts.push(el('div', { class: 'note crit' }, `有 ${sec.pending} 个风险文件待确认。处理之前不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。`));
   const props = S.proposals || [];
   if (props.length) parts.push(section(`AI 助手提议（${props.length}）`, el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, props.map(p =>
     el('div', { class: 'issue' },
@@ -553,6 +555,16 @@ function renderOverview() {
     el('span', { style: `color:var(${r.status === 'missing' ? '--warn' : '--muted'})` }, FL[r.status]),
     el('small', { style: 'display:block;color:var(--muted)' },
       (r.covered.map(c => `${c.floors}（${c.sheets[0]}）`).join('；') || '无楼层信息') + (r.missing.length ? `；缺 ${r.missing_text}` : '')))))));
+  const RD = { safe: '已确认安全', dangerous: '已确认有风险' };
+  const scanText = x => x.ok ? `${x.engine} 扫描${x.batch_seq ? '批次 #' + x.batch_seq : '全部文件'}的 ${x.files} 个文件，${x.threats ? '发现 ' + x.threats + ' 个有问题' : '未发现病毒'}`
+    : `${x.engine} 扫描没有完成：${x.message}`;
+  parts.push(section('文件安全', el('div', {},
+    el('ul', { class: 'list' }, sec.scans.length ? sec.scans.slice(-3).map(x => el('li', {}, scanText(x), el('small', { style: 'display:block;color:var(--muted)' }, x.scanned_at.replace('T', ' '))))
+      : [el('li', {}, '还没有做过杀毒扫描。', el('small', { style: 'display:block;color:var(--muted)' }, 'Windows 上收图时会自动调用 Defender；也可以运行 bidbench scan。'))]),
+    sec.files.length ? el('ul', { class: 'list', style: 'margin-top:6px' }, sec.files.map(f => el('li', {},
+      el('span', { style: `color:var(${f.level === 'high' ? '--crit' : f.level === 'medium' ? '--warn' : '--muted'})` }, `${f.level_word}风险 `), f.name,
+      el('small', { style: 'display:block;color:var(--muted)' }, (f.decision ? RD[f.decision] + '。' : '') + f.findings.join('；')))))
+      : el('p', { class: 'meta' }, '静态检查没有发现 CAD 自动加载脚本、可执行文件、宏或带脚本的 PDF。'))));
   const notes = S.notes || [];
   if (notes.length) parts.push(section('项目笔记', el('ul', { class: 'list' }, notes.map(n =>
     el('li', {}, el('b', {}, n.topic), `：${n.text}`, el('small', { style: 'display:block;color:var(--muted)' }, `${n.source}，${n.created_at.slice(0, 10)}`))))));

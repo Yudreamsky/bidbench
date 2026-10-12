@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from . import export, state, updater
 from .store import Project, add_decision
 
-DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact"}
+DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk"}
 
 
 class _App:

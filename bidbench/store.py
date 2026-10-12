@@ -106,6 +106,27 @@ CREATE TABLE IF NOT EXISTS notes(
   source TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS risk_findings(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_seq INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  path TEXT NOT NULL,
+  source TEXT NOT NULL,
+  level TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  detail TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS risk_sha ON risk_findings(sha256);
+CREATE TABLE IF NOT EXISTS av_scans(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_seq INTEGER NOT NULL,
+  engine TEXT NOT NULL,
+  scanned_at TEXT NOT NULL,
+  files INTEGER NOT NULL,
+  threats INTEGER NOT NULL,
+  ok INTEGER NOT NULL,
+  message TEXT
+);
 CREATE TABLE IF NOT EXISTS baselines(
   name TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
@@ -118,6 +139,7 @@ CREATE TABLE IF NOT EXISTS baselines(
 
 # 数据库结构版本。修改已有表的结构时：SCHEMA_SQL 写成最新的样子，SCHEMA_VERSION 加 1，
 # 并在 MIGRATIONS 里写从上一版升级过来的 SQL。旧项目打开时自动升级，升级前先备份数据库。
+# 只新增表（CREATE TABLE IF NOT EXISTS）不用升版本号：旧项目打开时自动建表，回退到旧程序也照样能打开。
 SCHEMA_VERSION = 1
 MIGRATIONS: dict[int, str] = {}
 
