@@ -44,3 +44,5 @@ Desktop.ini
 *.sqlite
 *.egg-info/
 /packaging/build/
+/验收报告/
+/.accept-tmp/
