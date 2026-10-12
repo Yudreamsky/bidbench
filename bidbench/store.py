@@ -88,6 +88,24 @@ CREATE TABLE IF NOT EXISTS decisions(
   actor TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS proposals(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  outcome TEXT
+);
+CREATE TABLE IF NOT EXISTS notes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic TEXT NOT NULL,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS baselines(
   name TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,

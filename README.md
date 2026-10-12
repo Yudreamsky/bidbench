@@ -89,6 +89,12 @@ bidbench recognize --executor claude --tier strong --scope weak       # 强档�
 - 中断后用 `--task <任务包>` 续跑，已完成的页面会跳过。凭据缺失、模型不可用时第一页就会停下。
 - 图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。
 
+## AI 助手（MCP）
+
+`bidbench -p 项目目录 mcp` 把项目作为 MCP 工具集提供给 Claude 桌面版、Claude Code、Codex 等 agent。
+助手能查询图纸、事实、问题、楼层覆盖、批次差异，并起草答疑；**改动只能提议**，在工作台“AI 助手提议”
+或用 `bidbench confirm <编号>` 确认后才生效。接入方法见 [docs/MCP.md](docs/MCP.md)。
+
 ## 压缩包支持
 
 | 格式 | 怎么解 | 需要安装什么 |
