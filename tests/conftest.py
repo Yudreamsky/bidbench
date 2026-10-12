@@ -1,5 +1,6 @@
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -24,8 +25,9 @@ def _recognize(proj):
 
 @pytest.fixture(autouse=True)
 def _isolated_config(tmp_path_factory, monkeypatch):
-    """用户设置（最近项目、API 密钥）和排错日志写到临时目录，不碰真实的用户目录。"""
+    """用户设置（最近项目、API 密钥）、排错日志和临时文件都放进测试自己的目录，不碰真实的用户目录和系统临时文件夹。"""
     monkeypatch.setenv("BIDBENCH_CONFIG_DIR", str(tmp_path_factory.mktemp("cfg")))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.mktemp("tmp")))
     yield
     debuglog.close()  # 命令行测试打开的日志文件用完就关，临时目录才删得掉
 

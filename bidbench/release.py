@@ -7,13 +7,16 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -27,6 +30,8 @@ API = f"https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=30"
 TAG = re.compile(r"^b(\d+)$")
 TIMEOUT = 30
 INSTALLER_ARGS = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
+DOWNLOAD_PREFIX = "bidbench-update-"  # 更新下载放在系统临时文件夹里，以这个开头
+KEEP_DOWNLOADS = 3600  # 秒：启动时清掉更早的更新下载；一小时内动过的留着，可能正在下载或安装
 
 log = logging.getLogger(__name__)
 
@@ -109,9 +114,21 @@ def _mirror(url: str) -> str:
 
 
 def download(rel: dict, dest: Path | None = None, progress=None) -> Path:
-    """下载安装包并按发布时的 SHA-256 校验。"""
-    dest = Path(dest or tempfile.mkdtemp(prefix="bidbench-update-"))
+    """下载安装包并按发布时的 SHA-256 校验。没指定目录时下载到临时文件夹，没成功就连文件夹一起删掉。"""
+    own = dest is None
+    dest = Path(dest or tempfile.mkdtemp(prefix=DOWNLOAD_PREFIX))
     target = dest / rel["installer"].rsplit("/", 1)[-1]
+    try:
+        _fetch(rel, target, progress)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        if own:
+            shutil.rmtree(dest, ignore_errors=True)
+        raise
+    return target
+
+
+def _fetch(rel: dict, target: Path, progress=None) -> None:
     expected = None
     if rel.get("sha256_url"):
         with _open(_mirror(rel["sha256_url"])) as r:
@@ -120,22 +137,55 @@ def download(rel: dict, dest: Path | None = None, progress=None) -> Path:
     done = 0
     with _open(_mirror(rel["installer"]), timeout=120) as r, open(target, "wb") as f:
         total = int(r.headers.get("Content-Length") or rel.get("size") or 0)
-        while chunk := r.read(1 << 20):
+        while True:
+            try:
+                chunk = r.read(1 << 20)
+            except (OSError, http.client.HTTPException) as e:
+                log.warning("下载 %s 中断，已收到 %s 字节：%r", rel["tag"], done, e)
+                raise UpdateError("下载中断了，请重试；下载慢可以在设置里填下载加速前缀。") from e
+            if not chunk:
+                break
             f.write(chunk)
             h.update(chunk)
             done += len(chunk)
             if progress:
                 progress(done, total)
     if expected is None:
-        target.unlink(missing_ok=True)
         log.warning("发布 %s 缺少校验文件", rel["tag"])
         raise UpdateError("发布里缺少校验文件，为安全起见不安装。")
     if h.hexdigest() != expected:
-        target.unlink(missing_ok=True)
         log.warning("安装包校验不通过：%s，下载了 %s 字节", rel["tag"], done)
         raise UpdateError("下载的安装包校验不通过（可能下载不完整或被篡改），已删除，请重试。")
     log.info("已下载并校验安装包 %s（%s 字节）", rel["tag"], done)
-    return target
+
+
+def cleanup_downloads(keep_seconds: int = KEEP_DOWNLOADS) -> int:
+    """清掉以前更新留下的安装包（系统临时文件夹里的 bidbench-update-*），返回清掉了几个。
+
+    装好后安装包就没用了，但安装时它还在运行，当场删不掉，所以留到以后启动时再清。
+    一小时内动过的不删：可能另一个窗口正在下载，或者刚装完还没退出。
+    """
+    cutoff = time.time() - keep_seconds
+    removed = freed = 0
+    try:
+        dirs = [d for d in Path(tempfile.gettempdir()).glob(DOWNLOAD_PREFIX + "*") if d.is_dir()]
+    except OSError:
+        return 0
+    for d in dirs:
+        try:
+            files = [f for f in d.rglob("*") if f.is_file()]
+            if max([d.stat().st_mtime] + [f.stat().st_mtime for f in files]) > cutoff:
+                continue
+            size = sum(f.stat().st_size for f in files)
+        except OSError:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        if not d.exists():
+            removed += 1
+            freed += size
+    if removed:
+        log.info("清掉了 %s 个以前的更新下载（%.0f MB）", removed, freed / 1048576)
+    return removed
 
 
 def _pick(newer: bool) -> dict:
