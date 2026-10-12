@@ -102,3 +102,14 @@ def test_web_script_parses(tmp_path):
     f.write_text(js, encoding="utf-8")
     r = subprocess.run([node, "--check", str(f)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_cli_output_survives_legacy_codepage(demo_copy):
+    """Windows 上输出被重定向时默认是本地代码页，中文和 ✗ ⚠ 等符号不能让命令崩溃。"""
+    import os
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, "-m", "bidbench", "-p", str(demo_copy.root), "build"], capture_output=True,
+                       env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert "图号" in r.stdout.decode("utf-8")

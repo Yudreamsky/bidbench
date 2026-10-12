@@ -24,9 +24,11 @@ a_desktop = analysis("entry_desktop.py")
 a_cli = analysis("entry_cli.py")
 icon = f"{HERE}/build/bidbench.ico"
 
-exe_desktop = EXE(PYZ(a_desktop.pure), a_desktop.scripts, [], exclude_binaries=True,  # noqa: F821
+utf8 = [("X utf8_mode=1", None, "OPTION")]  # 打包后的程序不读 PYTHONUTF8 环境变量，这里直接打开 UTF-8 模式
+
+exe_desktop = EXE(PYZ(a_desktop.pure), a_desktop.scripts, utf8, exclude_binaries=True,  # noqa: F821
                   name="bidbench-desktop", console=False, icon=icon)
-exe_cli = EXE(PYZ(a_cli.pure), a_cli.scripts, [], exclude_binaries=True,  # noqa: F821
+exe_cli = EXE(PYZ(a_cli.pure), a_cli.scripts, utf8, exclude_binaries=True,  # noqa: F821
               name="bidbench", console=True, icon=icon)
 
 COLLECT(exe_desktop, a_desktop.binaries, a_desktop.datas,  # noqa: F821

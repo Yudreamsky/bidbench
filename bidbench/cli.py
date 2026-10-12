@@ -280,7 +280,18 @@ def _version_text() -> str:
     return f"bidbench {__version__}" + (f"（构建 b{BUILD}，{COMMIT[:7]}）" if BUILD else "")
 
 
+def _utf8_output() -> None:
+    """输出一律用 UTF-8。Windows 上输出被重定向或接管道时默认是本地代码页（cp936 / cp1252），中文和符号会报错。"""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv=None):
+    _utf8_output()
     ap = argparse.ArgumentParser(prog="bidbench", description="投标图纸工作台")
     ap.add_argument("-p", "--project", default=".", help="项目目录（默认当前目录）")
     ap.add_argument("--version", action="version", version=_version_text())
