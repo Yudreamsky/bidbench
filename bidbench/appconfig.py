@@ -103,6 +103,18 @@ def public_settings(cfg: dict | None = None) -> dict:
             "download_prefix": cfg.get("download_prefix", "")}
 
 
+def remember(key: str, value) -> None:
+    """记住界面上的选择（识别方式、模型等），下次打开时还是这样。"""
+    cfg = load()
+    cfg.setdefault("prefs", {})[key] = value
+    save(cfg)
+
+
+def prefs() -> dict:
+    p = load().get("prefs")
+    return p if isinstance(p, dict) else {}
+
+
 def default_projects_dir() -> Path:
     docs = Path.home() / "Documents"
     return (docs if docs.exists() else Path.home()) / "bidbench 项目"

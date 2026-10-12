@@ -336,7 +336,7 @@ function renderHeader() {
   document.getElementById('proj-name').textContent = S.project.name;
   const b = S.batches.find(x => x.seq === S.as_of);
   const rec = S.recognition;
-  const ex = Object.entries(rec.executors).map(([k, v]) => `${k === 'simulated' ? '模拟执行器' : k} ${v} 页`).join('、') || '尚未识别';
+  const ex = Object.entries(rec.executors).map(([k, v]) => `${({ simulated: '模拟执行器', claude: 'Claude', codex: 'Codex' })[k] || k} ${v} 页`).join('、') || '尚未识别';
   const meta = document.getElementById('proj-meta');
   meta.replaceChildren(`${S.batches.length} 个收图批次 · ${S.sheets.length} 个图号 · `,
     b ? `截至 ${b.received_at} · ` : '', `已识别 ${rec.recognized}/${rec.pages} 页（${ex}）`,
@@ -868,19 +868,58 @@ function renderReceive() {
     el('p', { class: 'meta' }, APP.antivirus ? `收图时会用 ${APP.antivirus} 扫描新文件。` : '本机没有找到杀毒软件，只做静态检查。'));
 }
 
-function renderRecognize() {
+/* 识别：Codex（ChatGPT 订阅）或 Claude API；可以选模型，记住上次的选择 */
+let RECOG = null;
+async function renderRecognize(refresh) {
+  const back = el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心');
+  const head = el('div', { class: 'ptitle' }, el('h2', {}, '识别图纸'),
+    el('p', { class: 'meta' }, '看图识别图签、内容和引用关系。先估算，确认后再开始。'));
+  panel.replaceChildren(back, head, el('p', { class: 'meta' }, '正在检查本机的 Codex 和 Claude 设置……'));
+  try { RECOG = await (await fetch('/api/recognizers' + (refresh === true ? '?refresh=1' : ''))).json(); } catch (e) { RECOG = null; }
+  const R = RECOG || { claude: { ready: APP.claude_ready, models: [], defaults: {} }, codex: { ready: false, models: [], hint: '读不到 Codex 的状态' }, prefs: {} };
+  const pref = R.prefs || {};
+  const executor = el('select', { id: 'rg-exec', 'aria-label': '识别方式' },
+    el('option', { value: 'codex' }, 'Codex（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费）'));
+  executor.value = pref.executor || (R.codex.ready ? 'codex' : 'claude');
   const scope = el('select', { id: 'rg-scope', 'aria-label': '识别范围' },
     [['new', '新页面（默认）'], ['weak', '识别不完整的页面'], ['conflict', '涉及冲突的页面'], ['all', '全部页面']].map(([v, t]) => el('option', { value: v }, t)));
+  scope.value = pref.scope || 'new';
   const tier = el('select', { id: 'rg-tier', 'aria-label': '档位' },
-    el('option', { value: 'economy' }, '经济档（适合首次全量识别）'), el('option', { value: 'strong' }, '强档（复核冲突、重点图纸）'));
-  panel.replaceChildren(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
-    el('div', { class: 'ptitle' }, el('h2', {}, '识别图纸'),
-      el('p', { class: 'meta' }, '用 Claude 看图识别图签、内容和引用关系。先估算花费，确认后再开始。')),
-    APP.claude_ready ? null : el('div', { class: 'note warn' }, '还没有设置 Claude API 密钥。', el('button', { class: 'btn', type: 'button', onclick: renderSettings, style: 'margin-left:8px' }, '去设置')),
-    el('div', { class: 'note' }, '图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。'),
-    field('范围', scope), field('档位', tier),
-    el('div', { class: 'opts' },
-      el('button', { class: 'btn primary', type: 'button', onclick: () => startJob('estimate', { scope: scope.value, tier: tier.value }) }, '估算花费'),
+    el('option', { value: 'economy' }, '经济档（适合首次全量识别）'), el('option', { value: 'strong' }, '强档（加局部切片，复核冲突、重点图纸）'));
+  tier.value = pref.tier || 'economy';
+  const model = el('select', { id: 'rg-model', 'aria-label': '模型' });
+  const box = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
+  const go = el('button', { class: 'btn primary', type: 'button' });
+  const fill = () => {
+    const ex = executor.value, info = R[ex] || {};
+    const keep = model.value || (pref.executor === ex && pref.model) || '';
+    const first = ex === 'codex' ? `默认（${info.default_model || 'gpt-6.1-sol'}）`
+      : `按档位（经济档 ${(info.defaults || {}).economy || ''}，强档 ${(info.defaults || {}).strong || ''}）`;
+    // Codex 自带的模型说明是英文，只显示名字；Claude 的说明是我们写的中文
+    const opts = [['', first], ...(info.models || []).map(m => [m.slug, m.name + (ex === 'claude' && m.description ? ' — ' + m.description : '')])];
+    model.replaceChildren(...opts.map(([v, t]) => el('option', { value: v }, t)));
+    model.value = opts.some(o => o[0] === keep) ? keep : '';
+    if (ex === 'codex') {
+      box.replaceChildren(...[  // replaceChildren 会把 null 显示成文字，先去掉
+        info.ready ? el('p', { class: 'meta' }, `本机的 Codex ${info.version}，已登录 ChatGPT 账号。`)
+          : el('div', { class: 'note warn' }, info.hint || 'Codex 还不能用。',
+            el('button', { class: 'btn', type: 'button', onclick: () => renderRecognize(true), style: 'margin-left:8px' }, '重新检查')),
+        info.ready && info.hint ? el('div', { class: 'note warn' }, info.hint) : null,
+        el('div', { class: 'note' }, '图纸页面会通过 Codex 发送给 OpenAI 识别。图纸涉密时，先确认这符合项目的保密要求。每页约半分钟到一分钟，占用 ChatGPT 账号的 Codex 额度。')].filter(Boolean));
+      go.textContent = '估算用时';
+    } else {
+      box.replaceChildren(...[
+        info.ready ? null : el('div', { class: 'note warn' }, '还没有设置 Claude API 密钥。', el('button', { class: 'btn', type: 'button', onclick: renderSettings, style: 'margin-left:8px' }, '去设置')),
+        el('div', { class: 'note' }, '图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。按用量付费，先估算花费。')].filter(Boolean));
+      go.textContent = '估算花费';
+    }
+  };
+  executor.addEventListener('change', fill);
+  fill();
+  go.addEventListener('click', () => startJob('estimate', { executor: executor.value, scope: scope.value, tier: tier.value, model: model.value || null }));
+  panel.replaceChildren(back, head, field('识别方式', executor), box, field('范围', scope), field('档位', tier),
+    field('模型', model, '一般用默认；想换模型时在这里选。'),
+    el('div', { class: 'opts' }, go,
       el('button', { class: 'btn', type: 'button', title: '只读 PDF 文字层，扫描件无法识别，用于演示', onclick: () => startJob('recognize', { executor: 'simulated' }) }, '用模拟执行器（演示）')));
 }
 
@@ -995,11 +1034,17 @@ function renderJob(j) {
   const res = j.result;
   if (j.status === 'done' && j.kind === 'estimate') {
     if (!res) parts.push(el('div', { class: 'note' }, '没有需要识别的页面。'));
-    else parts.push(el('div', { class: 'opts' },
-      el('button', { class: 'btn primary', type: 'button', disabled: APP.claude_ready ? null : 'disabled',
-        onclick: () => startJob('recognize', { executor: 'claude', task: res.task, tier: res.tier }) },
-        res.estimated_usd != null ? `开始识别（约 $${res.estimated_usd.toFixed(2)}）` : '开始识别'),
-      APP.claude_ready ? null : el('button', { class: 'btn', type: 'button', onclick: renderSettings }, '先设置 API 密钥')));
+    else {
+      const ex = res.executor || 'claude';
+      const ready = ex === 'codex' ? !RECOG || RECOG.codex.ready : APP.claude_ready;
+      const label = ex === 'codex' ? `开始识别（预计约 ${res.minutes} 分钟）`
+        : res.estimated_usd != null ? `开始识别（约 $${res.estimated_usd.toFixed(2)}）` : '开始识别';
+      parts.push(el('div', { class: 'opts' },
+        el('button', { class: 'btn primary', type: 'button', disabled: ready ? null : 'disabled',
+          onclick: () => startJob('recognize', { executor: ex, task: res.task, tier: res.tier, model: res.model }) }, label),
+        ready ? null : ex === 'codex' ? el('button', { class: 'btn', type: 'button', onclick: () => renderRecognize(true) }, '查看 Codex 状态')
+          : el('button', { class: 'btn', type: 'button', onclick: renderSettings }, '先设置 API 密钥')));
+    }
   }
   if (j.status === 'done' && j.kind === 'export' && res) parts.push(el('div', { class: 'opts' },
     el('button', { class: 'btn primary', type: 'button', onclick: () => openFolder(res.path) }, '打开文件夹'), el('span', { class: 'mono' }, res.path)));

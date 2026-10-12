@@ -46,6 +46,18 @@ PRICES = {
     "claude-sonnet-5-5": (2.00, 10.00),
     "claude-opus-5-5": (4.00, 20.00),
 }
+MODEL_NOTES = {
+    "claude-haiku-5-5": "便宜、快，适合首次全量识别",
+    "claude-sonnet-5-5": "均衡",
+    "claude-opus-5-5": "最强，适合复核冲突页和重点图纸",
+}
+
+
+def model_list() -> list[dict]:
+    """给工作台的模型下拉框。"""
+    return [{"slug": m, "name": m, "description": MODEL_NOTES.get(m, "")} for m in PRICES]
+
+
 # 这些模型支持服务端拒答回退：被安全分类器拒绝时由服务端换模型重跑
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-sonnet-5-5"}
 
@@ -147,7 +159,8 @@ def _sanitize(node):
 
 # ---------------- 图片 ----------------
 
-def _png_b64(path: Path, clip_frac: tuple | None = None) -> str:
+def png_bytes(path: Path, clip_frac: tuple | None = None, max_edge: int = MAX_IMAGE_EDGE) -> bytes:
+    """页面图片（可以只取一块），长边缩到 max_edge 以内。"""
     doc = pymupdf.open(path)
     try:
         page = doc[0]
@@ -155,44 +168,66 @@ def _png_b64(path: Path, clip_frac: tuple | None = None) -> str:
         clip = r if not clip_frac else pymupdf.Rect(
             r.x0 + r.width * clip_frac[0], r.y0 + r.height * clip_frac[1],
             r.x0 + r.width * clip_frac[2], r.y0 + r.height * clip_frac[3])
-        s = min(1.0, MAX_IMAGE_EDGE / max(clip.width, clip.height))
+        s = min(1.0, max_edge / max(clip.width, clip.height))
         pix = page.get_pixmap(matrix=pymupdf.Matrix(s, s), clip=clip, alpha=False)
-        return base64.standard_b64encode(pix.tobytes("png")).decode()
+        return pix.tobytes("png")
     finally:
         doc.close()
+
+
+def _png_b64(path: Path, clip_frac: tuple | None = None) -> str:
+    return base64.standard_b64encode(png_bytes(path, clip_frac)).decode()
 
 
 def _image_block(b64: str) -> dict:
     return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}
 
 
-def build_content(task_dir: Path, item: dict, tiles: int) -> list:
-    content: list = []
+# 页面说明、图片说明和文字层：Claude 和 Codex 执行器共用，保证两边给模型的信息一样
+
+def page_header(item: dict) -> str:
     src = item["source"]
-    content.append({"type": "text", "text": (
-        f"页面编号 {item['page_id']}，文件 {src['file_path']} 第 {src['page_index']}/{src['page_count']} 页，"
-        f"{'有' if src['has_text_layer'] else '没有'} PDF 文字层。")})
+    return (f"页面编号 {item['page_id']}，文件 {src['file_path']} 第 {src['page_index']}/{src['page_count']} 页，"
+            f"{'有' if src['has_text_layer'] else '没有'} PDF 文字层。")
+
+
+TITLEBLOCK_NOTE = "图签区域放大图（页面右下角；图签不在这里时以整页为准）"
+
+
+def page_images(item: dict, tiles: int) -> list[tuple[str, tuple | None, str]]:
+    """要附上的图片：(任务包里的图片, 裁切范围, 说明)。"""
+    out = []
     if item.get("image"):
-        content += [{"type": "text", "text": "整页缩略图："}, _image_block(_png_b64(task_dir / item["image"]))]
+        out.append((item["image"], None, "整页缩略图"))
     if item.get("titleblock_image"):
-        content += [{"type": "text", "text": "图签区域放大图（页面右下角；图签不在这里时以整页为准）："},
-                    _image_block(_png_b64(task_dir / item["titleblock_image"]))]
+        out.append((item["titleblock_image"], None, TITLEBLOCK_NOTE))
     if item.get("image") and tiles > 1:
         for row in range(tiles):
             for col in range(tiles):
                 frac = (col / tiles, row / tiles, (col + 1) / tiles, (row + 1) / tiles)
-                content += [{"type": "text", "text": f"局部切片 第 {row + 1} 行第 {col + 1} 列，对应整页坐标 "
-                                                     f"x {frac[0]:.2f}~{frac[2]:.2f}，y {frac[1]:.2f}~{frac[3]:.2f}："},
-                            _image_block(_png_b64(task_dir / item["image"], frac))]
+                out.append((item["image"], frac, f"局部切片 第 {row + 1} 行第 {col + 1} 列，对应整页坐标 "
+                                                 f"x {frac[0]:.2f}~{frac[2]:.2f}，y {frac[1]:.2f}~{frac[3]:.2f}"))
+    return out
+
+
+def text_layer(task_dir: Path, item: dict) -> str:
     lines = json.loads((task_dir / item["text_lines"]).read_text(encoding="utf-8"))["lines"]
+    if not lines:
+        return "这一页没有文字层，请完全依靠图像识别，source 用 vision。"
     text = "\n".join(f"[{','.join(f'{x:.3f}' for x in ln['bbox'])}] {ln['text']}" for ln in lines)
     note = ""
     if len(text) > MAX_TEXT_CHARS:
         kept = text[:MAX_TEXT_CHARS].rsplit("\n", 1)[0]
         note = f"\n（文字层共 {len(lines)} 行，过长，这里只给出前 {kept.count(chr(10)) + 1} 行；其余内容请从图像识别，并在 issues 里注明文字层被截断。）"
         text = kept
-    content.append({"type": "text", "text": ("PDF 文字层（每行开头是 [x0,y0,x1,y1] 归一化位置）：\n" + text + note)
-                    if lines else "这一页没有文字层，请完全依靠图像识别，source 用 vision。"})
+    return "PDF 文字层（每行开头是 [x0,y0,x1,y1] 归一化位置）：\n" + text + note
+
+
+def build_content(task_dir: Path, item: dict, tiles: int) -> list:
+    content: list = [{"type": "text", "text": page_header(item)}]
+    for image, frac, note in page_images(item, tiles):
+        content += [{"type": "text", "text": note + "："}, _image_block(_png_b64(task_dir / image, frac))]
+    content.append({"type": "text", "text": text_layer(task_dir, item)})
     return content
 
 
@@ -407,25 +442,20 @@ class RunResult:
     structured: bool = True
 
 
-def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
-        tiles: int | None = None, workers: int = 4, client=None, progress=None, log_fn=None) -> RunResult:
-    """log_fn 收到逐页的识别过程（给人看的一行字）。"""
-    cfg = TIERS[tier]
-    model = model or cfg["model"]
-    effort = effort or cfg["effort"]
-    tiles = cfg["tiles"] if tiles is None else tiles
-    if client is None:
-        import anthropic
-        client = anthropic.Anthropic(max_retries=4)
+def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: ProgressLog, model: str = "",
+              progress=None, fatal=None) -> RunResult:
+    """各执行器共用的逐页流程：跳过已有合格结果（续跑）；先单独跑第一页，凭据、模型这类整体性问题在这里暴露，
+    不会让每一页各失败一次；其余页并发。每页一行识别过程日志。
+
+    recognize(item, usage, note) 返回一页的识别记录，单页失败抛 RecognitionError，要停下整次运行抛 FatalError；
+    fatal(e) 判断其他异常是否要停下整次运行（返回给人看的原因），不停就记为这一页失败。
+    """
     task_dir = Path(task_dir)
     manifest = json.loads((task_dir / "manifest_in.json").read_text(encoding="utf-8"))
     out = task_dir / "results" / "pages"
     out.mkdir(parents=True, exist_ok=True)
     validator = jsonschema.Draft202012Validator(load_schema())
-    schema = body_schema()
     res = RunResult(model=model)
-    note = ProgressLog(task_dir, log_fn)
-    mode = _Mode(note)
     t0 = time.monotonic()
     todo = []
     for item in manifest["pages"]:
@@ -438,22 +468,25 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
             except json.JSONDecodeError:
                 pass
         todo.append(item)
+    workers = max(1, workers)
     if todo:
         note(f"开始识别 {len(todo)} 页" + (f"（已有结果的 {res.skipped} 页跳过）" if res.skipped else "")
-             + f"：模型 {model}，effort {effort}，" + (f"局部切片 {tiles}×{tiles}，" if tiles > 1 else "")
-             + f"同时识别 {max(1, workers)} 页。")
-    log.info("识别开始：%s 页，跳过 %s 页，模型 %s，effort %s，切片 %s，并发 %s", len(todo), res.skipped, model, effort,
-             tiles, workers)
+             + f"：{settings}，同时识别 {workers} 页。")
+    log.info("识别开始：%s 页，跳过 %s 页，%s，并发 %s", len(todo), res.skipped, settings, workers)
 
     def one(item):
         u, t = Usage(), time.monotonic()
         try:
-            rec = recognize_page(client, task_dir, item, model, effort, tiles, u, validator, schema, mode, note)
+            rec = recognize(item, u, note)
         finally:
             res.usage.merge(u)
         (out / f"{item['page_id']}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
         (out / f"{item['page_id']}.md").write_text(page_markdown(rec), encoding="utf-8")
         return rec, u, time.monotonic() - t
+
+    def stop(reason: str, e: Exception):
+        note(f"停止：{reason}")
+        log.error("识别停止：%s（%s: %s）", reason, type(e).__name__, e)
 
     def settle(it, fn):
         n = f"{res.done + len(res.failed) + 1}/{len(todo)}"
@@ -461,16 +494,18 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
             rec, u, secs = fn()
             res.done += 1
             note(f"  ✓ {n} {page_label(it)} → {_found(rec)}（{secs:.0f} 秒，输入 {u.input} / 输出 {u.output} tokens）")
+        except FatalError as e:
+            stop(str(e), e)
+            raise
         except RecognitionError as e:
             res.failed.append({"page_id": it["page_id"], "file": it["source"]["file_path"], "error": str(e)})
             note(f"  ✗ {n} {page_label(it)}：{e}")
             log.warning("第 %s 页识别失败：%s", it["page_id"], e.reason)  # 校验错误里可能带着识别出的文字，不写进排错日志
         except Exception as e:  # noqa: BLE001 - API 错误等，记下后继续其他页面
-            fatal = _fatal(e)
-            if fatal:
-                note(f"停止：{fatal}")
-                log.error("识别停止：%s（%s: %s）", fatal, type(e).__name__, e)
-                raise FatalError(fatal) from e
+            reason = fatal(e) if fatal else None
+            if reason:
+                stop(reason, e)
+                raise FatalError(reason) from e
             res.failed.append({"page_id": it["page_id"], "file": it["source"]["file_path"],
                                "error": f"{type(e).__name__}: {e}"})
             note(f"  ✗ {n} {page_label(it)}：{type(e).__name__}: {e}")
@@ -478,20 +513,47 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
         if progress:
             progress(res.done + len(res.failed), len(todo))
 
-    # 先单独跑第一页：凭据、模型这类整体性问题在这里暴露，不会让每一页各失败一次
     if todo:
         settle(todo[0], lambda: one(todo[0]))
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
         futs = {pool.submit(one, it): it for it in todo[1:]}
         for f in as_completed(futs):
             settle(futs[f], f.result)
+    except FatalError:
+        pool.shutdown(wait=True, cancel_futures=True)  # 不再开始排队中的页面
+        raise
+    pool.shutdown(wait=True)
     res.seconds = time.monotonic() - t0
-    res.structured = mode.structured
-    _write_log(task_dir, res, tier, effort, tiles)
     if todo:
         note(f"结束：识别 {res.done} 页，失败 {len(res.failed)} 页，用时 {res.seconds:.0f} 秒。", show=False)
     log.info("识别结束：完成 %s 页，失败 %s 页，用时 %.0f 秒，输入 %s / 输出 %s tokens", res.done, len(res.failed),
              res.seconds, res.usage.input, res.usage.output)
+    return res
+
+
+def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
+        tiles: int | None = None, workers: int = 4, client=None, progress=None, log_fn=None) -> RunResult:
+    """log_fn 收到逐页的识别过程（给人看的一行字）。"""
+    cfg = TIERS[tier]
+    model = model or cfg["model"]
+    effort = effort or cfg["effort"]
+    tiles = cfg["tiles"] if tiles is None else tiles
+    if client is None:
+        import anthropic
+        client = anthropic.Anthropic(max_retries=4)
+    validator = jsonschema.Draft202012Validator(load_schema())
+    schema = body_schema()
+    note = ProgressLog(task_dir, log_fn)
+    mode = _Mode(note)
+
+    def recognize(item, usage, note):
+        return recognize_page(client, Path(task_dir), item, model, effort, tiles, usage, validator, schema, mode, note)
+
+    settings = f"模型 {model}，effort {effort}" + (f"，局部切片 {tiles}×{tiles}" if tiles > 1 else "")
+    res = run_pages(task_dir, recognize, settings, workers, note, model, progress, _fatal)
+    res.structured = mode.structured
+    _write_log(task_dir, res, tier, effort, tiles)
     return res
 
 
