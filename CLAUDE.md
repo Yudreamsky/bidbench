@@ -13,5 +13,6 @@
 - 修改已有数据表结构时：`store.SCHEMA_SQL` 写成最新样子，`SCHEMA_VERSION` 加 1，在 `MIGRATIONS` 里写升级 SQL，并加迁移测试。
 - 风险文件规则在 `bidbench/risk.py`，杀毒软件对接在 `bidbench/antivirus.py`。样例和测试里的风险文件必须是无害占位，不要写入 EICAR 等真实病毒特征（会被本机杀毒软件拦截）；杀毒软件测试用假的扫描输出。
 - 收图、识别、导出等日常操作写在 `bidbench/ops.py`（输出走 log 回调），命令行和工作台后台任务都调用它，不要在两边各写一份。
+- 日志：会改动项目的新命令或新后台任务，要记进项目操作日志（`bidbench/oplog.py`；命令行在 `cli._op` 里登记，工作台在 `server.PROJECT_JOBS` 里登记）；人工决定、提议已在数据库里，查看时合并，不要重复记。程序内部情况用 `logging.getLogger(__name__)` 写排错日志（`bidbench/debuglog.py`），不得写入图纸内容、识别出的文字、API 密钥和密码，外部命令用 `debuglog.safe_command()` 去掉密码。
 - 工作台的改动类接口都要校验令牌（`X-Bidbench-Token`）和 Host 头；新接口放进 `server.py` 已有的 POST 分发里，不要绕过。
 - 安装包相关在 `packaging/` 和 `.github/workflows/windows-installer.yml`；新增依赖时确认 `packaging/bidbench.spec` 能打进去，PR 上的 Windows 打包自检要通过。

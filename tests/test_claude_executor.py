@@ -253,3 +253,37 @@ def test_real_result_wins_over_simulated_for_identical_pages(demo_copy):
     assert pages[a["page_id"]].rec["run"]["executor"] == "claude" and pages[a["page_id"]].rec_borrowed
     with demo_copy.connect() as con:
         assert not any(r["render_hash"] == a["render_hash"] for r in recognition.pages_to_recognize(con, scope="new"))
+
+
+def test_progress_log_line_per_page(demo_copy):
+    """识别过程日志：每页一行实时给界面，同时追加到任务包的 results/progress.log，续跑时接着写。"""
+    task = recognition.make_task(demo_copy, scope="new", render=False)
+    n_pages = len(json.loads((task / "manifest_in.json").read_text(encoding="utf-8"))["pages"])
+
+    def flaky(params, n):
+        if n == 1:
+            return {}, "refusal"
+        body, stop = mimic(params, n)
+        if n == 2:
+            body["page_kind"] = "图"  # 第一次没通过校验，重试
+        return body, stop
+
+    lines = []
+    r = claude.run(task, "economy", client=FakeClient(flaky), workers=1, log_fn=lines.append)
+    assert r.done == n_pages - 1 and len(r.failed) == 1
+    assert lines[0].startswith(f"开始识别 {n_pages} 页：模型 claude-haiku-5-5")
+    assert sum(1 for ln in lines if "✓" in ln) == n_pages - 1
+    bad = next(ln for ln in lines if "✗" in ln)
+    assert bad.startswith(f"  ✗ 1/{n_pages} ") and "拒绝识别" in bad
+    assert any("↻" in ln and "重试一次" in ln for ln in lines)
+    ok = next(ln for ln in lines if "✓" in ln)
+    assert "第 1/" in ok and " → " in ok and "输入 2400 / 输出 1200 tokens" in ok  # 重试那页调用了两次
+    saved = (task / "results" / "progress.log").read_text(encoding="utf-8").splitlines()
+    assert len(saved) == len(lines) + 1 and f"结束：识别 {n_pages - 1} 页，失败 1 页，用时" in saved[-1]
+
+    # 续跑：只重试失败的那一页，progress.log 接着写
+    more = []
+    r2 = claude.run(task, "economy", client=FakeClient(mimic), workers=1, log_fn=more.append)
+    assert r2.done == 1 and r2.skipped == n_pages - 1
+    assert more[0] == f"开始识别 1 页（已有结果的 {n_pages - 1} 页跳过）：模型 claude-haiku-5-5，effort medium，同时识别 1 页。"
+    assert len((task / "results" / "progress.log").read_text(encoding="utf-8").splitlines()) == len(saved) + 3

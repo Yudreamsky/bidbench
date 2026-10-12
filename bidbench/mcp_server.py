@@ -7,8 +7,13 @@
 from __future__ import annotations
 
 import functools
+import logging
+import time
 
 from .assistant import Toolkit, ToolError
+
+log = logging.getLogger(__name__)
+FREE_TEXT = {"text", "reason", "value", "topic", "option"}  # 可能含有图纸里的文字
 
 INSTRUCTIONS = """你是这个投标图纸项目的助手，工具集就是 bidbench：图纸台账、版本、缺图、楼层覆盖、事实层和问题清单。
 
@@ -49,10 +54,20 @@ def build_server(kit: Toolkit):
         def deco(fn):
             @functools.wraps(fn)
             def wrapped(*a, **kw):
+                # 排错日志只记调用了哪个工具、参数和用时；不记返回的图纸内容，自由文字参数只记字数
+                args = "，".join(f"{k}=（{len(str(v))} 字）" if k in FREE_TEXT else f"{k}={str(v)[:60]}"
+                                for k, v in kw.items())
+                t = time.monotonic()
                 try:
-                    return fn(*a, **kw)
+                    r = fn(*a, **kw)
                 except ToolError as e:
+                    log.info("AI 助手调用 %s（%s）：%s", fn.__name__, args, e)
                     return {"error": str(e)}
+                except Exception:
+                    log.exception("AI 助手调用 %s（%s）出错", fn.__name__, args)
+                    raise
+                log.info("AI 助手调用 %s（%s），%.1f 秒", fn.__name__, args, time.monotonic() - t)
+                return r
             kwargs = {"description": fn.__doc__}
             ann = _annotations(read_only)
             if ann is not None:

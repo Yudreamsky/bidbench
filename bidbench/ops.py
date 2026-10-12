@@ -105,7 +105,7 @@ def recognize_claude(proj: Project, task: Path, tier: str = "economy", model: st
                      tiles: int | None = None, workers: int = 4, log: Log = print, progress=None, client=None) -> dict:
     from .executors import claude
     try:
-        r = claude.run(Path(task), tier, model, effort, tiles, workers, client=client, progress=progress)
+        r = claude.run(Path(task), tier, model, effort, tiles, workers, client=client, progress=progress, log_fn=log)
     except claude.FatalError as e:
         raise OpError(f"{e}。任务包已保留，配置好后可以续跑") from e
     cost = r.usage.cost(r.model)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import threading
@@ -15,9 +16,11 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-from . import __version__, appconfig, release
+from . import __version__, appconfig, debuglog, release
 from .server import serve
 from .store import Project
+
+log = logging.getLogger(__name__)
 
 RECEIVE_TYPES = ("压缩包和图纸 (*.zip;*.rar;*.7z;*.tar;*.tgz;*.gz;*.pdf;*.dwg;*.dxf)", "所有文件 (*.*)")
 
@@ -41,11 +44,17 @@ class DesktopApi:
 
 
 def _redirect_output() -> None:
-    """打包成无控制台的窗口程序时没有 stdout / stderr，写到日志文件里，免得第三方库输出时出错。"""
+    """打包成无控制台的窗口程序时没有 stdout / stderr，写到排错日志文件夹里，免得第三方库输出时出错。"""
     if sys.stdout is None or sys.stderr is None:
-        log = open(appconfig.config_dir() / "desktop.log", "a", encoding="utf-8", buffering=1)  # noqa: SIM115
-        sys.stdout = sys.stdout or log
-        sys.stderr = sys.stderr or log
+        path = debuglog.folder() / "desktop-output.log"
+        try:
+            if path.stat().st_size > 5 << 20:  # 太大时从头写，旧的留一份
+                os.replace(path, path.with_suffix(".old.log"))
+        except OSError:
+            pass
+        out = open(path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+        sys.stdout = sys.stdout or out
+        sys.stderr = sys.stderr or out
 
 
 def _initial_project(arg: str | None) -> Project | None:
@@ -67,6 +76,7 @@ def main(argv=None) -> int:
     ap.add_argument("--browser", action="store_true", help="不开独立窗口，用默认浏览器打开")
     ap.add_argument("--smoke", action="store_true", help="自检：启动服务、检查接口后退出（打包测试用）")
     args = ap.parse_args(argv)
+    debuglog.setup("desktop", hooks=not args.smoke)
 
     appconfig.apply_secrets()
     httpd = serve(_initial_project(args.project), port=0, mode="desktop")
@@ -86,6 +96,7 @@ def main(argv=None) -> int:
         try:
             return _window(httpd, url)
         except Exception as e:  # noqa: BLE001 - 没有 WebView2 等，退回浏览器
+            log.warning("无法打开独立窗口，改用浏览器", exc_info=True)
             print(f"无法打开独立窗口（{e}），改用浏览器。", file=sys.stderr)
     webbrowser.open(url)
     print(f"工作台已在浏览器中打开：{url}（关闭这个窗口即退出）")
@@ -93,6 +104,7 @@ def main(argv=None) -> int:
         threading.Event().wait()
     except KeyboardInterrupt:
         pass
+    httpd.app.abandon_job()
     httpd.shutdown()
     return 0
 
@@ -120,7 +132,10 @@ def _window(httpd, url: str) -> int:
     window.events.closing += closing
     app.on_quit.append(destroy)
     storage = appconfig.config_dir() / "webview"
+    log.info("打开窗口")
     webview.start(gui="edgechromium" if os.name == "nt" else None, private_mode=False, storage_path=str(storage))
+    log.info("窗口已关闭")
+    app.abandon_job()
     httpd.shutdown()  # 窗口关掉就退出
     return 0
 
