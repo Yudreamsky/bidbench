@@ -455,9 +455,13 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     # ---- 解包问题 ----
     for i in ext_issues:
         label = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷",
-                 "too_deep": "嵌套过深", "too_large": "超出上限"}.get(i["kind"], i["kind"])
+                 "too_deep": "嵌套过深", "too_large": "超出上限", "symlink": "符号链接"}.get(i["kind"], i["kind"])
+        if i["kind"] == "symlink":
+            issues.append(_issue("info", "解包问题", f"extract:{i['id']}", f"{label}：{i['path'].split(' / ')[-1]}",
+                                 f"{i['detail']}。位置：{i['path']}。", {"batch": i["batch_seq"]}, []))
+            continue
         issues.append(_issue("warn", "解包问题", f"extract:{i['id']}", f"{label}：{i['path'].split(' / ')[-1]}",
-                             f"{i['detail']}。位置：{i['path']}。这里面可能藏着缺失的图纸。", {"batch": i["batch_seq"]}, []))
+                             f"{i['detail'].rstrip('。')}。位置：{i['path']}。这里面可能藏着缺失的图纸。", {"batch": i["batch_seq"]}, []))
 
     # ---- 未识别页面 ----
     if unrecognized:

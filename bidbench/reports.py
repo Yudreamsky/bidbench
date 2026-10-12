@@ -9,7 +9,7 @@ from .state import CONF_LABEL, STATUS_LABEL
 from .store import Project
 
 KIND_LABEL = {"pdf": "PDF", "cad": "CAD 图纸", "office": "Office 文档", "image": "图片", "text": "文本", "other": "其他"}
-ISSUE_LABEL = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷",
+ISSUE_LABEL = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷", "symlink": "符号链接",
                "too_deep": "嵌套过深", "too_large": "超出上限"}
 
 
