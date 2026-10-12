@@ -27,7 +27,7 @@
 html, body { margin: 0; }
 body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.55; }
 [hidden] { display: none !important; }
-.app { max-width: 1480px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+.app { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
 .top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .brand { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .eyebrow { font-size: 12px; letter-spacing: .08em; color: var(--muted); }
@@ -41,8 +41,19 @@ h1 { margin: 0; font-size: 20px; }
 .tab[aria-selected="true"] { background: var(--accent); color: var(--surface); }
 button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-visible, .mm:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .node:focus:not(:focus-visible), .mm:focus:not(:focus-visible) { outline: none; }
-.work { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+.work { display: grid; grid-template-columns: minmax(0, 1fr) clamp(340px, 26vw, 560px); gap: 16px; align-items: start; }
 @media (max-width: 980px) { .work { grid-template-columns: minmax(0, 1fr); } }
+/* 窗口够大时像桌面软件一样铺满：页面本身不滚动，图谱和右栏各自滚动；窗口太窄或太矮时退回整页滚动 */
+@media (min-width: 981px) and (min-height: 560px) {
+  body { height: 100vh; overflow: hidden; }
+  .app { height: 100vh; }
+  .launcher { flex: 1; min-height: 0; overflow: auto; }
+  .work { flex: 1; min-height: 0; align-items: stretch; }
+  .work > div { min-height: 0; display: flex; flex-direction: column; }
+  .view { flex: 1; min-height: 0; }
+  .canvas { flex: 1; min-height: 0; }
+  .panel { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+}
 .view { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; min-width: 0; display: flex; flex-direction: column; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .toolbar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
@@ -373,11 +384,17 @@ function renderHeader() {
 
 /* ---------- 图谱 ---------- */
 const gsvg = document.getElementById('graph');
+let laidOutAt = 0;  // 上次排版时图谱区的宽度
+function graphWidth() {
+  const w = gsvg.parentElement.clientWidth - 16;  // 去掉内边距；图谱区隐藏时为 0
+  return w > 0 ? Math.max(700, w) : 1040;
+}
 function layout() {
+  laidOutAt = graphWidth();
   const groups = {};
   S.sheets.forEach(s => (groups[s.discipline] ||= []).push(s));
   const discs = Object.keys(groups).sort((a, b) => DISC_ORDER.indexOf(a) - DISC_ORDER.indexOf(b));
-  const MAXW = 1040, GAPX = 20, GAPY = 24, PAD = 12, COLW = NW + 20, ROWH = NH + 28;
+  const MAXW = laidOutAt, GAPX = 20, GAPY = 24, PAD = 12, COLW = NW + 20, ROWH = NH + 28;
   let x = 12, y = 20, rowH = 0, maxX = 0;
   const bands = [], pos = {};
   discs.forEach(d => {
@@ -408,7 +425,8 @@ function buildGraph() {
   }
   const L = layout();
   gsvg.setAttribute('viewBox', `0 0 ${L.w} ${L.h}`);
-  gsvg.style.width = '100%'; gsvg.style.minWidth = Math.min(L.w, 720) + 'px'; gsvg.style.height = 'auto';
+  gsvg.style.width = '100%'; gsvg.style.maxWidth = L.w + 'px';  // 图谱区比图宽时按原大小画，不放大
+  gsvg.style.minWidth = Math.min(L.w, 720) + 'px'; gsvg.style.height = 'auto';
   const defs = sv('defs');
   [['g-arrow', 'arrow'], ['g-arrow-crit', 'arrow-crit'], ['g-arrow-on', 'arrow-on']].forEach(([id, cls]) =>
     defs.append(sv('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' },
@@ -548,6 +566,21 @@ function renderMind() {
 
 /* ---------- 面板 ---------- */
 const panel = document.getElementById('panel');
+{
+  const replace = panel.replaceChildren.bind(panel);
+  const keyOf = nodes => {
+    const t = nodes.find(n => n && n.classList && n.classList.contains('ptitle'));
+    if (!t) return (nodes[0] && nodes[0].textContent || '').slice(0, 40);
+    return (t.querySelector('.pnum')?.textContent || '') + (t.querySelector('h2')?.textContent || '');
+  };
+  let key = null;
+  panel.replaceChildren = (...nodes) => {
+    const k = keyOf(nodes);
+    if (k !== key) panel.scrollTop = 0;
+    key = k;
+    replace(...nodes);
+  };
+}
 const section = (title, ...body) => el('section', {}, el('h3', {}, title), ...body);
 const latest = () => !S.batches.length || S.as_of === Math.max(...S.batches.map(b => b.seq));
 function optionButtons(issue) {
@@ -801,7 +834,9 @@ function setView(v) {
   document.getElementById('tab-facts').setAttribute('aria-selected', String(v === 'facts'));
   try { history.replaceState(null, '', '#' + v); } catch (e) { /* 忽略 */ }
   if (!S) return;
-  if (v === 'facts') renderMind(); else paintGraph();
+  if (v === 'facts') renderMind();
+  else if (Math.abs(graphWidth() - laidOutAt) > 40) buildGraph();  // 在思维导图页时改过窗口大小
+  else paintGraph();
 }
 function selectSheet(no) { ui.selD = no; ui.selF = null; paintGraph(); renderMind(); renderSheet(no); }
 function selectFact(key) { ui.selF = key; ui.selD = null; ui.focusSet = null; ui.backTo = null; renderMind(); paintGraph(); renderFact(key); }
@@ -1264,6 +1299,11 @@ document.getElementById('as-of').addEventListener('change', e => { const v = Num
 setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');
 checkUpdate(false);
 checkFresh();
+let resizeTimer = null;
+window.addEventListener('resize', () => {  // 窗口大小变了，图谱按新的宽度重新排
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (S && ui.view === 'graph' && Math.abs(graphWidth() - laidOutAt) > 40) buildGraph(); }, 200);
+});
 boot().catch(() => { panel.replaceChildren(el('div', { class: 'note crit' }, '连接本地服务失败。请重新打开工作台。')); });
 })();
 </script>
