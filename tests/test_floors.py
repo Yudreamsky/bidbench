@@ -90,24 +90,14 @@ def test_floor_decisions(demo_copy):
     assert "人工确认" in arch["basis"]
 
 
-def test_floor_coverage_summarized_when_many_sheets(tmp_path):
+def test_floor_coverage_summarized_when_many_sheets(sheets_project):
     """超高层一类图几十上百张：楼层覆盖只写楼层范围和张数，不逐张列。"""
     import make_sample
-    from bidbench import ingest, recognition
-    from bidbench.executors import simulated
-    from bidbench.store import Project
 
-    folder = tmp_path / "图纸"
-    folder.mkdir()
-    for n in [*range(1, 7), *range(8, 13)]:  # 1F~12F 平面图，缺 7F
-        no = f"建施-{100 + n}"
-        (folder / f"{no}.pdf").write_bytes(
-            make_sample.sheet_pdf(no, f"{n}层平面图", "A", "2026-01-01", [], [("A", "2026-01-01", "出图")]))
-    proj = Project.init(tmp_path / "p", "超高层")
-    ingest.receive(proj, folder, "2026-01-01")
-    task = recognition.make_task(proj, render=False)
-    simulated.run(task)
-    assert not recognition.import_results(proj, task / "results").errors
+    def pdf(no, title):
+        return make_sample.sheet_pdf(no, title, "A", "2026-01-01", [], [("A", "2026-01-01", "出图")])
+    # 1F~12F 平面图，缺 7F
+    proj = sheets_project({f"建施-{100 + n}.pdf": pdf(f"建施-{100 + n}", f"{n}层平面图") for n in [*range(1, 7), *range(8, 13)]})
     st = state.build(proj)
     arch = coverage(st)["建筑平面图"]
     assert arch["covered_text"] == "1F~6F、8F~12F" and len(arch["covered"]) == 11

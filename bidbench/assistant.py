@@ -136,16 +136,24 @@ class Toolkit:
                 continue
             own = next((e for e in f["evidence"] if e["active"] and e["sheet"] == s["no"]), None)
             facts.append({"key": f["key"], "name": f["name"], "this_sheet": (own["text"] or own["value"]) if own else None,
-                          "project_value": f["value"], "confidence": CONF_LABEL[f["conf"]]})
+                          "project_value": f["value"], "confidence": CONF_LABEL[f["conf"]],
+                          **({"changed_by": f["notices"]} if f.get("notices") else {})})
         issues = [{"id": i["id"], "kind": i["kind"], "title": i["title"], "detail": i["detail"],
                    "relation": "本图" if i["target"].get("sheet") == s["no"] else "相关"}
                   for i in st["issues"] if i["target"].get("sheet") == s["no"] or s["no"] in i.get("sheets", [])]
+        around = state.same_floor(st, s["no"], limit=40)
+        notices = [{"id": n["id"], "title": n["title"], "kind": n["kind"], "batch": n["batch"], "page_id": n["page_id"],
+                    "also_changes": [x for x in n["affects"] if x != s["no"]]}
+                   for n in st["notices"] if s["no"] in n["affects"]]
         return {"no": s["no"], "title": s["title"], "discipline": s["discipline"], "status": STATUS_LABEL[s["status"]],
                 "current_rev": s["current_rev"], "current_page_id": s["current_page"], "paths": s["paths"],
-                "notes": s["notes"],
+                "notes": s["notes"], "notices": notices,
                 "versions": [{"rev": v["rev"], "date": v["date"], "batch": v["batch"], "state": v["state"],
                               "page_id": v["page_id"]} for v in s["versions"]],
-                "references": refs, "facts": facts, "issues": issues}
+                "references": refs, "floors": s["floors_text"], "same_floor": around["same_floor"],
+                **({"more_same_floor": around["more_same_floor"]} if "more_same_floor" in around else {}),
+                "general_sheets": around["general"], "own_values": s["own_values"],
+                "recognition_notes": s["rec_notes"], "facts": facts, "issues": issues}
 
     def get_page(self, page_id: str, include_text_layer: bool = False) -> dict:
         if not re.fullmatch(r"[0-9a-f]{12}-p\d{3}", page_id or ""):

@@ -108,8 +108,10 @@ def build_server(kit: Toolkit):
 
     @tool()
     def get_sheet(no: str) -> dict:
-        """一张图的卡片：状态、现行版次、版本链、出处、注意事项、引用关系、来自它的事实（this_sheet 是本图原文，project_value 是全项目取值）、
-        问题（relation：本图的问题，或它牵涉的相关问题，如事实冲突的来源、引用了缺失的图）。no 为图号，如“结施-04”。"""
+        """一张图的卡片：状态、现行版次、版本链、出处、注意事项、改了这张图的变更单（notices，用 page_id 打开原件）、引用关系、
+        同层图纸（same_floor：各专业管同一层的图，problems 是它们的严重问题）、通用图（general_sheets：设计说明、没写楼层的柱平面等）、
+        只对本图有效的值（own_values，如本层结构标高、适用楼层）、来自它的事实（this_sheet 是本图原文，project_value 是全项目取值，
+        changed_by 表示出处图被变更单改过、数值可能已变）、问题（relation：本图的问题，或它牵涉的相关问题）。no 为图号，如“结施-04”。"""
         return kit.get_sheet(no)
 
     @tool()

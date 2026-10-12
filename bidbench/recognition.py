@@ -32,19 +32,33 @@ def _validator() -> jsonschema.Draft202012Validator:
 SCOPES = {
     "unrecognized": "尚未识别的页面",
     "new": "尚未识别的页面，以及只有模拟执行器结果的页面",
-    "weak": "识别不完整的页面：模拟执行器结果、有问题记录、缺图号或图签把握低于 0.6",
+    "weak": "识别不完整的页面：模拟执行器结果、字迹不清或图签缺失等问题、缺图号、图签把握低于 0.6",
     "conflict": "涉及版本冲突、版次倒退或事实冲突的页面",
     "all": "全部页面",
 }
 
 
-def _is_weak(rec: dict) -> bool:
-    if rec["run"]["executor"] in PLACEHOLDER_EXECUTORS or rec["issues"]:
-        return True
+SERIOUS_ISSUES = ("字迹不清", "图签缺失", "疑似多张图", "文字层与图像不一致")
+NO_NUMBER_KINDS = ("变更单", "答疑或澄清", "封面")  # 这几类页面本来就可以没有图号
+
+
+def weak_reason(rec: dict) -> str | None:
+    """识别结果哪里不够用、需要复核；够用返回 None。
+
+    “其他”类问题只是备注（如图签没有专业栏、没写单位），不算识别不完整。"""
+    serious = [x["type"] for x in rec["issues"] if x["type"] in SERIOUS_ISSUES]
+    if serious:
+        return serious[0]
     tb = rec["title_block"]
-    if not tb["drawing_no"]["value"]:
-        return True
-    return any((tb[k].get("confidence") or 0) < 0.6 for k in ("drawing_no", "drawing_title", "revision") if tb[k]["value"])
+    if not tb["drawing_no"]["value"] and rec["page_kind"] not in NO_NUMBER_KINDS:
+        return "缺图号"
+    if any((tb[k].get("confidence") or 0) < 0.6 for k in ("drawing_no", "drawing_title", "revision") if tb[k]["value"]):
+        return "图签把握低"
+    return None
+
+
+def _is_weak(rec: dict) -> bool:
+    return rec["run"]["executor"] in PLACEHOLDER_EXECUTORS or weak_reason(rec) is not None
 
 
 def _conflict_pages(proj: Project) -> set[str]:
