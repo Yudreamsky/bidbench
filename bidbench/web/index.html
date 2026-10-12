@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="bidbench-token" content="">
 <title>投标图纸工作台</title>
 <style>
 /* 布局：顶部信息条 + 主画布 + 右侧详情面板（窄屏时面板落到下方）。本地工具，不加载任何外部资源。 */
@@ -153,6 +154,22 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
 .update-bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 8px 12px; border-radius: 8px;
   background: var(--accent-tint); border: 1px solid var(--accent); font-size: 13px; }
 .update-bar b { color: var(--accent); }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.launcher { width: 100%; max-width: 720px; margin: 24px auto; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.card h2 { margin: 8px 0 0; font-size: 15px; }
+.card h2:first-child { margin-top: 0; }
+li.recent { display: flex; gap: 6px; align-items: stretch; }
+li.recent .linkbtn { flex: 1; }
+.linkbtn[disabled] { opacity: .5; cursor: not-allowed; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.field > span { color: var(--muted); }
+.field small { color: var(--muted); font-size: 12px; }
+.field input, .field select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); min-width: 0; }
+.joblog { margin: 0; font-family: var(--font-mono); font-size: 12px; background: var(--band); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bar { height: 6px; background: var(--band); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--surface); padding: 8px 16px; border-radius: 6px; font-size: 13px; }
 </style>
 </head>
@@ -165,6 +182,7 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
       <p class="meta" id="proj-meta"></p>
     </div>
     <div class="controls">
+      <div class="actions" id="actions"></div>
       <label class="meta" for="as-of">查看截至</label>
       <select id="as-of"></select>
       <nav class="tabs" role="tablist" aria-label="显示模式">
@@ -174,7 +192,8 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
     </div>
   </header>
   <div class="update-bar" id="update-bar" hidden></div>
-  <div class="work">
+  <div class="launcher" id="launcher" hidden></div>
+  <div class="work" id="work">
     <div>
       <section class="view" id="view-graph" role="tabpanel" aria-labelledby="tab-graph">
         <div class="toolbar">
@@ -218,7 +237,8 @@ const STATUS = { current: '现行', new: '本批新增', updated: '本批升版'
 const CONF = { confirmed: '人工确认', high: '高置信', mid: '中置信', low: '低置信', conflict: '冲突' };
 const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '其他'];
 
-let S = null;
+let S = null, APP = null;
+const TOKEN = document.querySelector('meta[name="bidbench-token"]').content;
 const ui = { view: 'graph', selD: null, selF: null, focusSet: null, backTo: null, collapsed: new Set(),
   graphIssues: false, factIssues: false, asOf: null };
 let nodeEls = {}, edgeEls = [], sheetBy = {}, factBy = {}, factGroupOf = {};
@@ -253,19 +273,28 @@ function toast(msg) {
 
 async function load(asOf) {
   const r = await fetch('/api/state' + (asOf ? `?as_of=${asOf}` : ''));
+  if (r.status === 409) { await refreshApp(); showLauncher(); return; }
   setState(await r.json());
 }
+async function api(url, body) {
+  // 改动类请求都带上本页面的令牌，本机服务据此确认请求来自工作台本身
+  let r, data;
+  try {
+    r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Bidbench-Token': TOKEN }, body: JSON.stringify(body) });
+    data = await r.json();
+  } catch (e) { toast('连接本地服务失败'); return { ok: false, data: {} }; }
+  if (!r.ok) toast(data.error || '操作失败');
+  return { ok: r.ok, data };
+}
 async function post(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await r.json();
-  if (!r.ok) { toast(data.error || '操作失败'); return false; }
-  setState(data);
-  return true;
+  const r = await api(url, body);
+  if (r.ok) setState(r.data);
+  return r.ok;
 }
 async function actProposal(id, action) {
-  const r = await fetch('/api/proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action }) });
-  const data = await r.json();
-  if (!r.ok) { toast(data.error || '操作失败'); return; }
+  const r = await api('/api/proposal', { id, action });
+  if (!r.ok) return;
+  const data = r.data;
   setState(data);
   toast(data.last_outcome || (action === 'confirm' ? '已确认' : '已驳回'));
 }
@@ -303,8 +332,10 @@ function renderHeader() {
     b ? `截至 ${b.received_at} · ` : '', `已识别 ${rec.recognized}/${rec.pages} 页（${ex}）`,
     rec.executors.simulated ? el('span', {}, ' · ', el('span', { class: 'tag-sim' }, '识别结果为模拟数据')) : '',
     VER ? el('span', {}, ' · ', el('button', { class: 'chip', type: 'button', onclick: renderUpdate, title: '软件更新' },
-      `v${VER.version}${VER.commit ? ' ' + VER.commit : ''}`)) : '');
+      `v${VER.version}${VER.build ? ' b' + VER.build : VER.commit ? ' ' + VER.commit : ''}`)) : '');
   const sel = document.getElementById('as-of');
+  sel.hidden = !S.batches.length;
+  sel.previousElementSibling.hidden = !S.batches.length;
   sel.replaceChildren(...S.batches.map(x => el('option', { value: x.seq }, `批次 #${x.seq}（${x.received_at}）`)));
   sel.value = S.as_of;
 }
@@ -485,7 +516,7 @@ function renderMind() {
 /* ---------- 面板 ---------- */
 const panel = document.getElementById('panel');
 const section = (title, ...body) => el('section', {}, el('h3', {}, title), ...body);
-const latest = () => S.as_of === Math.max(...S.batches.map(b => b.seq));
+const latest = () => !S.batches.length || S.as_of === Math.max(...S.batches.map(b => b.seq));
 function optionButtons(issue) {
   if (!issue || !issue.options.length || !latest()) return null;
   return el('div', { class: 'opts' }, issue.options.map(o => el('button', { class: 'btn', type: 'button', onclick: () => decide(o) }, o.label)));
@@ -517,6 +548,8 @@ function renderOverview() {
       el('div', { class: 'stat warn' }, el('b', {}, String(S.issues.filter(i => i.level === 'warn').length)), el('span', {}, '提醒'))),
   ];
   if (!latest()) parts.push(el('div', { class: 'note warn' }, '正在查看历史状态，只读。切回最新批次后才能做决定。'));
+  if (!S.batches.length) parts.push(el('div', { class: 'note' }, '新项目还没有收图。每收到一个压缩包就登记一次。',
+    el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn primary', type: 'button', onclick: renderReceive }, '收图'))));
   const sec = S.security || { files: [], scans: [], pending: 0 };
   if (sec.pending) parts.push(el('div', { class: 'note crit' }, `有 ${sec.pending} 个风险文件待确认。处理之前不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。`));
   const props = S.proposals || [];
@@ -650,29 +683,34 @@ async function checkUpdate(force) {
 }
 function renderUpdate() {
   const u = UPD || {};
-  const parts = [el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+  if (workEl.hidden) { launcherEl.hidden = true; workEl.hidden = false; }  // 项目选择界面上也能看更新
+  const parts = [el('button', { class: 'btn', type: 'button', onclick: () => (S ? clearAll() : showLauncher()) }, S ? '← 问题中心' : '← 选择项目'),
     el('div', { class: 'ptitle' }, el('h2', {}, '软件更新'),
-      el('p', { class: 'meta' }, `当前 ${VER ? VER.version + '（' + (VER.commit || '未知') + '）' : ''}`))];
+      el('p', { class: 'meta' }, `当前 ${VER ? VER.version + '（' + (VER.build ? '构建 b' + VER.build : VER.commit || '未知') + '）' : ''}`))];
   if (u.status === 'available') {
     parts.push(section(`本次更新（${u.commits.length}）`, el('ul', { class: 'list' }, u.commits.map(c =>
       el('li', {}, el('span', { class: 'mono' }, c.date), ' ', c.title)))));
     if (u.deps_changed) parts.push(el('div', { class: 'note warn' }, '这次更新改动了依赖，重启前会自动补装，可能多花一两分钟。'));
-    parts.push(el('div', { class: 'note' }, '更新只替换程序代码，不会动你的项目数据；更新后可以回退到上一版。'));
+    parts.push(el('div', { class: 'note' }, VER && VER.mode === 'installer'
+      ? '会下载新的安装包，校验后自动安装，窗口关闭后自动重新打开。不会动你的项目数据和设置。'
+      : '更新只替换程序代码，不会动你的项目数据；更新后可以回退到上一版。'));
     parts.push(el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => runUpdate('apply') }, '更新并重启')));
   } else {
     parts.push(el('div', { class: `note ${u.status === 'up_to_date' ? '' : 'warn'}` }, u.message || '无法检查更新。'));
     parts.push(el('div', { class: 'opts' }, el('button', { class: 'btn', type: 'button', onclick: async () => { await checkUpdate(true); renderUpdate(); } }, '重新检查')));
   }
-  if (VER && VER.can_rollback) parts.push(section('回退', el('p', { class: 'meta' }, `上次更新于 ${VER.last_update.replace('T', ' ')}。新版本有问题时可以回到更新前的版本。`),
+  if (VER && VER.mode === 'installer' && u.previous) parts.push(section('回退', el('p', { class: 'meta' }, `新版本有问题时，可以重新安装上一个版本 ${u.previous}。项目数据不受影响。`),
+    el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: () => runUpdate('rollback') }, `回退到 ${u.previous}`))));
+  else if (VER && VER.can_rollback && VER.last_update) parts.push(section('回退', el('p', { class: 'meta' }, `上次更新于 ${VER.last_update.replace('T', ' ')}。新版本有问题时可以回到更新前的版本。`),
     el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: () => runUpdate('rollback') }, '回退到上一版'))));
   panel.replaceChildren(...parts);
 }
 async function runUpdate(action) {
+  if (VER && VER.mode === 'installer') { startJob(action === 'apply' ? 'update' : 'rollback', {}); return; }
   panel.replaceChildren(el('div', { class: 'ptitle' }, el('h2', {}, action === 'apply' ? '正在更新' : '正在回退'),
     el('p', { class: 'meta' }, '正在拉取代码并重启工作台，完成后页面会自动刷新。请不要关闭命令行窗口。')));
-  const r = await fetch(`/api/update/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-  const data = await r.json();
-  if (!r.ok) { toast(data.error || '更新失败'); renderUpdate(); return; }
+  const r = await api(`/api/update/${action}`, {});
+  if (!r.ok) { renderUpdate(); return; }
   const before = VER && VER.commit;
   const started = Date.now();
   const poll = async () => {
@@ -714,6 +752,196 @@ function showSources(key, no) {
 }
 function clearAll() { ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null; paintGraph(); renderMind(); renderOverview(); }
 
+/* ---------- 桌面工作台：项目、操作、后台任务、设置 ---------- */
+const native = () => window.pywebview && window.pywebview.api;
+const launcherEl = document.getElementById('launcher');
+const workEl = document.getElementById('work');
+const field = (label, input, hint) => el('label', { class: 'field' }, el('span', {}, label), input, hint ? el('small', {}, hint) : null);
+const input = (attrs) => el('input', { type: 'text', ...attrs });
+
+async function refreshApp() {
+  try { APP = await (await fetch('/api/app')).json(); } catch (e) { /* 服务重启中 */ }
+  renderActions();
+  return APP;
+}
+function renderActions() {
+  const box = document.getElementById('actions');
+  if (!APP || !APP.project) { box.replaceChildren(); return; }
+  const b = (label, fn, primary) => el('button', { class: `btn${primary ? ' primary' : ''}`, type: 'button', onclick: fn }, label);
+  box.replaceChildren(b('收图', renderReceive, true), b('识别', renderRecognize), b('导出', renderExport),
+    b('安全扫描', () => startJob('scan', { av: true })), b('设置', renderSettings), b('切换项目', closeProject));
+}
+async function boot() {
+  await refreshApp();
+  if (!APP || !APP.project) return showLauncher();
+  launcherEl.hidden = true; workEl.hidden = false;
+  document.querySelector('.tabs').hidden = false;
+  await load(null);
+  if (APP.job && APP.job.status === 'running') watchJob();
+}
+async function closeProject() {
+  const r = await api('/api/app/close', {});
+  if (r.ok) { APP = r.data; S = null; showLauncher(); }
+}
+
+function showLauncher() {
+  S = null; workEl.hidden = true; launcherEl.hidden = false; renderActions();
+  document.getElementById('proj-name').textContent = '选择项目';
+  document.getElementById('proj-meta').replaceChildren(VER ? `v${VER.version}${VER.build ? ' · 构建 b' + VER.build : ''}` : '');
+  document.getElementById('as-of').hidden = true;
+  document.querySelector('label[for="as-of"]').hidden = true;
+  document.querySelector('.tabs').hidden = true;
+  const recent = (APP && APP.recent) || [];
+  const openPath = input({ id: 'open-path', placeholder: '项目文件夹路径', 'aria-label': '项目文件夹路径' });
+  const newName = input({ id: 'new-name', placeholder: '例如：某某综合体投标', 'aria-label': '项目名称' });
+  const newDir = input({ id: 'new-dir', value: (APP && APP.default_dir) || '', 'aria-label': '存放位置' });
+  const openIt = async (path) => { const r = await api('/api/app/open', { path }); if (r.ok) { APP = r.data; boot(); } };
+  const pickOpen = async () => { const p = await native().pick_folder(''); if (p) openIt(p); };
+  const pickDir = async () => { const p = await native().pick_folder(newDir.value); if (p) newDir.value = p; };
+  const create = async () => {
+    const name = newName.value.trim();
+    if (!name) { toast('请填写项目名称'); return; }
+    const sep = newDir.value.includes('\\') ? '\\' : '/';
+    const path = newDir.value.replace(/[\\/]+$/, '') + sep + name.replace(/[\\/:*?"<>|]+/g, '_');
+    const r = await api('/api/app/new', { path, name });
+    if (r.ok) { APP = r.data; boot(); }
+  };
+  launcherEl.replaceChildren(
+    el('div', { class: 'card' },
+      el('h2', {}, '最近的项目'),
+      recent.length ? el('ul', { class: 'list' }, recent.map(p => el('li', { class: 'recent' },
+        el('button', { class: 'linkbtn', type: 'button', disabled: p.exists ? null : 'disabled', onclick: () => openIt(p.path) },
+          el('div', {}, el('b', {}, p.name), el('small', {}, p.exists ? p.path : `${p.path}（找不到了）`))),
+        el('button', { class: 'btn', type: 'button', title: '从列表中移除（不删除文件）', onclick: async () => { const r = await api('/api/app/forget', { path: p.path }); if (r.ok) { APP = r.data; showLauncher(); } } }, '移除'))))
+        : el('p', { class: 'meta' }, '还没有打开过项目。'),
+      el('h2', {}, '打开已有项目'),
+      native() ? el('div', { class: 'opts' }, el('button', { class: 'btn', type: 'button', onclick: pickOpen }, '选择项目文件夹…'))
+        : el('div', { class: 'form' }, openPath, el('button', { class: 'btn', type: 'button', onclick: () => openIt(openPath.value.trim()) }, '打开')),
+      el('h2', {}, '新建项目'),
+      field('项目名称', newName),
+      field('存放位置', el('div', { class: 'form' }, newDir, native() ? el('button', { class: 'btn', type: 'button', onclick: pickDir }, '选择…') : null),
+        '会在这里新建一个以项目名称命名的文件夹。图纸、报告都存在里面，不会上传。'),
+      el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: create }, '新建并打开'))));
+}
+
+function renderReceive() {
+  const path = input({ id: 'rc-path', placeholder: '压缩包路径，例如 D:\\下载\\投标图纸.zip', 'aria-label': '压缩包路径' });
+  const day = el('input', { type: 'date', id: 'rc-date', value: APP.today, 'aria-label': '收图日期' });
+  const pw = input({ id: 'rc-pw', placeholder: '没有就留空；多个用空格分开', 'aria-label': '压缩包密码' });
+  const note = input({ id: 'rc-note', placeholder: '例如：招标代理 9 月 15 日邮件', 'aria-label': '备注' });
+  const pick = async () => { const p = await native().pick_archive(); if (p) path.value = p; };
+  panel.replaceChildren(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, '收图'), el('p', { class: 'meta' }, '每收到一个压缩包登记一次。会自动解开内层压缩包、去重、检查风险文件，原件只读保存。')),
+    field('压缩包', el('div', { class: 'form' }, path, native() ? el('button', { class: 'btn', type: 'button', onclick: pick }, '选择…') : null)),
+    field('收图日期', day), field('压缩包密码', pw), field('备注', note),
+    el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => {
+      if (!path.value.trim()) { toast('请先选择压缩包'); return; }
+      startJob('receive', { path: path.value.trim(), date: day.value, passwords: pw.value.split(/\s+/).filter(Boolean), note: note.value.trim(), av: true });
+    } }, '开始收图')),
+    el('p', { class: 'meta' }, APP.antivirus ? `收图时会用 ${APP.antivirus} 扫描新文件。` : '本机没有找到杀毒软件，只做静态检查。'));
+}
+
+function renderRecognize() {
+  const scope = el('select', { id: 'rg-scope', 'aria-label': '识别范围' },
+    [['new', '新页面（默认）'], ['weak', '识别不完整的页面'], ['conflict', '涉及冲突的页面'], ['all', '全部页面']].map(([v, t]) => el('option', { value: v }, t)));
+  const tier = el('select', { id: 'rg-tier', 'aria-label': '档位' },
+    el('option', { value: 'economy' }, '经济档（适合首次全量识别）'), el('option', { value: 'strong' }, '强档（复核冲突、重点图纸）'));
+  panel.replaceChildren(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, '识别图纸'),
+      el('p', { class: 'meta' }, '用 Claude 看图识别图签、内容和引用关系。先估算花费，确认后再开始。')),
+    APP.claude_ready ? null : el('div', { class: 'note warn' }, '还没有设置 Claude API 密钥。', el('button', { class: 'btn', type: 'button', onclick: renderSettings, style: 'margin-left:8px' }, '去设置')),
+    el('div', { class: 'note' }, '图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。'),
+    field('范围', scope), field('档位', tier),
+    el('div', { class: 'opts' },
+      el('button', { class: 'btn primary', type: 'button', onclick: () => startJob('estimate', { scope: scope.value, tier: tier.value }) }, '估算花费'),
+      el('button', { class: 'btn', type: 'button', title: '只读 PDF 文字层，扫描件无法识别，用于演示', onclick: () => startJob('recognize', { executor: 'simulated' }) }, '用模拟执行器（演示）')));
+}
+
+function renderExport() {
+  panel.replaceChildren(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, '导出')),
+    section('现行图纸文件夹', el('p', { class: 'meta' }, '只含现行版，按专业分文件夹；合订本里的图单独抽成一页；带脚本的 PDF 会去掉脚本。建模只从这里取图，就接触不到旧版。'),
+      el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn primary', type: 'button', onclick: () => startJob('export', { what: 'current' }) }, '导出现行图纸'))),
+    section('数据镜像（给 AI agent）', el('p', { class: 'meta' }, '事实层、项目地图、图纸卡片和详情，逐层往下读。'),
+      el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: () => startJob('export', { what: 'mirror' }) }, '导出数据镜像'))),
+    section('报告', el('p', { class: 'meta' }, '台账、缺图清单、答疑问题清单、项目事实、文件安全检查，每次收图和识别后自动更新。'),
+      el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: () => openFolder(APP.project.root + (APP.project.root.includes('\\') ? '\\' : '/') + 'reports') }, '打开报告文件夹'))));
+}
+
+function renderSettings() {
+  const st = APP.settings;
+  const key = el('input', { type: 'password', id: 'set-key', placeholder: st.has_api_key ? `已设置 ${st.api_key_hint || '（来自环境变量）'}，留空不修改` : 'sk-ant-…', 'aria-label': 'Claude API 密钥', autocomplete: 'off' });
+  const prefix = input({ id: 'set-prefix', value: st.download_prefix || '', placeholder: '例如 https://ghfast.top/（留空直连 GitHub）', 'aria-label': '下载加速前缀' });
+  const save = async (extra) => {
+    const body = { download_prefix: prefix.value, ...extra };
+    if (key.value.trim()) body.api_key = key.value.trim();
+    const r = await api('/api/app/settings', body);
+    if (r.ok) { APP = r.data; toast('设置已保存'); renderSettings(); }
+  };
+  panel.replaceChildren(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, '设置'), el('p', { class: 'meta' }, '保存在本机用户目录，更新和重装都不会丢。')),
+    field('Claude API 密钥', key, '在 console.anthropic.com 创建。只存在这台电脑上，页面不会再显示它。'),
+    field('下载加速前缀', prefix, '在国内下载更新慢时填写，会加在 GitHub 下载地址前面。'),
+    el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => save({}) }, '保存'),
+      st.api_key_hint ? el('button', { class: 'btn', type: 'button', onclick: () => save({ api_key: '' }) }, '删除密钥') : null),
+    section('关于', el('p', { class: 'meta' }, VER ? `bidbench ${VER.version}${VER.build ? '（构建 b' + VER.build + '）' : ''}${VER.commit ? ' · ' + VER.commit : ''}` : ''),
+      el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: async () => { await checkUpdate(true); renderUpdate(); } }, '检查更新'))));
+}
+
+async function openFolder(path) {
+  await api('/api/app/open_folder', { path });
+}
+
+async function startJob(kind, body) {
+  const r = await api('/api/job', { kind, ...body });
+  if (r.ok) watchJob();
+}
+let jobTimer = null;
+async function watchJob() {
+  clearTimeout(jobTimer);
+  let j;
+  try { j = await (await fetch('/api/job')).json(); } catch (e) { jobTimer = setTimeout(watchJob, 1500); return; }
+  if (!j) return;
+  renderJob(j);
+  if (j.status === 'running') { jobTimer = setTimeout(watchJob, 700); return; }
+  await refreshApp();
+  if (S || (APP && APP.project)) { try { await load(ui.asOf && S && ui.asOf !== Math.max(...S.batches.map(b => b.seq)) ? ui.asOf : null); } catch (e) { /* 忽略 */ } }
+  renderJob(j);
+}
+function renderJob(j) {
+  const parts = [el('button', { class: 'btn', type: 'button', onclick: () => { clearTimeout(jobTimer); clearAll(); } }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, j.title),
+      el('p', { class: 'meta' }, j.status === 'running' ? '进行中…' : j.status === 'done' ? `完成（${j.finished.slice(11)}）` : '没有完成'))];
+  if (j.progress && j.progress[1]) {
+    const [n, t] = j.progress;
+    const big = t > 100000;
+    parts.push(el('div', {}, el('div', { class: 'bar' }, el('i', { style: `width:${Math.round(n / t * 100)}%` })),
+      el('small', { class: 'meta' }, big ? `${(n / 1048576).toFixed(1)} / ${(t / 1048576).toFixed(1)} MB` : `${n} / ${t}`)));
+  }
+  if (j.error) parts.push(el('div', { class: 'note crit' }, j.error));
+  parts.push(el('pre', { class: 'joblog', 'aria-label': '运行记录' }, j.lines.join('\n') || '…'));
+  const res = j.result;
+  if (j.status === 'done' && j.kind === 'estimate') {
+    if (!res) parts.push(el('div', { class: 'note' }, '没有需要识别的页面。'));
+    else parts.push(el('div', { class: 'opts' },
+      el('button', { class: 'btn primary', type: 'button', disabled: APP.claude_ready ? null : 'disabled',
+        onclick: () => startJob('recognize', { executor: 'claude', task: res.task, tier: res.tier }) },
+        res.estimated_usd != null ? `开始识别（约 $${res.estimated_usd.toFixed(2)}）` : '开始识别'),
+      APP.claude_ready ? null : el('button', { class: 'btn', type: 'button', onclick: renderSettings }, '先设置 API 密钥')));
+  }
+  if (j.status === 'done' && j.kind === 'export' && res) parts.push(el('div', { class: 'opts' },
+    el('button', { class: 'btn primary', type: 'button', onclick: () => openFolder(res.path) }, '打开文件夹'), el('span', { class: 'mono' }, res.path)));
+  if (j.status === 'done' && j.kind === 'receive') parts.push(el('div', { class: 'opts' },
+    el('button', { class: 'btn primary', type: 'button', onclick: renderRecognize }, '识别新页面'),
+    el('button', { class: 'btn', type: 'button', onclick: () => { clearTimeout(jobTimer); clearAll(); } }, '查看问题中心')));
+  if (j.kind === 'update' || j.kind === 'rollback') {
+    if (j.status === 'done') parts.push(el('div', { class: 'note' }, '正在安装新版本，窗口会自动关闭，装好后自动重新打开。'));
+  }
+  panel.replaceChildren(...parts);
+  const log = panel.querySelector('.joblog');
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
 document.getElementById('tab-graph').addEventListener('click', () => setView('graph'));
 document.getElementById('tab-facts').addEventListener('click', () => setView('facts'));
 document.getElementById('clear').addEventListener('click', clearAll);
@@ -725,7 +953,7 @@ document.getElementById('as-of').addEventListener('change', e => { const v = Num
 
 setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');
 checkUpdate(false);
-load(null).catch(() => { panel.replaceChildren(el('div', { class: 'note crit' }, '连接本地服务失败。请确认 bidbench serve 正在运行。')); });
+boot().catch(() => { panel.replaceChildren(el('div', { class: 'note crit' }, '连接本地服务失败。请重新打开工作台。')); });
 })();
 </script>
 </body>

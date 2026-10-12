@@ -76,7 +76,7 @@ def test_server(demo_copy):
         assert pdf.startswith(b"%PDF")
         req = urllib.request.Request(base + "/api/decision", method="POST",
                                      data=json.dumps({"kind": "sheet_void", "key": "建施-05", "value": "voided"}).encode(),
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json", "X-Bidbench-Token": httpd.app.token})
         st2 = json.loads(urllib.request.urlopen(req).read())
         assert next(s for s in st2["sheets"] if s["no"] == "建施-05")["status"] == "voided"
         html = urllib.request.urlopen(base + "/").read().decode()

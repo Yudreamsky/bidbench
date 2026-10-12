@@ -12,3 +12,6 @@
 - AI 助手的工具都在 `bidbench/assistant.py`，MCP 只是一层注册（`bidbench/mcp_server.py`）。改动类工具只能写 `proposals` 表，确认、驳回不得暴露给 AI。
 - 修改已有数据表结构时：`store.SCHEMA_SQL` 写成最新样子，`SCHEMA_VERSION` 加 1，在 `MIGRATIONS` 里写升级 SQL，并加迁移测试。
 - 风险文件规则在 `bidbench/risk.py`，杀毒软件对接在 `bidbench/antivirus.py`。样例和测试里的风险文件必须是无害占位，不要写入 EICAR 等真实病毒特征（会被本机杀毒软件拦截）；杀毒软件测试用假的扫描输出。
+- 收图、识别、导出等日常操作写在 `bidbench/ops.py`（输出走 log 回调），命令行和工作台后台任务都调用它，不要在两边各写一份。
+- 工作台的改动类接口都要校验令牌（`X-Bidbench-Token`）和 Host 头；新接口放进 `server.py` 已有的 POST 分发里，不要绕过。
+- 安装包相关在 `packaging/` 和 `.github/workflows/windows-installer.yml`；新增依赖时确认 `packaging/bidbench.spec` 能打进去，PR 上的 Windows 打包自检要通过。
