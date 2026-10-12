@@ -154,26 +154,27 @@ class _App:
         log.info("任务开始：%s（%s）", title, kind)
 
         def run():
+            status = "error"
             try:
                 job.result = fn(job)
-                job.status = "done"
+                status = "done"
             except (ops.OpError, updater.UpdateError, ValueError, FileNotFoundError, FileExistsError, SchemaTooNew) as e:
-                job.error, job.status = str(e), "error"
+                job.error = str(e)
                 job.log(f"错误：{e}")
                 log.info("任务出错：%s：%s", title, e)
             except Exception as e:  # noqa: BLE001 - 意外错误也要告诉用户，并在排错日志里留下完整记录
-                job.error, job.status = (f"出错了：{type(e).__name__}: {e}。"
-                                         "详细信息已写进排错日志（设置 → 打开排错日志文件夹）"), "error"
+                job.error = f"出错了：{type(e).__name__}: {e}。详细信息已写进排错日志（设置 → 打开排错日志文件夹）"
                 job.log(job.error)
                 log.exception("任务意外出错：%s（%s）", title, kind)
             finally:
                 job.finished = datetime.now().isoformat(timespec="seconds")
                 self.invalidate()
-                log.info("任务结束：%s，%s，用时 %.1f 秒", title, job.status, time.monotonic() - job.t0)
+                log.info("任务结束：%s，%s，用时 %.1f 秒", title, status, time.monotonic() - job.t0)
                 try:
-                    job.write_oplog(job.status)
+                    job.write_oplog(status)
                 except Exception:  # noqa: BLE001 - 记日志出错不能影响任务本身
                     log.exception("写操作日志出错：%s", title)
+                job.status = status  # 最后才标完成：界面（和测试）看到完成时，操作日志已经写好
 
         threading.Thread(target=run, daemon=True, name=f"job-{kind}").start()
         return job
