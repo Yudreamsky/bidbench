@@ -112,6 +112,21 @@ def test_jobs_run_the_whole_pipeline(running, sample_zips, tmp_path):
     assert c.post("/api/job", {"kind": "export", "what": "其他"})["_status"] == 400
 
 
+def test_receive_job_takes_folders_and_several_files(running, sample_zips, tmp_path):
+    import make_sample
+    c = running(None)
+    c.post("/api/app/new", {"path": str(tmp_path / "p"), "name": "示例"})
+    folder, when = make_sample.build_folder(tmp_path / "in")
+    assert "一次只能收一个文件夹" in c.post("/api/job", {"kind": "receive", "paths": [str(folder), str(sample_zips[0][0])]})["error"]
+    assert "请先选择" in c.post("/api/job", {"kind": "receive", "paths": []})["error"]
+    j = c.job("receive", paths=[str(folder)], date=when, av=False)
+    assert j["status"] == "done" and j["title"] == "收图：1020补充（文件夹）", j
+    assert any("（文件夹）：收进 4 个文件" in ln for ln in j["lines"])
+    j = c.job("receive", paths=[str(p) for p, _ in sample_zips[:2]], date="2026-10-21", av=False)
+    assert j["status"] == "done" and j["title"].endswith("等 2 个文件"), j
+    assert [b["archive"] for b in c.get("/api/state")["batches"]] == ["1020补充（文件夹）", "示例综合体投标图纸.zip、示例综合体投标图纸0802.zip"]
+
+
 def test_one_job_at_a_time(running, demo_copy, monkeypatch):
     c = running(demo_copy)
     gate = threading.Event()

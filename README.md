@@ -22,21 +22,24 @@
 
 ```bash
 pip install -e ".[dev]"
-./samples/run_demo.sh demo-project      # 生成 4 批合成图纸，逐批收图、识别、计算
+./samples/run_demo.sh demo-project      # 生成 5 批合成图纸（4 个压缩包 + 1 个文件夹），逐批收图、识别、计算
 bidbench -p demo-project serve          # 浏览器打开 http://127.0.0.1:8765/
 bidbench -p demo-project desktop        # 或者开独立窗口（需要 pip install -e ".[desktop]"）
 ```
 
 演示数据覆盖：目录列出但缺失的图、引用不存在的图、合订本、整套重发中消失的图、内层压缩包补来的图、加密压缩包、
 同版次不同内容、设计变更单、GBK 文件名的压缩包、事实冲突（地上层数 20 / 21）、建模基线过期、
-风险文件（acad.lsp、双扩展名程序、带宏的表格、带脚本的 PDF，内容都是无害的占位）。
+风险文件（acad.lsp、双扩展名程序、带宏的表格、带脚本的 PDF，内容都是无害的占位）、
+直接给文件夹的补图（夹着压缩包、系统缩略图缓存和 Office 临时锁文件）。
 
 ## 日常用法
 
 ```bash
 bidbench init 项目目录 --name "某某项目"
 cd 项目目录
-bidbench receive ~/下载/投标图纸0915.zip --date 2026-09-15   # 每收到一个压缩包就登记一次
+bidbench receive ~/下载/投标图纸0915.zip --date 2026-09-15   # 每收到一批图纸就登记一次
+bidbench receive D:/共享盘/1020补充 --date 2026-10-20         # 也可以是一个文件夹（连子文件夹一起收）
+bidbench receive 建筑.zip 结构.zip 说明.pdf --date 2026-10-21  # 或同一次收到的几个文件，算同一批
 bidbench tasks                                               # 生成识别任务包，交给外部 agent
 bidbench import recognition/tasks/<任务包>/results           # 校验并导入识别结果
 bidbench recognize                                           # 或：用模拟执行器直接识别并导入
@@ -131,12 +134,26 @@ bidbench update --rollback  # 回到上一次更新之前的版本
 | --- | --- | --- |
 | zip（含 GBK 文件名、ZipCrypto 加密）、tar | Python 自带 | 不需要 |
 | rar4 / rar5、7z（不加密） | 系统自带的 bsdtar | Windows 10 及以上、macOS 自带，不需要；Linux 装 `libarchive-tools` |
-| 加密的 rar | unrar 或 7-Zip | 装 WinRAR 或 7-Zip（Windows 会自动找默认安装目录） |
-| 加密的 7z | py7zr 或 7-Zip | `pip install -e ".[archives]"`（约 20 MB，主要是加密库），或装 7-Zip |
+| 加密的 rar | unrar 或 7-Zip | 装 WinRAR 或 7-Zip（Windows 上按默认安装目录和注册表找，装在别的位置也找得到） |
+| 加密的 7z（含连文件名都加密的） | py7zr 或 7-Zip | `pip install -e ".[archives]"`（约 20 MB，主要是加密库），或装 7-Zip |
 
 默认安装不增加任何体积。按 bsdtar → unrar → 7-Zip 的顺序尝试，成功即停；任何工具失败都整体作废，不用解了一半的文件。
 压缩包里的符号链接一律跳过；含符号链接的压缩包只用 bsdtar 解，防止被链接带到压缩包以外。
 一个工具都没有时，解包报告会写明需要装什么。分卷压缩包（`.part1.rar`、`.z01`）目前仍需先手工合并。
+中文 Windows 自带的 tar 解不了文件名里带 `Ø` 这类字符的 rar；这时会提示安装 7-Zip 或 WinRAR，装好后重新收图即可。
+
+## 文件夹和多个文件
+
+收图来源除了压缩包，也可以是一个文件夹（连子文件夹一起收），或同一次收到的几个文件（工作台里在对话框中一起选中）。
+
+- 整个文件夹或这几个文件算一个批次；里面的压缩包照样逐层解开、去重、检查风险文件。
+  文件夹里直接放的压缩包相当于外层包，压缩包里再套的才算内层。
+- 每个文件按内容存进项目，另在 `archives/` 下留一份只读的文件清单，记下原来的位置和结构。
+- 不收系统自动生成的文件：`Thumbs.db`、`desktop.ini`、`.DS_Store`、Office 打开文档时留下的 `~$` 临时锁文件。
+  符号链接和目录联接不跟进去；项目自己的目录在里面时自动跳过。
+- 同一个文件夹内容没变时拒收；设计院在同一个文件夹里改了图，再收一次算新批次，
+  按“整套重发”判断，文件夹里不见了的图会问你是作废还是漏发。
+- 读不出来的文件（正被其他程序占用、没有权限）登记为“读不出来”，提醒你关掉占用它的程序后重收。
 
 ## 文件安全检查
 
@@ -153,6 +170,8 @@ bidbench update --rollback  # 回到上一次更新之前的版本
 
 - 有本机杀毒软件时一并扫描：Windows 上自动调用系统自带的 Windows Defender，其他系统用 ClamAV（需先 `freshclam` 下载病毒库）。
   只报告不删除；收图后被实时防护隔离的文件也会标出来。`bidbench receive --no-av` 跳过。
+- 收图时被杀毒软件拦下的文件（读不出来，或解出后马上不见了）按高风险文件列进问题中心：
+  它没有收进项目，如果是图纸，需要发图方重新发一份干净的。解出后再和压缩包的文件清单核对一遍，少了的不会静默漏掉。
 - 发现的问题进入问题中心，由你决定“确认安全”或“确认有风险”（后者列入答疑，请发图方核实）。AI 助手不参与这类判断。
 - “导出现行图纸”和工作台里打开的 PDF 会去掉脚本、自动动作和附件，图面不变。
 - 老项目或规则更新后，运行 `bidbench scan` 按最新规则重查全部文件并做一次杀毒扫描，报告在 `reports/文件安全检查.md`。
@@ -181,7 +200,7 @@ bidbench update --rollback  # 回到上一次更新之前的版本
 
 | 环节 | 说明 | 代码 |
 | --- | --- | --- |
-| 收图与解包 | 原件只读保存；zip / tar 原生支持，rar / 7z 调用系统解压工具；GBK 文件名修复；加密、损坏、分卷、缺工具都登记为问题 | `bidbench/ingest.py`、`bidbench/extractors.py` |
+| 收图与解包 | 压缩包、文件、文件夹或几个文件为一批；原件只读保存；zip / tar 原生支持，rar / 7z 调用系统解压工具；GBK 文件名修复；加密、损坏、分卷、缺工具、读不出来都登记为问题 | `bidbench/ingest.py`、`bidbench/extractors.py` |
 | 文件安全 | 静态规则 + 本机杀毒软件；导出时去除 PDF 脚本 | `bidbench/risk.py`、`bidbench/antivirus.py` |
 | 去重 | 文件级 SHA-256；页面级像素指纹（合订本中的一页能对上单独的 PDF）；内容级差值哈希 + 文字相似度 | `bidbench/pdfpages.py` |
 | 识别 | 任务包 + `spec/schema.json` 约定输出；执行器可替换；导入前严格校验 | `bidbench/recognition.py`、`bidbench/executors/` |

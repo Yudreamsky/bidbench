@@ -10,7 +10,8 @@ from .store import Project
 
 KIND_LABEL = {"pdf": "PDF", "cad": "CAD 图纸", "office": "Office 文档", "image": "图片", "text": "文本", "other": "其他"}
 ISSUE_LABEL = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷", "symlink": "符号链接",
-               "too_deep": "嵌套过深", "too_large": "超出上限", "blocked": "被拦截"}
+               "too_deep": "嵌套过深", "too_large": "超出上限", "blocked": "被拦截", "unreadable": "读不出来"}
+SOURCE_LABEL = {"archive": "压缩包", "file": "单个文件", "folder": "文件夹", "files": "同时收到的几个文件"}
 SAFETY_TIPS = ["不要双击运行投标文件里的程序，也不要随手点 Office 的“启用宏”。",
                "用 CAD 打开图纸前，先确认同一个文件夹里没有 acad.lsp、acaddoc.lsp、acad.fas、*.mnl 这类文件；"
                "建议在 CAD 的“选项 → 系统 → 安全”里把 SECURELOAD 设为 1 或 2，只从受信任位置加载脚本。",
@@ -21,17 +22,22 @@ def receive_report(proj: Project, r: ReceiveResult, security: dict | None = None
 
     kinds = "、".join(f"{KIND_LABEL.get(k, k)} {n} 个" for k, n in sorted(r.by_kind.items())) or "无"
     lines = [f"# 批次 #{r.seq} 解包报告：{r.name}", "",
-             f"共解出 {r.files} 个文件：{kinds}。新增 PDF 页面 {r.new_pages} 页（与已收文件内容相同的不重复计算）。", ""]
+             f"收图来源：{SOURCE_LABEL.get(r.source, r.source)}。共收进 {r.files} 个文件：{kinds}。"
+             f"新增 PDF 页面 {r.new_pages} 页（与已收文件内容相同的不重复计算）。", ""]
+    if r.skipped:
+        lines += [f"没有收的系统自动生成文件 {len(r.skipped)} 个（缩略图缓存、Office 临时锁文件等，不是图纸）："
+                  + "、".join(r.skipped[:10]) + ("等" if len(r.skipped) > 10 else "") + "。", ""]
     if r.duplicates:
         lines += [f"本批次内有 {r.duplicates} 个文件与本批其他位置的文件完全相同，只保存一份，出处都已记录。", ""]
     if r.nested_archives:
         lines += ["## 内层压缩包（已自动展开）", ""] + [f"- {p}" for p in r.nested_archives] + [""]
-    if r.issues:
-        lines += ["## 需要处理", "", "下面的文件没能完整解出，里面可能藏着缺失的图纸。", "",
+    issues = [i for i in r.issues if i["kind"] != "blocked"]  # 被杀毒软件拦下的列在下面的文件安全检查里
+    if issues:
+        lines += ["## 需要处理", "", "下面的文件没能完整收进来，里面可能藏着缺失的图纸。", "",
                   "| 问题 | 位置 | 说明 |", "| --- | --- | --- |"]
-        lines += [f"| {ISSUE_LABEL.get(i['kind'], i['kind'])} | {i['path']} | {i['detail']} |" for i in r.issues] + [""]
+        lines += [f"| {ISSUE_LABEL.get(i['kind'], i['kind'])} | {i['path']} | {i['detail']} |" for i in issues] + [""]
     else:
-        lines += ["没有解不开的文件。", ""]
+        lines += ["没有解不开或读不出来的文件。", ""]
     lines += security_section(security)
     out = proj.path("reports", f"批次{r.seq:02d}-解包报告.md")
     out.write_text("\n".join(lines), encoding="utf-8")
@@ -92,7 +98,7 @@ def diff_report(state: dict) -> str:
     if not b:
         return ""
     lines = [f"# 批次 #{b['seq']} 到图差异报告", "",
-             f"收图日期 {b['received_at']}，压缩包 {b['archive']}。判断为：{'、'.join(b['kinds'])}（把握：{b['confidence']}）。", ""]
+             f"收图日期 {b['received_at']}，来源 {b['archive']}。判断为：{'、'.join(b['kinds'])}（把握：{b['confidence']}）。", ""]
 
     def sec(title, items):
         if items:
@@ -127,14 +133,19 @@ def register_report(state: dict) -> str:
 def missing_report(state: dict) -> str:
     rows = [s for s in state["sheets"] if s["status"] == "missing"]
     lines = [f"# 缺图清单（截至批次 #{state['as_of']}）", ""]
-    if not rows:
-        return "\n".join(lines + ["目前没有发现缺图号的图纸。"] + floor_section(state)) + "\n"
-    lines += ["| 图号 | 图名 | 可靠程度 | 依据 |", "| --- | --- | --- | --- |"]
-    lines += [f"| {s['no']} | {s['title'] or ''} | {s.get('missing_level', '')} | {'；'.join(s['notes'])} |" for s in rows]
+    if rows:
+        lines += ["| 图号 | 图名 | 可靠程度 | 依据 |", "| --- | --- | --- | --- |"]
+        lines += [f"| {s['no']} | {s['title'] or ''} | {s.get('missing_level', '')} | {'；'.join(s['notes'])} |" for s in rows]
+    else:
+        lines.append("目前没有发现缺图号的图纸。")
     lines += floor_section(state)
     ext = [i for i in state["issues"] if i["kind"] == "解包问题"]
     if ext:
         lines += ["", "另有以下文件没能解开，里面可能还有图纸：", ""] + [f"- {i['title']}：{i['detail']}" for i in ext]
+    blocked = [f for f in (state.get("security") or {}).get("files", []) if f.get("blocked")]
+    if blocked:
+        lines += ["", "以下文件收图时被本机杀毒软件拦下，没有收进项目；如果是图纸，需要发图方重新发一份干净的：", ""]
+        lines += [f"- {f['name']}：{(f['paths'] or [''])[0]}" for f in blocked]
     return "\n".join(lines) + "\n"
 
 

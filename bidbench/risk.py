@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import zipfile
@@ -22,6 +23,7 @@ from pathlib import Path
 RULES_VERSION = 1
 LEVEL_WORD = {"high": "高", "medium": "中", "low": "低"}
 LEVEL_ORDER = {"high": 0, "medium": 1, "low": 2}
+BLOCKED_SOURCE = "本机杀毒软件"
 
 EXEC_EXTS = {
     ".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".ps1", ".psm1",
@@ -206,10 +208,23 @@ def rescan_static(proj) -> int:
         return con.execute("SELECT COUNT(DISTINCT sha256) FROM risk_findings").fetchone()[0]
 
 
+def blocked_key(batch_seq: int, path: str) -> str:
+    """被拦下的文件读不到内容，按批次和出处算一个固定的编号，和普通风险文件一样取前 12 位用来做决定。"""
+    return hashlib.sha256(f"blocked\n{batch_seq}\n{path}".encode("utf-8")).hexdigest()
+
+
+def blocked_rows(issues) -> list[dict]:
+    """收图时被杀毒软件拦下、或解出后不见了的文件（解包问题里的 blocked），当作高风险文件。"""
+    return [{"batch_seq": i["batch_seq"], "sha256": blocked_key(i["batch_seq"], i["path"]), "path": i["path"],
+             "source": BLOCKED_SOURCE, "level": "high", "kind": "av_blocked", "detail": i["detail"]}
+            for i in issues if i["kind"] == "blocked"]
+
+
 def batch_summary(proj, seq: int) -> dict:
     """某一批次的风险文件和杀毒扫描结果，给解包报告和命令行用。"""
     with proj.connect() as con:
         rows = [dict(r) for r in con.execute("SELECT * FROM risk_findings WHERE batch_seq=? ORDER BY id", (seq,))]
+        rows += blocked_rows(dict(r) for r in con.execute("SELECT * FROM extraction_issues WHERE batch_seq=? ORDER BY id", (seq,)))
         rows.sort(key=lambda r: LEVEL_ORDER[r["level"]])  # 每个文件最严重的发现排在前面
         scans = [dict(r) for r in con.execute("SELECT * FROM av_scans WHERE batch_seq=? ORDER BY id", (seq,))]
     by_file: dict[str, dict] = {}

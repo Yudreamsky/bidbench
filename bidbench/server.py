@@ -161,20 +161,30 @@ def _job_fn(app: _App, kind: str, body: dict):
         return proj
 
     if kind == "receive":
-        path = Path(str(body.get("path") or "")).expanduser()
-        if not path.is_file():
-            raise ValueError("找不到这个压缩包，请重新选择")
+        raw = body.get("paths") if isinstance(body.get("paths"), list) else [body.get("path")]
+        paths = [Path(str(p).strip()).expanduser() for p in raw if isinstance(p, str) and p.strip()]
+        if not paths:
+            raise ValueError("请先选择压缩包、文件或文件夹")
+        for p in paths:
+            if not p.exists():
+                raise ValueError(f"找不到 {p}，请重新选择")
+        if len(paths) > 1 and any(p.is_dir() for p in paths):
+            raise ValueError("一次只能收一个文件夹；多个文件可以一起收")
         when = str(body.get("date") or date.today().isoformat())
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", when):
             raise ValueError("收图日期格式应为 YYYY-MM-DD")
         pw = [p for p in (body.get("passwords") or []) if isinstance(p, str) and p]
 
         def fn(job):
-            r = ops.receive(need_proj(), path, when, body.get("name") or None, pw, body.get("note") or None,
-                            av=bool(body.get("av", True)), log=job.log)
+            def progress(n, total):
+                job.progress = (n, total)
+            r = ops.receive(need_proj(), paths, when, body.get("name") or None, pw, body.get("note") or None,
+                            av=bool(body.get("av", True)), log=job.log, progress=progress)
+            job.progress = None
             ops.build(proj, log=job.log)
             return r
-        return f"收图：{path.name}", fn
+        what = paths[0].name + ("（文件夹）" if paths[0].is_dir() else "") + (f" 等 {len(paths)} 个文件" if len(paths) > 1 else "")
+        return f"收图：{what}", fn
 
     if kind == "estimate":
         scope, tier = body.get("scope") or "new", body.get("tier") or "economy"

@@ -19,16 +19,26 @@ class OpError(Exception):
 
 # ---------------- 收图 ----------------
 
-def receive(proj: Project, archive: Path, date: str, name: str | None = None, passwords=(), note: str | None = None,
-            av: bool = True, log: Log = print) -> dict:
-    r = ingest.receive(proj, Path(archive), date, name, list(passwords), note)
+def receive(proj: Project, sources, date: str, name: str | None = None, passwords=(), note: str | None = None,
+            av: bool = True, log: Log = print, progress=None) -> dict:
+    """收一批图纸：sources 是一个压缩包、文件或文件夹，或者同时收到的几个文件（列表）。"""
+    srcs = [Path(s) for s in sources] if isinstance(sources, (list, tuple)) else [Path(sources)]
+    r = ingest.receive(proj, srcs if len(srcs) > 1 else srcs[0], date, name, list(passwords), note, progress=progress)
     kinds = "、".join(f"{reports.KIND_LABEL.get(k, k)} {n}" for k, n in sorted(r.by_kind.items()))
-    log(f"批次 #{r.seq}「{r.name}」：解出 {r.files} 个文件（{kinds}），新增 {r.new_pages} 页。")
+    how = {"folder": "（文件夹）", "files": f"（{len(srcs)} 个文件）"}.get(r.source, "")
+    verb = "收进" if r.source in ("folder", "files") else "解出"
+    log(f"批次 #{r.seq}「{r.name}」{how}：{verb} {r.files} 个文件（{kinds}），新增 {r.new_pages} 页。")
+    if r.skipped:
+        log(f"  跳过 {len(r.skipped)} 个系统自动生成的文件（Thumbs.db、Office 临时锁文件等）。")
     if r.nested_archives:
         log(f"  内层压缩包 {len(r.nested_archives)} 个，已自动展开。")
     for i in r.issues:
-        log(f"  ⚠ {reports.ISSUE_LABEL.get(i['kind'], i['kind'])}：{i['path']}")
+        if i["kind"] != "blocked":  # 被拦下的文件在下面的风险文件里列出
+            log(f"  ⚠ {reports.ISSUE_LABEL.get(i['kind'], i['kind'])}：{i['path']}")
     engine = _antivirus(proj, r.seq, not av, log)
+    blocked = sum(1 for i in r.issues if i["kind"] == "blocked")
+    if blocked:
+        log(f"  ✗ 另有 {blocked} 个文件在收图时就被本机杀毒软件拦下，没有收进项目，已按高风险登记。")
     sec = risk.batch_summary(proj, r.seq)
     sec["av"] = engine
     for f in sec["files"]:
@@ -39,7 +49,7 @@ def receive(proj: Project, archive: Path, date: str, name: str | None = None, pa
     rep = reports.receive_report(proj, r, sec)
     log(f"解包报告：{rep}")
     return {"seq": r.seq, "files": r.files, "new_pages": r.new_pages, "report": str(rep),
-            "issues": len(r.issues), "risky": len(sec["files"])}
+            "issues": len(r.issues), "risky": len(sec["files"]), "blocked": blocked}
 
 
 def _antivirus(proj, seq, skip: bool, log: Log) -> str | None:

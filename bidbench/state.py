@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from . import floors, pdfpages, risk
+from .ingest import FOLDER_MARK
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
 
 SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
@@ -165,10 +166,20 @@ def _multi_page(con, sha: str) -> bool:
     return _mp_cache[sha]
 
 
+def _is_archive_name(name: str) -> bool:
+    return name.lower().endswith((".zip", ".rar", ".7z", ".tar", ".tgz", ".gz"))
+
+
 def _in_nested_archive(path: str) -> bool:
-    """出处路径形如“批次#3 / 外层.zip / 结构 / 补充图纸.zip / 结施-03.pdf”，中间再出现压缩包即为内层。"""
+    """出处路径形如“批次#3 / 外层.zip / 结构 / 补充图纸.zip / 结施-03.pdf”，中间再出现压缩包即为内层。
+
+    文件夹批次形如“批次#5 / 补充（文件夹） / 结构 / 结构.zip / 结施-06.pdf”：文件夹里直接放的压缩包相当于外层，
+    压缩包里再套的压缩包才算内层。
+    """
     parts = path.split(" / ")
-    return any(p.lower().endswith((".zip", ".rar", ".7z", ".tar", ".tgz", ".gz")) for p in parts[2:-1])
+    if len(parts) > 1 and parts[1].endswith(FOLDER_MARK):
+        return sum(_is_archive_name(p) for p in parts[2:-1]) >= 2
+    return any(_is_archive_name(p) for p in parts[2:-1])
 
 
 def _val(rec, key):
@@ -214,6 +225,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
             "SELECT o.batch_seq, COUNT(*) AS n, SUM(f.kind='pdf') AS pdf, SUM(o.depth>1) AS nested"
             " FROM occurrences o JOIN files f ON f.sha256=o.sha256 WHERE f.kind!='archive' GROUP BY o.batch_seq")}
         risk_rows = [dict(r) for r in con.execute("SELECT * FROM risk_findings WHERE batch_seq<=? ORDER BY id", (as_of,))]
+        risk_rows += risk.blocked_rows(ext_issues)  # 收图时被杀毒软件拦下的文件，也按高风险文件处理
         scans = [dict(r) for r in con.execute("SELECT * FROM av_scans WHERE batch_seq<=? ORDER BY id", (as_of,))]
         risk_paths: dict[str, list] = defaultdict(list)
         for r in con.execute("SELECT o.sha256, o.path FROM occurrences o WHERE o.batch_seq<=? AND o.sha256 IN"
@@ -475,9 +487,11 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
 
     # ---- 解包问题 ----
     for i in ext_issues:
+        if i["kind"] == "blocked":
+            continue  # 被杀毒软件拦下的文件在“风险文件”里处理
         label = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷",
                  "too_deep": "嵌套过深", "too_large": "超出上限", "symlink": "符号链接",
-                 "blocked": "被拦截"}.get(i["kind"], i["kind"])
+                 "unreadable": "读不出来"}.get(i["kind"], i["kind"])
         if i["kind"] == "symlink":
             issues.append(_issue("info", "解包问题", f"extract:{i['id']}", f"{label}：{i['path'].split(' / ')[-1]}",
                                  f"{i['detail']}。位置：{i['path']}。", {"batch": i["batch_seq"]}, []))
@@ -645,7 +659,8 @@ def _security(rows, scans, paths, decisions, issues) -> dict:
     by_sha: dict[str, dict] = {}
     for r in sorted(rows, key=lambda r: risk.LEVEL_ORDER[r["level"]]):
         f = by_sha.setdefault(r["sha256"], {"sha": r["sha256"], "key": r["sha256"][:12], "level": r["level"],
-                                            "findings": [], "sources": [], "first_batch": r["batch_seq"]})
+                                            "findings": [], "sources": [], "first_batch": r["batch_seq"],
+                                            "blocked": r["kind"] == "av_blocked"})
         if risk.LEVEL_ORDER[r["level"]] < risk.LEVEL_ORDER[f["level"]]:
             f["level"] = r["level"]
         if r["detail"] not in f["findings"]:
@@ -666,13 +681,18 @@ def _security(rows, scans, paths, decisions, issues) -> dict:
         if f["level"] == "low" or f["decision"] == "safe":
             continue
         where = "；".join(f["paths"][:3]) + (f" 等 {len(f['paths'])} 处" if len(f["paths"]) > 3 else "")
+        if f["blocked"]:  # 文件已被杀毒软件拦下，项目里没有它
+            title, tail = f"{f['name']}（被杀毒软件拦截）", "如果它是图纸，需要发图方重新发一份干净的文件。"
+            labels = ("确认是误报（来源可信）", "列入答疑，请发图方核实并重发")
+        else:
+            title, tail = f"{f['name']}（{f['level_word']}风险）", "不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。"
+            labels = ("确认安全（来源可信）", "确认有风险，列入答疑请发图方核实")
         issues.append(_issue(
-            "crit" if f["level"] == "high" else "warn", "风险文件", f"risk:{f['key']}",
-            f"{f['name']}（{f['level_word']}风险）",
-            "；".join(f["findings"]) + f"。位置：{where}。不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。",
+            "crit" if f["level"] == "high" else "warn", "风险文件", f"risk:{f['key']}", title,
+            "；".join(f["findings"]) + f"。位置：{where}。{tail}",
             {"file": f["key"]},
-            [{"label": "确认安全（来源可信）", "kind": "risk", "key": f["key"], "value": "safe"},
-             {"label": "确认有风险，列入答疑请发图方核实", "kind": "risk", "key": f["key"], "value": "dangerous"}],
+            [{"label": labels[0], "kind": "risk", "key": f["key"], "value": "safe"},
+             {"label": labels[1], "kind": "risk", "key": f["key"], "value": "dangerous"}],
             level_word=f["level_word"], confirmed=f["decision"] == "dangerous"))
     files.sort(key=lambda f: (risk.LEVEL_ORDER[f["level"]], f["name"]))
     pending = sum(1 for f in files if f["level"] != "low" and not f["decision"])
