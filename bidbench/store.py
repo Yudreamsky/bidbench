@@ -116,6 +116,41 @@ CREATE TABLE IF NOT EXISTS baselines(
 """
 
 
+# 数据库结构版本。修改已有表的结构时：SCHEMA_SQL 写成最新的样子，SCHEMA_VERSION 加 1，
+# 并在 MIGRATIONS 里写从上一版升级过来的 SQL。旧项目打开时自动升级，升级前先备份数据库。
+SCHEMA_VERSION = 1
+MIGRATIONS: dict[int, str] = {}
+
+
+class SchemaTooNew(ValueError):
+    """项目数据库来自更新版本的 bidbench。"""
+
+
+def migrate(con: sqlite3.Connection, db_path: Path) -> None:
+    fresh = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='batches'").fetchone() is None
+    if fresh:
+        con.executescript(SCHEMA_SQL)
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
+    v = con.execute("PRAGMA user_version").fetchone()[0] or 1  # 加版本号之前的项目都是第 1 版
+    if v > SCHEMA_VERSION:
+        raise SchemaTooNew(f"这个项目是用更新版本的 bidbench 打开过的（数据库版本 {v}，当前程序支持到 {SCHEMA_VERSION}），"
+                           "请先更新程序：bidbench update")
+    if v < SCHEMA_VERSION:
+        backup = db_path.with_name(f"{db_path.name}.bak-v{v}-{datetime.now():%Y%m%d-%H%M%S}")
+        dst = sqlite3.connect(backup)
+        try:
+            con.backup(dst)
+        finally:
+            dst.close()
+        for k in range(v + 1, SCHEMA_VERSION + 1):
+            con.executescript(MIGRATIONS[k])
+            con.execute(f"PRAGMA user_version = {k}")
+        con.commit()
+    elif con.execute("PRAGMA user_version").fetchone()[0] == 0:
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -157,7 +192,8 @@ class Project:
     def connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
-        con.executescript(SCHEMA_SQL)
+        migrate(con, self.db_path)
+        con.executescript(SCHEMA_SQL)  # 新增的表直接补建（都是 IF NOT EXISTS）
         return con
 
     def blob_path(self, sha: str, ext: str) -> Path:

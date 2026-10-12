@@ -150,6 +150,9 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
 .versions li.old { color: var(--muted); }
 .form { display: flex; gap: 6px; }
 .form input { font: inherit; flex: 1; min-width: 0; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+.update-bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 8px 12px; border-radius: 8px;
+  background: var(--accent-tint); border: 1px solid var(--accent); font-size: 13px; }
+.update-bar b { color: var(--accent); }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--surface); padding: 8px 16px; border-radius: 6px; font-size: 13px; }
 </style>
 </head>
@@ -170,6 +173,7 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
       </nav>
     </div>
   </header>
+  <div class="update-bar" id="update-bar" hidden></div>
   <div class="work">
     <div>
       <section class="view" id="view-graph" role="tabpanel" aria-labelledby="tab-graph">
@@ -297,7 +301,9 @@ function renderHeader() {
   const meta = document.getElementById('proj-meta');
   meta.replaceChildren(`${S.batches.length} 个收图批次 · ${S.sheets.length} 个图号 · `,
     b ? `截至 ${b.received_at} · ` : '', `已识别 ${rec.recognized}/${rec.pages} 页（${ex}）`,
-    rec.executors.simulated ? el('span', {}, ' · ', el('span', { class: 'tag-sim' }, '识别结果为模拟数据')) : '');
+    rec.executors.simulated ? el('span', {}, ' · ', el('span', { class: 'tag-sim' }, '识别结果为模拟数据')) : '',
+    VER ? el('span', {}, ' · ', el('button', { class: 'chip', type: 'button', onclick: renderUpdate, title: '软件更新' },
+      `v${VER.version}${VER.commit ? ' ' + VER.commit : ''}`)) : '');
   const sel = document.getElementById('as-of');
   sel.replaceChildren(...S.batches.map(x => el('option', { value: x.seq }, `批次 #${x.seq}（${x.received_at}）`)));
   sel.value = S.as_of;
@@ -615,6 +621,62 @@ function renderFact(key) {
   panel.replaceChildren(...parts);
 }
 
+/* ---------- 更新 ---------- */
+let UPD = null, VER = null;
+async function checkUpdate(force) {
+  try {
+    VER = await (await fetch('/api/version')).json();
+    if (S) renderHeader();  // 项目数据还没加载完时，等 setState 时再画页头
+    UPD = await (await fetch('/api/update/check' + (force ? '?force=1' : ''))).json();
+  } catch (e) { return; }
+  const bar = document.getElementById('update-bar');
+  if (UPD.status === 'available') {
+    bar.replaceChildren(el('b', {}, '有新版本'), `${UPD.commits.length} 项更新`,
+      el('button', { class: 'btn primary', type: 'button', onclick: renderUpdate }, '查看并更新'));
+    bar.hidden = false;
+  } else bar.hidden = true;
+}
+function renderUpdate() {
+  const u = UPD || {};
+  const parts = [el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, '软件更新'),
+      el('p', { class: 'meta' }, `当前 ${VER ? VER.version + '（' + (VER.commit || '未知') + '）' : ''}`))];
+  if (u.status === 'available') {
+    parts.push(section(`本次更新（${u.commits.length}）`, el('ul', { class: 'list' }, u.commits.map(c =>
+      el('li', {}, el('span', { class: 'mono' }, c.date), ' ', c.title)))));
+    if (u.deps_changed) parts.push(el('div', { class: 'note warn' }, '这次更新改动了依赖，重启前会自动补装，可能多花一两分钟。'));
+    parts.push(el('div', { class: 'note' }, '更新只替换程序代码，不会动你的项目数据；更新后可以回退到上一版。'));
+    parts.push(el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => runUpdate('apply') }, '更新并重启')));
+  } else {
+    parts.push(el('div', { class: `note ${u.status === 'up_to_date' ? '' : 'warn'}` }, u.message || '无法检查更新。'));
+    parts.push(el('div', { class: 'opts' }, el('button', { class: 'btn', type: 'button', onclick: async () => { await checkUpdate(true); renderUpdate(); } }, '重新检查')));
+  }
+  if (VER && VER.can_rollback) parts.push(section('回退', el('p', { class: 'meta' }, `上次更新于 ${VER.last_update.replace('T', ' ')}。新版本有问题时可以回到更新前的版本。`),
+    el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: () => runUpdate('rollback') }, '回退到上一版'))));
+  panel.replaceChildren(...parts);
+}
+async function runUpdate(action) {
+  panel.replaceChildren(el('div', { class: 'ptitle' }, el('h2', {}, action === 'apply' ? '正在更新' : '正在回退'),
+    el('p', { class: 'meta' }, '正在拉取代码并重启工作台，完成后页面会自动刷新。请不要关闭命令行窗口。')));
+  const r = await fetch(`/api/update/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  const data = await r.json();
+  if (!r.ok) { toast(data.error || '更新失败'); renderUpdate(); return; }
+  const before = VER && VER.commit;
+  const started = Date.now();
+  const poll = async () => {
+    try {
+      const v = await (await fetch('/api/version', { cache: 'no-store' })).json();
+      if (v.commit && v.commit !== before) { location.reload(); return; }
+    } catch (e) { /* 重启中，继续等 */ }
+    if (Date.now() - started > 120000) {
+      panel.replaceChildren(el('div', { class: 'note warn' }, '重启时间比预期长。请稍后手动刷新页面；如果打不开，在命令行重新运行 bidbench serve。'));
+      return;
+    }
+    setTimeout(poll, 1500);
+  };
+  setTimeout(poll, 2000);
+}
+
 /* ---------- 动作 ---------- */
 function setView(v) {
   ui.view = v;
@@ -650,6 +712,7 @@ document.getElementById('mm-collapse').addEventListener('click', () => { S.facts
 document.getElementById('as-of').addEventListener('change', e => { const v = Number(e.target.value); ui.asOf = v; load(v === Math.max(...S.batches.map(b => b.seq)) ? null : v); });
 
 setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');
+checkUpdate(false);
 load(null).catch(() => { panel.replaceChildren(el('div', { class: 'note crit' }, '连接本地服务失败。请确认 bidbench serve 正在运行。')); });
 })();
 </script>
