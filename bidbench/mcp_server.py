@@ -91,7 +91,7 @@ def build_server(kit: Toolkit):
 
     @tool()
     def batch_diff(batch: int | None = None) -> dict:
-        """某一批到图相对上一批的差异报告（升版、新增、缺图、冲突、事实变化、楼层缺口、受影响的建模基线）。不填 batch 为最新一批。"""
+        """某一批到图相对上一批的差异报告（升版、新增、缺图、版本冲突、事实冲突、事实变化及哪张图改了数、楼层缺口、受影响的建模基线）。不填 batch 为最新一批。"""
         return kit.batch_diff(batch)
 
     @tool()
@@ -108,7 +108,8 @@ def build_server(kit: Toolkit):
 
     @tool()
     def get_sheet(no: str) -> dict:
-        """一张图的卡片：状态、现行版次、版本链、出处、注意事项、引用关系、来自它的事实和相关问题。no 为图号，如“结施-04”。"""
+        """一张图的卡片：状态、现行版次、版本链、出处、注意事项、引用关系、来自它的事实（this_sheet 是本图原文，project_value 是全项目取值）、
+        问题（relation：本图的问题，或它牵涉的相关问题，如事实冲突的来源、引用了缺失的图）。no 为图号，如“结施-04”。"""
         return kit.get_sheet(no)
 
     @tool()
@@ -134,7 +135,7 @@ def build_server(kit: Toolkit):
 
     @tool()
     def floor_coverage() -> list:
-        """楼层覆盖检查结果：各类平面图、配筋图覆盖了哪些楼层，缺哪些层，依据是什么。"""
+        """楼层覆盖检查结果：各类平面图、配筋图覆盖了哪些楼层，缺哪些层，依据是什么；remarks 说明没查的楼层、只靠待确认图纸覆盖的楼层。"""
         return kit.floor_coverage()
 
     @tool()

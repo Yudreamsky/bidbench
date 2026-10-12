@@ -444,19 +444,21 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     missing: dict[str, dict] = {}
     for t, info in listed.items():
         if t not in sheet_out:
-            missing.setdefault(t, {"no": t, "title": info["title"], "evidence": [], "level": "高"})
+            missing.setdefault(t, {"no": t, "title": info["title"], "evidence": [], "level": "高", "related": set()})
             missing[t]["evidence"].append(f"目录 {info['catalog']} 列出")
+            missing[t]["related"].add(info["catalog"])
             edges.append({"from": info["catalog"], "to": t, "type": "catalog", "label": "目录列出", "bbox": None,
                           "page_id": current_page[info["catalog"]].page_id})
     for t, froms in dangling.items():
         if t in sheet_out:
             continue  # 已作废的图仍被引用：在下面单独提示
-        missing.setdefault(t, {"no": t, "title": None, "evidence": [], "level": "高"})
+        missing.setdefault(t, {"no": t, "title": None, "evidence": [], "level": "高", "related": set()})
         missing[t]["evidence"].append("被 " + "、".join(sorted(set(froms))) + " 引用")
+        missing[t]["related"] |= set(froms)
     for t, froms in dangling.items():
         if t in sheet_out and sheet_out[t]["status"] == "voided":
             issues.append(_issue("warn", "引用已作废图纸", f"ref_void:{t}", f"{t} 已作废但仍被引用",
-                                 "引用它的图纸：" + "、".join(sorted(set(froms))), {"sheet": t}, []))
+                                 "引用它的图纸：" + "、".join(sorted(set(froms))), {"sheet": t}, [], sheets=froms))
     # 编号断号
     by_prefix = defaultdict(set)
     for no in list(sheet_out) + list(listed):
@@ -482,7 +484,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                              f"missing:{t}", f"{t} {m['title'] or ''}".strip(), desc, {"sheet": t},
                              [{"label": "列入答疑，向招标方要图", "kind": "missing", "key": t, "value": "ask"},
                               {"label": "确认不需要（作废或笔误）", "kind": "missing", "key": t, "value": "not_needed"}],
-                             level_word=m["level"], confirmed=bool(m.get("confirmed"))))
+                             level_word=m["level"], confirmed=bool(m.get("confirmed")), sheets=m.get("related")))
     missing = {t: m for t, m in missing.items() if m.get("status") == "missing"}
 
     # ---- 解包问题 ----
@@ -528,7 +530,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             if voided:
                 desc += ("；" if desc else "") + "已作废：" + "、".join(voided)
             issues.append(_issue("warn", "基线过期", f"baseline:{b['name']}", f"任务「{b['name']}」用的图纸已更新",
-                                 desc + "。", {"sheet": (outdated[0]["sheet"] if outdated else voided[0])}, []))
+                                 desc + "。", {"sheet": (outdated[0]["sheet"] if outdated else voided[0])}, [],
+                                 sheets=[o["sheet"] for o in outdated] + voided))
 
     # ---- 汇总 ----
     sheets_list = list(sheet_out.values())
@@ -603,6 +606,9 @@ def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> 
         for no, _title, fl, _how in members:
             for f in fl:
                 covered[f].append(no)
+        pending = {no for no, *_ in members if sheet_out[no]["status"] == "pending_void"}  # 作废还是漏发待确认
+        firm = {f for no, _t, fl, _h in members if no not in pending for f in fl}
+        tentative = sorted(set(covered) - firm)
         unknown = [m for m in members if not m[2]]
         for no, title, _fl, _how in unknown:
             if "标准层" in title:
@@ -625,12 +631,24 @@ def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> 
             basis = ("图名和说明里都没有楼层信息，无法检查" if not ground
                      else f"只知道 {floors.label(ground[0])} 一层，无法判断有没有断档")
         missing = sorted(expected - set(covered))
+        unchecked = None
+        if not full and expected and above:  # 只查了已出现楼层之间：说清楚楼里还有哪些层没查
+            building = set(range(1, above + 1)) | {-n for n in range(1, (below or 0) + 1)} | {floors.ROOF}
+            unchecked = floors.compress(sorted(building - expected - set(covered))) or None
+        remarks = []
+        if unchecked:
+            remarks.append(f"没查：{unchecked}（这类图只检查已出现楼层之间有没有断档）")
+        if tentative:
+            src = sorted({no for f in tentative for no in covered[f] if no in pending})
+            remarks.append(f"{floors.compress(tentative)} 只有待确认是否作废的 {'、'.join(src)}，确认作废后会变成缺图")
         row = {
             "group": gname, "discipline": disc, "basis": basis,
-            "covered": [{"floors": floors.compress(fl), "sheets": [no], "from": how} for no, _t, fl, how in members if fl],
+            "covered": [{"floors": floors.compress(fl), "sheets": [no], "from": how, "tentative": no in pending}
+                        for no, _t, fl, how in members if fl],
             "unknown": [no for no, *_ in unknown],
             "missing": [floors.label(f) for f in missing], "missing_text": floors.compress(missing),
-            "status": "missing" if missing else ("ok" if expected else "unchecked"),
+            "status": "missing" if missing else ("ok" if full and expected else "no_gap" if expected else "unchecked"),
+            "unchecked": unchecked, "tentative": floors.compress(tentative) or None, "remarks": remarks,
         }
         if missing:
             key = f"楼层|{gname}|{row['missing_text']}"
@@ -639,7 +657,8 @@ def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> 
                 row["status"] = "accepted"
             else:
                 row["confirmed"] = bool(d and d["value"] == "ask")
-                have = "；".join(f"{c['floors']}（{c['sheets'][0]}）" for c in row["covered"]) or "无"
+                have = "；".join(f"{c['floors']}（{c['sheets'][0]}{'，待确认是否作废' if c['tentative'] else ''}）"
+                                for c in row["covered"]) or "无"
                 issues.append(_issue(
                     "warn", "楼层覆盖", f"floor:{gname}", f"{gname}缺 {row['missing_text']}",
                     f"{basis}。已有：{have}。缺：{row['missing_text']}。", {"floor_group": gname},
@@ -704,9 +723,19 @@ def _disc_order(d: str) -> int:
     return order.index(d) if d in order else len(order)
 
 
-def _issue(level, kind, iid, title, detail, target, options, level_word=None, confirmed=False):
+def _issue(level, kind, iid, title, detail, target, options, level_word=None, confirmed=False, sheets=None):
+    """sheets：牵涉到的其他图纸（事实冲突的各个来源、引用了缺图的图纸等），图纸卡片上作为“相关问题”显示。"""
     return {"id": iid, "level": level, "kind": kind, "title": title, "detail": detail, "target": target,
-            "options": options, "level_word": level_word, "confirmed": confirmed}
+            "options": options, "level_word": level_word, "confirmed": confirmed, "sheets": sorted(set(sheets or ()))}
+
+
+BASIS_NOTE = re.compile(r"[（(][^（）()]*(?:含|包括|计入|不计|除)[^（）()]*[）)]")  # 统计口径的说明，如“（含屋顶机房层）”
+
+
+def _basis_quote(evs: list) -> str:
+    """来源原文带统计口径说明时引出来：数不一样，可能只是口径不同。"""
+    t = next((e["text"] for e in evs if e["text"] and BASIS_NOTE.search(e["text"])), None)
+    return f"，原文“{t}”" if t else ""
 
 
 def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live):
@@ -765,12 +794,15 @@ def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live):
             note = f"人工确认（{d['created_at'][:10]}）" + (f"：{d['note']}" if d["note"] else "")
         elif len(values) > 1:
             conf = "conflict"
-            parts = "；".join(f"{es[0]['value']}（{'、'.join(sorted({e['sheet'] for e in es}))}）" for es in ranked)
+            parts = "；".join(f"{es[0]['value']}（{'、'.join(sorted({e['sheet'] for e in es}))}{_basis_quote(es)}）" for es in ranked)
             note = f"来源不一致：{parts}。"
+            if any(_basis_quote(es) for es in ranked):
+                note += "带统计口径说明的，可能只是口径不同（例如含不含机房层），不一定是图纸矛盾，核对原文后再定。"
             issues.append(_issue("crit", "事实冲突", f"fact:{key}", f"{names[key]}：" + " / ".join(es[0]["value"] for es in ranked),
                                  note, {"fact": key},
                                  [{"label": f"采用 {es[0]['value']}", "kind": "fact", "key": key,
-                                   "value": es[0]["value"] + (f" {es[0]['unit']}" if es[0]["unit"] else "")} for es in ranked]))
+                                   "value": es[0]["value"] + (f" {es[0]['unit']}" if es[0]["unit"] else "")} for es in ranked],
+                                 sheets={e["sheet"] for e in act}))
         else:
             srcs = {e["sheet"] for e in best}
             if len(srcs) >= 2:
@@ -799,7 +831,8 @@ def diff_states(prev: dict | None, cur: dict) -> dict:
     ps = {s["no"]: s for s in (prev or {}).get("sheets", [])}
     cs = {s["no"]: s for s in cur["sheets"]}
     out = {"batch": cur["as_of"], "upgraded": [], "added": [], "resolved_missing": [], "new_missing": [],
-           "new_conflicts": [], "pending_void": [], "fact_changes": [], "baselines": [], "floor_gaps": []}
+           "new_conflicts": [], "new_fact_conflicts": [], "pending_void": [], "fact_changes": [], "baselines": [],
+           "floor_gaps": []}
     for no, s in cs.items():
         p = ps.get(no)
         if s["status"] == "missing":
@@ -820,10 +853,14 @@ def diff_states(prev: dict | None, cur: dict) -> dict:
     for g in cur["facts"]["groups"]:
         for f in g["facts"]:
             old = pf.get(f["key"])
-            if old and (old["value"] != f["value"] or old["conf"] != f["conf"]):
-                out["fact_changes"].append(f"{f['name']}：{old['value']}（{CONF_LABEL[old['conf']]}）→ {f['value']}（{CONF_LABEL[f['conf']]}）")
+            moved = _source_changes(old, f) if old else ""
+            if old and (old["value"] != f["value"] or old["conf"] != f["conf"] or moved):
+                out["fact_changes"].append(f"{f['name']}：{old['value']}（{CONF_LABEL[old['conf']]}）→ {f['value']}（{CONF_LABEL[f['conf']]}）"
+                                           + (f"。{moved}" if moved else ""))
             elif not old and prev is not None:
                 out["fact_changes"].append(f"新增 {f['name']}：{f['value']}")
+            if prev is not None and f["conf"] == "conflict" and (not old or old["conf"] != "conflict"):
+                out["new_fact_conflicts"].append(f"{f['name']}：{_values_text(f)}" + (f"。{moved}" if moved else ""))
     prev_gaps = {r["group"]: r["missing_text"] for r in (prev or {}).get("floor_coverage", []) if r["status"] == "missing"}
     for r in cur.get("floor_coverage", []):
         if r["status"] == "missing" and prev_gaps.get(r["group"]) != r["missing_text"]:
@@ -832,6 +869,33 @@ def diff_states(prev: dict | None, cur: dict) -> dict:
         if b["outdated"]:
             out["baselines"].append(f"{b['name']}：" + "、".join(f"{o['sheet']} {o['base_rev']}→{o['current_rev']}" for o in b["outdated"]))
     return out
+
+
+def _values_text(f: dict) -> str:
+    """现行来源各自写的值：“20（建施-01、建施-07） / 21（结施-01）”。"""
+    by_value: dict[str, list] = defaultdict(list)
+    for e in f["evidence"]:
+        if e["active"]:
+            by_value[norm_value(e["value"])].append(e)
+    ranked = sorted(by_value.values(), key=lambda es: -len({e["sheet"] for e in es}))
+    return " / ".join(f"{es[0]['value']}（{'、'.join(sorted({e['sheet'] for e in es}))}）" for es in ranked)
+
+
+def _source_changes(old: dict, new: dict) -> str:
+    """事实的来源里哪张图改了数：“结施-01 B 版改为 21（原 A 版为 20）”。"""
+    before = {e["sheet"]: e for e in old["evidence"] if e["active"]}
+    seen_values = {norm_value(e["value"]) for e in before.values()}
+    out = []
+    for e in new["evidence"]:
+        if not e["active"]:
+            continue
+        b = before.get(e["sheet"])
+        rev = f" {e['rev']} 版" if e["rev"] else ""
+        if b and norm_value(b["value"]) != norm_value(e["value"]):
+            out.append(f"{e['sheet']}{rev}改为 {e['value']}（原{' ' + b['rev'] + ' 版' if b['rev'] else ''}为 {b['value']}）")
+        elif not b and norm_value(e["value"]) not in seen_values:
+            out.append(f"{e['sheet']}{rev}写的是 {e['value']}")
+    return "；".join(dict.fromkeys(out))
 
 
 def create_baseline(proj: Project, name: str, sheets: list[str] | None = None, note: str | None = None) -> dict:

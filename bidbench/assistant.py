@@ -130,10 +130,16 @@ class Toolkit:
         refs = [{"direction": "引用" if e["from"] == s["no"] else "被引用",
                  "sheet": e["to"] if e["from"] == s["no"] else e["from"], "text": e["label"]}
                 for e in st["edges"] if s["no"] in (e["from"], e["to"])]
-        facts = [{"key": f["key"], "name": f["name"], "value": f["value"], "confidence": CONF_LABEL[f["conf"]]}
-                 for f in self._facts(st) if s["no"] in f["sources"]]
-        issues = [{"id": i["id"], "kind": i["kind"], "title": i["title"], "detail": i["detail"]}
-                  for i in st["issues"] if i["target"].get("sheet") == s["no"]]
+        facts = []
+        for f in self._facts(st):
+            if s["no"] not in f["sources"]:
+                continue
+            own = next((e for e in f["evidence"] if e["active"] and e["sheet"] == s["no"]), None)
+            facts.append({"key": f["key"], "name": f["name"], "this_sheet": (own["text"] or own["value"]) if own else None,
+                          "project_value": f["value"], "confidence": CONF_LABEL[f["conf"]]})
+        issues = [{"id": i["id"], "kind": i["kind"], "title": i["title"], "detail": i["detail"],
+                   "relation": "本图" if i["target"].get("sheet") == s["no"] else "相关"}
+                  for i in st["issues"] if i["target"].get("sheet") == s["no"] or s["no"] in i.get("sheets", [])]
         return {"no": s["no"], "title": s["title"], "discipline": s["discipline"], "status": STATUS_LABEL[s["status"]],
                 "current_rev": s["current_rev"], "current_page_id": s["current_page"], "paths": s["paths"],
                 "notes": s["notes"],
@@ -222,7 +228,8 @@ class Toolkit:
     def floor_coverage(self) -> list[dict]:
         st = self._state()
         return [{"group": r["group"], "result": reports.FLOOR_STATUS[r["status"]], "basis": r["basis"],
-                 "covered": r["covered"], "missing": r["missing_text"] or None} for r in st["floor_coverage"]]
+                 "covered": r["covered"], "missing": r["missing_text"] or None, "remarks": r.get("remarks", [])}
+                for r in st["floor_coverage"]]
 
     def list_issues(self, level: str | None = None, kind: str | None = None) -> dict:
         st = self._state()
