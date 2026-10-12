@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 from pathlib import Path
@@ -190,9 +191,71 @@ def cmd_notes(args):
         print(f"[{n['topic']}] {n['text']}（{n['source']}，{n['created_at'][:10]}）")
 
 
+def cmd_update(args):
+    from . import updater
+    if args.rollback:
+        try:
+            r = updater.rollback(run_pip=None)
+        except updater.UpdateError as e:
+            sys.exit(f"错误：{e}")
+        print(f"已回退：{r['from']} → {r['rolled_back_to']}")
+        _finish_pip(updater, r["pip_command"])
+        return
+    print("正在检查更新……")
+    st = updater.check()
+    cur = st["current"]
+    print(f"当前版本 {cur['version']}（{cur['commit'] or '未知'}）")
+    if st["status"] != "available":
+        print(st["message"])
+        if st["status"] in ("error", "not_git"):
+            sys.exit(1)
+        return
+    print(st["message"])
+    for c in st["commits"]:
+        print(f"  {c['date']}  {c['title']}")
+    if st["deps_changed"]:
+        print("这次更新改动了依赖，更新后会自动补装。")
+    if args.check:
+        return
+    if not args.yes:
+        try:
+            ans = input("确认更新？[y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes", "是"):
+            print("已取消。")
+            return
+    try:
+        r = updater.apply(run_pip=None)
+    except updater.UpdateError as e:
+        sys.exit(f"错误：{e}")
+    print(f"代码已更新到 {r['updated_to']}（之前是 {r['previous']}，可用 bidbench update --rollback 回退）。")
+    _finish_pip(updater, r["pip_command"])
+    print("正在运行的工作台需要重启才能用上新版本。")
+
+
+def _finish_pip(updater, cmd):
+    """补装依赖。Windows 上 bidbench.exe 正在运行时无法覆盖，改为本窗口退出后在后台安装。"""
+    if not cmd:
+        return
+    running_exe = os.name == "nt" and sys.argv and sys.argv[0].lower().endswith((".exe", "bidbench"))
+    if running_exe:
+        root = updater.repo_root()
+        log = root / ".git" / "bidbench_update.log"
+        updater.spawn_helper(os.getpid(), cmd, None, log)
+        print(f"依赖会在本命令结束后自动在后台安装，过程记录在 {log}。")
+        return
+    print("正在补装依赖……")
+    import subprocess
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        sys.exit("错误：依赖安装失败，请手动运行：" + " ".join(cmd))
+
+
 def cmd_serve(args):
     from .server import serve
     proj = _proj(args)
+    proj.connect().close()  # 先打开一次数据库：需要升级时现在就升级，版本过新时现在就报错
     httpd = serve(proj, args.host, args.port)
     print(f"工作台已启动：http://{args.host}:{args.port}/  （Ctrl+C 退出）")
     try:
@@ -283,6 +346,12 @@ def main(argv=None):
 
     s = sub.add_parser("notes", help="查看已确认的项目笔记")
     s.set_defaults(fn=cmd_notes)
+
+    s = sub.add_parser("update", help="从 GitHub 更新到最新版本")
+    s.add_argument("--check", action="store_true", help="只检查，不更新")
+    s.add_argument("--yes", action="store_true", help="不询问，直接更新")
+    s.add_argument("--rollback", action="store_true", help="回到上一次更新之前的版本")
+    s.set_defaults(fn=cmd_update)
 
     s = sub.add_parser("serve", help="启动本地工作台")
     s.add_argument("--host", default="127.0.0.1")

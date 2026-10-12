@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, urlparse
 
-from . import export, state
+from . import export, state, updater
 from .store import Project, add_decision
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact"}
@@ -21,6 +23,23 @@ class _App:
         self.proj = proj
         self.lock = threading.Lock()
         self.cache: dict[int | None, dict] = {}
+        self.httpd = None
+        self.update_cache: tuple[float, dict] | None = None
+
+    def check_update(self, force: bool = False) -> dict:
+        now = time.monotonic()
+        if not force and self.update_cache and now - self.update_cache[0] < 600:
+            return self.update_cache[1]
+        r = updater.check()
+        self.update_cache = (now, r)
+        return r
+
+    def restart_after(self, pip_command) -> None:
+        """响应发出后退出本进程；由独立的小进程补装依赖、再用新代码重启。"""
+        root = updater.repo_root()
+        log = (root / ".git" / "bidbench_update.log") if root else self.proj.root / "update.log"
+        updater.spawn_helper(os.getpid(), pip_command, updater.restart_command(), log)
+        threading.Timer(0.5, self.httpd.shutdown).start()
 
     def state(self, as_of: int | None = None) -> dict:
         with self.lock:
@@ -54,6 +73,10 @@ def make_handler(app: _App):
             if u.path in ("/", "/index.html"):
                 html = resources.files("bidbench").joinpath("web/index.html").read_bytes()
                 return self._send(200, html, "text/html; charset=utf-8")
+            if u.path == "/api/version":
+                return self._json(updater.version_info())
+            if u.path == "/api/update/check":
+                return self._json(app.check_update(force="force" in parse_qs(u.query)))
             if u.path == "/api/state":
                 q = parse_qs(u.query)
                 as_of = int(q["as_of"][0]) if q.get("as_of") else None
@@ -83,6 +106,15 @@ def make_handler(app: _App):
                 add_decision(app.proj, kind, key, value, body.get("note"))
                 app.invalidate()
                 return self._json(app.state())
+            if u.path in ("/api/update/apply", "/api/update/rollback"):
+                try:
+                    r = updater.apply() if u.path.endswith("apply") else updater.rollback()
+                except updater.UpdateError as e:
+                    return self._json({"error": str(e)}, 400)
+                app.update_cache = None
+                self._json({**r, "restarting": True})
+                app.restart_after(r["pip_command"])
+                return None
             if u.path == "/api/proposal":
                 from .assistant import Toolkit, ToolError
                 pid, action = body.get("id"), body.get("action")
@@ -115,4 +147,6 @@ def make_handler(app: _App):
 def serve(proj: Project, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
     app = _App(proj)
     httpd = ThreadingHTTPServer((host, port), make_handler(app))
+    app.httpd = httpd
+    httpd.app = app
     return httpd

@@ -89,6 +89,23 @@ bidbench recognize --executor claude --tier strong --scope weak       # 强档�
 - 中断后用 `--task <任务包>` 续跑，已完成的页面会跳过。凭据缺失、模型不可用时第一页就会停下。
 - 图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。
 
+## 更新
+
+工作台检测到 GitHub 上有新版本时，顶部会出现“有新版本”，点开能看到更新内容，点“更新并重启”即可；
+页头的版本号也能打开这个面板。命令行：
+
+```bash
+bidbench update --check     # 只检查
+bidbench update             # 更新（会先列出更新内容并确认）
+bidbench update --rollback  # 回到上一次更新之前的版本
+```
+
+- 需要用 `git clone` 安装，跟随 `main` 分支（每个 PR 合并前都通过 CI）。沿用本机 git 的登录凭据。
+- 只做快进更新：本地改过代码、不在 `main`、与远程分叉时停下，不覆盖、不自动合并。
+- 依赖有变化时自动补装（保留你已装的可选功能，如 `claude`、`mcp`）；Windows 上在工作台退出后再装，避开被占用的 `bidbench.exe`。
+- 项目数据不在代码目录里，更新不会碰到。数据库结构升级时会先备份为 `bidbench.sqlite.bak-v版本-时间`。
+- 更新过程记录在代码目录的 `.git/bidbench_update.log`。
+
 ## AI 助手（MCP）
 
 `bidbench -p 项目目录 mcp` 把项目作为 MCP 工具集提供给 Claude 桌面版、Claude Code、Codex 等 agent。
