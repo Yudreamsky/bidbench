@@ -105,7 +105,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          prev=$(gh release view --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1)
+          prev=$(gh release view --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1 || true)  # 第一次发布时还没有任何 Release
           python packaging/release_notes.py "$prev" > notes.md
           cat notes.md
           b="b${{ github.run_number }}"
