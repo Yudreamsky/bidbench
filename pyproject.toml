@@ -15,7 +15,8 @@ dependencies = [
 
 [project.optional-dependencies]
 archives = ["py7zr>=0.20", "rarfile>=4.1"]
-dev = ["pytest>=8"]
+claude = ["anthropic>=1.13"]
+dev = ["pytest>=8", "anthropic>=1.13"]
 
 [project.scripts]
 bidbench = "bidbench.cli:main"

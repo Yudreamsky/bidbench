@@ -36,7 +36,7 @@ def cmd_receive(args):
 
 def cmd_tasks(args):
     proj = _proj(args)
-    t = recognition.make_task(proj, include_done=args.all, render=not args.no_images)
+    t = recognition.make_task(proj, include_done=args.all, render=not args.no_images, scope=args.scope)
     if not t:
         print("没有需要识别的页面。")
         return
@@ -47,17 +47,48 @@ def cmd_tasks(args):
 
 def cmd_recognize(args):
     proj = _proj(args)
-    if args.executor != "simulated":
-        sys.exit(f"暂不支持执行器 {args.executor}；外部 agent 请用 bidbench tasks + bidbench import。")
-    task = Path(args.task) if args.task else None
-    if task is None:
-        task = recognition.make_task(proj, render=False)
+    if args.executor == "simulated":
+        task = Path(args.task) if args.task else recognition.make_task(proj, render=False, scope="unrecognized")
         if task is None:
             print("没有需要识别的页面。")
             return
-    n = simulated.run(task)
+        n = simulated.run(task)
+        res = recognition.import_results(proj, task / "results")
+        print(f"模拟执行器识别 {n} 页，导入 {res.imported} 页。" + (f"{len(res.errors)} 个文件未通过校验。" if res.errors else ""))
+        return
+
+    from .executors import claude
+    task = Path(args.task) if args.task else recognition.make_task(proj, render=True, scope=args.scope)
+    if task is None:
+        print(f"范围「{recognition.SCOPES[args.scope]}」内没有需要识别的页面。")
+        return
+    est = claude.estimate(task, args.tier, args.model, args.tiles)
+    usd = f"约 ${est['estimated_usd']:.2f}" if est["estimated_usd"] is not None else "未知（模型不在价格表里）"
+    print(f"任务包：{task}")
+    print(f"待识别 {est['pages']} 页，{est['images']} 张图片，模型 {est['model']}，粗略估算输入 {est['input_tokens']} tokens、"
+          f"输出 {est['output_tokens']} tokens，花费{usd}。")
+    if args.dry_run:
+        print("只做了估算（--dry-run），没有调用 API。去掉 --dry-run 正式运行，或用 --task 指定这个任务包。")
+        return
+
+    def progress(n, total):
+        print(f"\r  已完成 {n}/{total}", end="", flush=True)
+
+    try:
+        r = claude.run(task, args.tier, args.model, args.effort, args.tiles, args.workers, progress=progress)
+    except claude.FatalError as e:
+        print()
+        sys.exit(f"错误：{e}。任务包已保留，配置好后可续跑：bidbench recognize --executor claude --task {task}")
+    print()
+    cost = r.usage.cost(r.model)
+    print(f"识别 {r.done} 页，跳过 {r.skipped} 页，失败 {len(r.failed)} 页；实际用量 输入 {r.usage.input} / 输出 {r.usage.output} tokens"
+          + (f"，约 ${cost:.4f}" if cost is not None else "") + "。")
+    for f in r.failed[:5]:
+        print(f"  ✗ {f['file']}：{f['error']}")
     res = recognition.import_results(proj, task / "results")
-    print(f"模拟执行器识别 {n} 页，导入 {res.imported} 页。" + (f"{len(res.errors)} 个文件未通过校验。" if res.errors else ""))
+    print(f"导入 {res.imported} 页。" + (f"{len(res.errors)} 个文件未通过校验，详见 reports/识别结果导入问题.md" if res.errors else ""))
+    if r.failed:
+        print(f"失败的页面可以重跑：bidbench recognize --executor claude --task {task}")
 
 
 def cmd_import(args):
@@ -138,13 +169,23 @@ def main(argv=None):
     s.set_defaults(fn=cmd_receive)
 
     s = sub.add_parser("tasks", help="生成识别任务包，交给外部 agent 执行")
-    s.add_argument("--all", action="store_true", help="包括已识别过的页面")
+    s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="挑选哪些页面（默认 new）")
+    s.add_argument("--all", action="store_true", help="等同于 --scope all")
     s.add_argument("--no-images", action="store_true", help="不渲染页面图片（仅文字层）")
     s.set_defaults(fn=cmd_tasks)
 
     s = sub.add_parser("recognize", help="用内置执行器识别并导入")
-    s.add_argument("--executor", default="simulated")
-    s.add_argument("--task", help="已有任务包路径；不填则新建")
+    s.add_argument("--executor", default="simulated", choices=["simulated", "claude"])
+    s.add_argument("--task", help="已有任务包路径（续跑）；不填则新建")
+    s.add_argument("--scope", default="new", choices=list(recognition.SCOPES),
+                   help="claude 执行器挑选哪些页面：" + "；".join(f"{k}={v}" for k, v in recognition.SCOPES.items()))
+    s.add_argument("--tier", default="economy", choices=["economy", "strong"],
+                   help="economy=claude-haiku-5-5 全量识别；strong=claude-opus-5-5 加局部切片，用于复核")
+    s.add_argument("--model", help="覆盖档位的默认模型")
+    s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="覆盖档位的默认 effort")
+    s.add_argument("--tiles", type=int, help="局部切片 N×N，0 表示不切")
+    s.add_argument("--workers", type=int, default=4, help="并发页数")
+    s.add_argument("--dry-run", action="store_true", help="只生成任务包并估算花费，不调用 API")
     s.set_defaults(fn=cmd_recognize)
 
     s = sub.add_parser("import", help="校验并导入识别结果")

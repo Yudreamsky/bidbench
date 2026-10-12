@@ -5,8 +5,10 @@
 - **缺漏图纸**：目录对账、引用悬空、编号断号、藏在内层压缩包或加密包里的图
 - **误用旧版本图纸**：逐张图判断现行版，识别“改图不升版”，建模任务锁定图纸基线并在升版时提醒
 
-> 当前状态：流水线完整可用，**图纸识别暂由“模拟执行器”代替**。它只读取 PDF 文字层并按规则抽取，扫描件无法识别。
-> 真实的多模态识别通过“识别任务包”交给 Codex 等外部 agent 或以后的内置 agent，输出格式相同，其余环节不用改。
+> 识别有三种执行器，输出格式相同（`bidbench/spec/schema.json`），可以随时替换：
+> - **Claude 执行器**（内置）：调用 Claude 多模态识别，分经济、强两档，见下文“图纸识别”
+> - **外部 agent**：把识别任务包交给 Codex 等 agent 的目标模式，见 [docs/外部执行器.md](docs/外部执行器.md)
+> - **模拟执行器**：只读 PDF 文字层、按规则抽取，用于演示和测试，扫描件无法识别
 
 ## 快速体验
 
@@ -45,6 +47,47 @@ bidbench build --as-of 2                                     # 还原到第 2 �
 | 整套重发中消失的图：已作废 / 仍有效 | `bidbench decide sheet_void 建施-05 voided`（或 `keep`） |
 | 缺图：列入答疑 / 不需要 | `bidbench decide missing 建施-09 ask`（或 `not_needed`） |
 | 确认事实的值 | `bidbench decide fact 地上层数 "20 层" --note "结施-01 计入了机房层"` |
+
+## 图纸识别
+
+先配置 Claude API 凭据（任选其一）：
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...      # 或者：ant auth login
+pip install -e ".[claude]"
+```
+
+推荐的分级用法：先用经济档全量识别，再用强档复核有问题的页面。
+
+```bash
+bidbench recognize --executor claude --dry-run              # 只生成任务包并估算花费
+bidbench recognize --executor claude                        # 经济档：claude-haiku-5-5，识别新页面
+bidbench build
+bidbench recognize --executor claude --tier strong --scope conflict   # 强档复核冲突页面
+bidbench recognize --executor claude --tier strong --scope weak       # 强档复核识别不完整的页面
+```
+
+| 档位 | 模型 | 送给模型的内容 | 适合 |
+| --- | --- | --- | --- |
+| economy（默认） | claude-haiku-5-5 | 整页缩略图、图签放大图、文字层 | 首次全量识别 |
+| strong | claude-opus-5-5 | 再加 3×3 局部切片，effort 为 high | 冲突页、低置信页、重点图纸 |
+
+| 范围 `--scope` | 挑选的页面 |
+| --- | --- |
+| new（默认） | 尚未识别的页面，以及只有模拟执行器结果的页面 |
+| weak | 识别不完整：模拟结果、有问题记录、缺图号或图签把握低于 0.6 |
+| conflict | 涉及版本冲突、版次倒退或事实冲突的页面 |
+| unrecognized | 尚未识别的页面 |
+| all | 全部页面 |
+
+说明：
+
+- 像素完全相同的页面只识别一次，结果自动复用；整套重发时没变的图不会重复花钱。
+- 使用结构化输出约束格式，导入前再用完整 schema 校验；没通过就带着错误重试一次。若 API 不接受这份 schema，会自动改为在提示里附格式说明，结果照样校验。
+- 强档模型启用了服务端拒答回退（`fallbacks: "default"`），被安全分类器拒绝时由服务端换模型重跑。
+- 系统提示开启了提示缓存。每次运行在任务包的 `results/run_log.md` 和 `usage.json` 里记录用量和估算花费。
+- 中断后用 `--task <任务包>` 续跑，已完成的页面会跳过。凭据缺失、模型不可用时第一页就会停下。
+- 图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。
 
 ## 流水线
 

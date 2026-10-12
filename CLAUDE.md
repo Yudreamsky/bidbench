@@ -7,3 +7,5 @@
 - 拿不准的判断（版本、作废、冲突）不要自动拍板，生成问题并给出决定选项。
 - `bidbench/web/index.html` 是本地工具，不加载任何外部资源（字体、CDN），图纸不出电脑。
 - 新的到图情况先在 `samples/make_sample.py` 里加一个合成案例，再写对应测试。
+- 识别执行器只读任务包、只写 `results/`；新执行器放在 `bidbench/executors/`，测试用假的 API 客户端，不联网。
+- Claude 执行器的提示词在 `bidbench/executors/claude.py` 的 `SYSTEM_PROMPT`，改识别要求时与 `spec/任务说明.md` 保持一致。
