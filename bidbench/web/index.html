@@ -180,6 +180,25 @@ li.recent .linkbtn { flex: 1; }
 .logrow .bad { color: var(--crit); }
 .logrow summary { cursor: pointer; color: var(--accent); font-size: 12px; }
 .logrow .joblog { margin-top: 4px; }
+.chat { display: flex; flex-direction: column; gap: 14px; }
+.turn { display: flex; flex-direction: column; gap: 6px; }
+.turn .q { align-self: flex-end; max-width: 92%; background: var(--accent-tint); border-radius: 8px; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.turn .a { background: var(--band); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; }
+.turn .a p { margin: 0 0 6px; }
+.turn .a > :last-child { margin-bottom: 0; }
+.turn .a ul, .turn .a ol { margin: 0 0 6px; padding-left: 20px; }
+.turn .a h4 { margin: 2px 0 4px; font-size: 13px; }
+.turn .a code { font-family: var(--font-mono); font-size: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; }
+.turn .steps { font-size: 12px; color: var(--muted); }
+.turn .steps summary { cursor: pointer; }
+.turn .steps ul.list { font-size: 12px; gap: 2px; margin-top: 4px; }
+.turn .steps li.running::after { content: " …"; }
+.turn .steps li.failed { color: var(--crit); }
+.chat-input textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); resize: vertical; min-height: 64px; }
+.chat-input select { font: inherit; font-size: 12px; padding: 2px 4px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); max-width: 150px; }
+.sheetlink { font: inherit; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 2px 10px; cursor: pointer; color: var(--ink); }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--surface); padding: 8px 16px; border-radius: 6px; font-size: 13px; }
 </style>
 </head>
@@ -313,13 +332,14 @@ function proposalSummary(p) {
   if (p.kind === 'decision') return `${d.issue_title} → ${d.label}`;
   if (p.kind === 'baseline') return `锁定基线「${d.name}」（${d.sheets ? d.sheets.join('、') : '全部现行图纸'}）`;
   if (p.kind === 'note') return `项目笔记「${d.topic}」：${d.text}`;
+  if (p.kind === 'improvement') return `改进建议「${d.title}」：${d.suggestion}`;
   return p.kind;
 }
 async function decide(opt) {
   if (await post('/api/decision', { kind: opt.kind, key: opt.key, value: opt.value })) toast('已记录：' + opt.label);
 }
 
-function setState(st) {
+function setState(st, keepPanel) {
   S = st;
   sheetBy = Object.fromEntries(S.sheets.map(s => [s.no, s]));
   factBy = {}; factGroupOf = {};
@@ -329,6 +349,7 @@ function setState(st) {
   renderHeader();
   buildGraph();
   renderMind();
+  if (keepPanel) return;  // AI 助手面板里更新数据时留在面板上
   if (ui.selD) renderSheet(ui.selD); else if (ui.selF) renderFact(ui.selF); else renderOverview();
 }
 
@@ -783,7 +804,7 @@ function renderActions() {
   const box = document.getElementById('actions');
   if (!APP || !APP.project) { box.replaceChildren(); return; }
   const b = (label, fn, primary) => el('button', { class: `btn${primary ? ' primary' : ''}`, type: 'button', onclick: fn }, label);
-  box.replaceChildren(b('收图', renderReceive, true), b('识别', renderRecognize), b('导出', renderExport),
+  box.replaceChildren(b('收图', renderReceive, true), b('AI 助手', () => renderAssistant()), b('识别', renderRecognize), b('导出', renderExport),
     b('安全扫描', () => startJob('scan', { av: true })), b('日志', renderLog), b('设置', renderSettings), b('切换项目', closeProject));
 }
 async function boot() {
@@ -954,6 +975,146 @@ function renderSettings() {
       el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: async () => { await checkUpdate(true); renderUpdate(); } }, '检查更新'))),
     section('排错日志（给开发用）', el('p', { class: 'meta' }, '程序内部的运行记录和出错信息，保留最近 14 天。出了问题，把这个文件夹里的文件发给开发者。里面没有图纸内容、识别出的文字和密钥。'),
       el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: () => openFolder(APP.log_dir) }, '打开排错日志文件夹'))));
+}
+
+/* AI 助手：用 Codex 回答这个项目的问题；处理问题、确认事实只生成提议，你确认后才生效 */
+let CHAT = null, chatTimer = null, chatDraft = '', chatPainted = '';
+const EXAMPLES = ['这批图有什么变化？', '还缺哪些图？', '地上层数到底是多少？', '帮我起草答疑问题清单'];
+const reEscape = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function mdInline(s) {
+  // **粗体**、`代码`，以及项目里的图号（点一下跳到图谱上那张图）
+  const nos = S ? Object.keys(sheetBy).sort((a, b) => b.length - a.length) : [];
+  const pat = new RegExp('(\\*\\*[^*]+\\*\\*|`[^`]+`' + (nos.length ? '|' + nos.map(reEscape).join('|') : '') + ')', 'g');
+  const out = [];
+  let last = 0, m;
+  while ((m = pat.exec(s))) {
+    if (m.index > last) out.push(s.slice(last, m.index));
+    const t = m[0];
+    if (t.startsWith('**')) out.push(el('b', {}, t.slice(2, -2)));
+    else if (t.startsWith('`')) out.push(el('code', {}, t.slice(1, -1)));
+    else out.push(el('button', { class: 'sheetlink', type: 'button', title: '在图谱上查看这张图', onclick: () => jumpSheet(t) }, t));
+    last = m.index + t.length;
+  }
+  if (last < s.length) out.push(s.slice(last));
+  return out;
+}
+function mdBlock(text) {
+  // 只认段落、列表、小标题、粗体和代码；一律生成 DOM 节点，不把回答当 HTML
+  const box = el('div', { class: 'a' });
+  let list = null, para = null;
+  for (const raw of String(text || '').replace(/\r/g, '').split('\n')) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { list = null; para = null; continue; }
+    if (/^#{1,6}\s/.test(line)) { list = null; para = null; box.append(el('h4', {}, mdInline(line.replace(/^#+\s*/, '')))); continue; }
+    const li = line.match(/^\s*(?:[-*•]|\d+[.)、])\s+(.*)$/);
+    if (li) {
+      const tag = /^\s*\d/.test(line) ? 'OL' : 'UL';
+      if (!list || list.tagName !== tag) { list = el(tag.toLowerCase(), {}); box.append(list); para = null; }
+      list.append(el('li', {}, mdInline(li[1])));
+      continue;
+    }
+    list = null;
+    if (!para) { para = el('p', {}); box.append(para); } else para.append(el('br'));
+    para.append(...mdInline(line));
+  }
+  return box;
+}
+async function renderAssistant(refresh) {
+  clearTimeout(jobTimer); clearTimeout(chatTimer);
+  const back = el('button', { class: 'btn', type: 'button', onclick: () => { clearTimeout(chatTimer); clearAll(); } }, '← 问题中心');
+  const head = el('div', { class: 'ptitle' }, el('h2', {}, 'AI 助手'),
+    el('p', { class: 'meta' }, '用 Codex 回答这个项目的问题。处理问题、确认事实只会生成提议，你确认后才生效。'));
+  panel.replaceChildren(back, head, el('p', { class: 'meta' }, '正在检查本机的 Codex……'));
+  try { CHAT = await (await fetch('/api/chat?status=1' + (refresh === true ? '&refresh=1' : ''))).json(); } catch (e) { CHAT = null; }
+  if (!CHAT || !CHAT.turns) { panel.replaceChildren(back, head, el('div', { class: 'note crit' }, '读不到 AI 助手的状态，请重新打开工作台。')); return; }
+  const cx = CHAT.codex || {};
+  const model = el('select', { id: 'chat-model', 'aria-label': '模型' },
+    [['', `默认（${cx.default_model || 'gpt-6.1-sol'}）`], ...(cx.models || []).map(m => [m.slug, m.name])].map(([v, t]) => el('option', { value: v }, t)));
+  const remembered = (CHAT.prefs || {}).model || '';
+  model.value = [...model.options].some(o => o.value === remembered) ? remembered : '';
+  const input = el('textarea', { id: 'chat-input', rows: '3', 'aria-label': '问题', placeholder: '例如：还缺哪些图？地上层数是多少？（Enter 发送，Shift+Enter 换行）' });
+  input.value = chatDraft;
+  input.addEventListener('input', () => { chatDraft = input.value; });
+  const send = el('button', { class: 'btn primary', type: 'button', id: 'chat-send' }, '发送');
+  const stop = el('button', { class: 'btn', type: 'button', id: 'chat-stop', hidden: '' }, '停止');
+  const fresh = el('button', { class: 'btn', type: 'button', title: '开始新对话，前面的问答不再带上' }, '新对话');
+  const ask = async () => {
+    const question = input.value.trim();
+    if (!question) { toast('请先输入问题'); return; }
+    const r = await api('/api/chat', { question, model: model.value || null });
+    if (!r.ok) return;
+    chatDraft = ''; input.value = '';
+    CHAT = { ...CHAT, ...r.data };
+    paintChat(); pollChat();
+  };
+  send.addEventListener('click', ask);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); ask(); } });
+  stop.addEventListener('click', async () => { const r = await api('/api/chat/stop', {}); if (r.ok) { CHAT = { ...CHAT, ...r.data }; paintChat(); } });
+  fresh.addEventListener('click', async () => { const r = await api('/api/chat/new', {}); if (r.ok) { CHAT = { ...CHAT, ...r.data }; paintChat(); } });
+  const notes = [];
+  if (!cx.ready) notes.push(el('div', { class: 'note warn' }, cx.hint || 'Codex 还不能用。',
+    el('button', { class: 'btn', type: 'button', style: 'margin-left:8px', onclick: () => renderAssistant(true) }, '重新检查')));
+  else if (cx.hint) notes.push(el('div', { class: 'note warn' }, cx.hint));
+  chatPainted = '';
+  panel.replaceChildren(back, head, ...notes, el('div', { class: 'chat', id: 'chat-log' }),
+    el('div', { class: 'chat-input' }, input,
+      el('div', { class: 'opts', style: 'margin-top:6px;align-items:center' }, send, stop, fresh, el('span', { class: 'spacer' }),
+        el('label', { class: 'meta' }, '模型 ', model))),
+    el('small', { class: 'meta' }, '问题和查到的图纸信息会通过 Codex 发送给 OpenAI；每个问题约半分钟到一分钟，占用 ChatGPT 账号的 Codex 额度。'),
+    CHAT.suggestions ? el('small', { class: 'meta' }, `已确认的改进建议 ${CHAT.suggestions} 条，开发时处理。`) : '');
+  paintChat();
+  if (CHAT.running) pollChat();
+}
+function renderTurn(t) {
+  const tools = t.steps.filter(x => x.kind === 'tool');
+  const running = t.status === 'running';
+  const steps = t.steps.length ? el('details', { class: 'steps', open: running ? '' : null },
+    el('summary', {}, running ? `正在查……（已查 ${tools.length} 次）` : `查了 ${tools.length} 次`),
+    el('ul', { class: 'list' }, t.steps.map(x => el('li', { class: x.state }, x.kind === 'tool' ? `查询：${x.text}` : x.text))))
+    : running ? el('p', { class: 'meta' }, '正在思考……') : null;
+  const body = t.status === 'done' ? mdBlock(t.answer) : running ? null
+    : el('div', { class: `note${t.status === 'stopped' ? '' : ' crit'}` }, t.error || '没有回答');
+  const props = (t.proposals || []).map(x => el('div', { class: 'issue' },
+    el('div', { class: 'head' }, el('i', { class: 'dot c-mid' }),
+      el('div', {}, el('span', { style: 'font-weight:500' }, `提议 #${x.id}：${x.summary}`), el('small', {}, `理由：${x.reason}`))),
+    x.status === 'pending' ? el('div', { class: 'opts' },
+      el('button', { class: 'btn primary', type: 'button', onclick: () => chatProposal(x.id, 'confirm') }, '确认'),
+      el('button', { class: 'btn', type: 'button', onclick: () => chatProposal(x.id, 'reject') }, '驳回'))
+      : el('small', { class: 'meta' }, (({ confirmed: '已确认', rejected: '已驳回', stale: '已失效' })[x.status] || x.status) + (x.outcome ? `：${x.outcome}` : ''))));
+  const meta = running ? '' : [t.model, t.seconds != null ? `用时 ${secsText(t.seconds)}` : null].filter(Boolean).join(' · ');
+  return el('div', { class: 'turn' }, el('div', { class: 'q' }, t.question), steps, body, ...props, meta ? el('small', { class: 'meta' }, meta) : null);
+}
+function paintChat() {
+  const box = document.getElementById('chat-log');
+  if (!box || !CHAT) return;
+  const turns = CHAT.turns || [];
+  const send = document.getElementById('chat-send'), stop = document.getElementById('chat-stop');
+  if (send) send.disabled = !!CHAT.running;
+  if (stop) stop.hidden = !CHAT.running;
+  if (!turns.length) {
+    box.replaceChildren(el('p', { class: 'meta' }, '可以这样问：'), el('div', { class: 'chips' }, EXAMPLES.map(q => el('button', { type: 'button', onclick: () => {
+      const i = document.getElementById('chat-input'); i.value = q; chatDraft = q; document.getElementById('chat-send').click(); } }, q))));
+    return;
+  }
+  box.replaceChildren(...turns.map(renderTurn));
+  const key = turns.length + ':' + turns[turns.length - 1].status;
+  if (key !== chatPainted) { chatPainted = key; box.lastElementChild.scrollIntoView({ block: 'nearest' }); }  // 有新问题或答完时才滚动
+}
+async function chatProposal(id, action) {
+  const r = await api('/api/proposal', { id, action });
+  if (!r.ok) return;
+  setState(r.data, true);
+  toast(r.data.last_outcome || (action === 'confirm' ? '已确认' : '已驳回'));
+  try { CHAT = { ...CHAT, ...(await (await fetch('/api/chat')).json()) }; } catch (e) { /* 忽略 */ }
+  paintChat();
+}
+async function pollChat() {
+  clearTimeout(chatTimer);
+  if (!document.getElementById('chat-log')) return;  // 已经离开助手面板
+  try { CHAT = { ...CHAT, ...(await (await fetch('/api/chat')).json()) }; } catch (e) { /* 服务重启中 */ }
+  paintChat();
+  if (CHAT && CHAT.running) { chatTimer = setTimeout(pollChat, 1000); return; }
+  try { const r = await fetch('/api/state'); if (r.ok) setState(await r.json(), true); } catch (e) { /* 忽略 */ }  // 新提议进问题中心
 }
 
 /* 操作日志：收图、识别、导出、人工决定、AI 助手提议，按天分组，最新的在最上面 */

@@ -10,7 +10,7 @@
 - 识别执行器只读任务包、只写 `results/`；新执行器放在 `bidbench/executors/`，逐页流程用 `claude.run_pages`，测试用假的 API 客户端或假的 Codex（`tests/test_codex_executor.py` 的 FakeCodex），不联网。
 - 调用外部命令行程序（解压工具、杀毒软件、Codex）都加 `**proc.NO_WINDOW`，桌面版才不会弹出黑色命令行窗口。
 - Claude 执行器的提示词在 `bidbench/executors/claude.py` 的 `SYSTEM_PROMPT`，改识别要求时与 `spec/任务说明.md` 保持一致。
-- AI 助手的工具都在 `bidbench/assistant.py`，MCP 只是一层注册（`bidbench/mcp_server.py`）。改动类工具只能写 `proposals` 表，确认、驳回不得暴露给 AI。
+- AI 助手的工具都在 `bidbench/assistant.py`，MCP 只是一层注册（`bidbench/mcp_server.py`）。改动类工具只能写 `proposals` 表，确认、驳回不得暴露给 AI。工作台的 AI 助手面板（`bidbench/chat.py`）让 Codex 通过同一个 MCP 服务查询和提议，不另开后门；助手对软件本身的意见只能走 `propose_improvement`，确认后进本机的改进建议清单（`bidbench suggestions`），不给它改代码或碰 GitHub 的能力。
 - 修改已有数据表结构时：`store.SCHEMA_SQL` 写成最新样子，`SCHEMA_VERSION` 加 1，在 `MIGRATIONS` 里写升级 SQL，并加迁移测试。
 - 风险文件规则在 `bidbench/risk.py`，杀毒软件对接在 `bidbench/antivirus.py`。样例和测试里的风险文件必须是无害占位，不要写入 EICAR 等真实病毒特征（会被本机杀毒软件拦截）；杀毒软件测试用假的扫描输出。
 - 收图、识别、导出等日常操作写在 `bidbench/ops.py`（输出走 log 回调），命令行和工作台后台任务都调用它，不要在两边各写一份。

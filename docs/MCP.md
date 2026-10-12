@@ -68,7 +68,7 @@ args = ["-p", "/图纸项目目录", "mcp"]
 | 图纸 | `list_sheets`、`get_sheet`、`get_page`、`search` |
 | 事实与问题 | `list_facts`、`get_fact`、`floor_coverage`、`list_issues`、`draft_qa`、`list_baselines` |
 | 其他 | `estimate_recognition`（只估算，不运行）、`list_notes`、`list_proposals` |
-| 提议（需确认） | `propose_issue_resolution`、`propose_fact_confirmation`、`propose_baseline`、`propose_note` |
+| 提议（需确认） | `propose_issue_resolution`、`propose_fact_confirmation`、`propose_baseline`、`propose_note`、`propose_improvement`（工作台本身的改进建议，确认后记进改进建议清单，`bidbench suggestions` 查看） |
 
 ## 确认提议
 

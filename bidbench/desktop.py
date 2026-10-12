@@ -104,7 +104,7 @@ def main(argv=None) -> int:
         threading.Event().wait()
     except KeyboardInterrupt:
         pass
-    httpd.app.abandon_job()
+    httpd.app.close_down()
     httpd.shutdown()
     return 0
 
@@ -135,7 +135,7 @@ def _window(httpd, url: str) -> int:
     log.info("打开窗口")
     webview.start(gui="edgechromium" if os.name == "nt" else None, private_mode=False, storage_path=str(storage))
     log.info("窗口已关闭")
-    app.abandon_job()
+    app.close_down()
     httpd.shutdown()  # 窗口关掉就退出
     return 0
 

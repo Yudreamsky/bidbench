@@ -1,8 +1,10 @@
 """AI 助手的工具层：查询全部只读；改动只能“提议”，由人确认后才生效。
 
-MCP 服务（mcp_server.py）和以后的内置助手面板都调用这里的函数，规则只写一处：
+MCP 服务（mcp_server.py）和工作台的 AI 助手面板（chat.py）都调用这里的函数，规则只写一处：
 - 查询工具返回精简的结构化数据，每条结论都带出处（图号、版次、页面编号）
 - 提议工具只写入 proposals 表；确认 / 驳回只由人通过工作台或命令行完成，不对 AI 开放
+- 助手觉得工作台本身该改进时，也只能提议（改进建议）；确认后记进本机的改进建议清单，由开发者按清单改代码、开 PR，
+  助手自己碰不到代码和 GitHub
 """
 
 from __future__ import annotations
@@ -11,12 +13,13 @@ import json
 import re
 from pathlib import Path
 
-from . import recognition, reports, state
+from . import appconfig, recognition, reports, state
 from .recognition import page_markdown
 from .state import CONF_LABEL, STATUS_LABEL
 from .store import Project, add_decision, now_iso
 
 AI_SOURCE = "AI 助手"
+SUGGESTIONS = "改进建议.jsonl"  # 在用户目录（appconfig.config_dir()），不在项目里：建议针对的是软件，不是项目
 CONFIRMED_ACTOR = "AI 助手建议，我确认"
 MAX_LIST = 200
 
@@ -328,6 +331,13 @@ class Toolkit:
         nos = [self._sheet(st, s)["no"] for s in sheets] if sheets else None
         return self._propose("baseline", {"name": name.strip(), "sheets": nos}, reason)
 
+    def propose_improvement(self, title: str, problem: str, suggestion: str) -> dict:
+        if not (title or "").strip() or not (suggestion or "").strip():
+            raise ToolError("请写清楚标题（title）和建议（suggestion）。")
+        if not (problem or "").strip():
+            raise ToolError("请写清楚遇到了什么问题（problem）。")
+        return self._propose("improvement", {"title": title.strip(), "suggestion": suggestion.strip()}, problem)
+
     def propose_note(self, topic: str, text: str, reason: str) -> dict:
         if not topic or not text:
             raise ToolError("笔记需要主题和内容。")
@@ -357,6 +367,9 @@ class Toolkit:
             elif r["kind"] == "baseline":
                 snap = state.create_baseline(self.proj, p["name"], p["sheets"], r["reason"])
                 outcome = f"已锁定基线「{p['name']}」：{len(snap)} 张图"
+            elif r["kind"] == "improvement":
+                add_suggestion(p["title"], r["reason"], p["suggestion"])
+                outcome = f"已记入改进建议清单「{p['title']}」，开发时处理"
             elif r["kind"] == "note":
                 with self.proj.connect() as con:
                     con.execute("INSERT INTO notes(topic, text, source, created_at) VALUES (?,?,?,?)",
@@ -391,7 +404,34 @@ def _summary(kind: str, p: dict) -> str:
         return f"锁定基线「{p['name']}」（{'、'.join(p['sheets']) if p['sheets'] else '全部现行图纸'}）"
     if kind == "note":
         return f"项目笔记「{p['topic']}」：{p['text']}"
+    if kind == "improvement":
+        return f"改进建议「{p['title']}」：{p['suggestion']}"
     return kind
+
+
+# ---------------- 改进建议清单（本机，给开发者） ----------------
+
+def suggestions_path() -> Path:
+    return appconfig.config_dir() / SUGGESTIONS
+
+
+def add_suggestion(title: str, problem: str, suggestion: str) -> None:
+    with open(suggestions_path(), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"time": now_iso(), "title": title, "problem": problem, "suggestion": suggestion},
+                           ensure_ascii=False) + "\n")
+
+
+def list_suggestions() -> list[dict]:
+    p = suggestions_path()
+    rows = []
+    for ln in (p.read_text(encoding="utf-8").splitlines() if p.exists() else []):
+        try:
+            r = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(r, dict) and r.get("title"):
+            rows.append(r)
+    return rows
 
 
 def open_toolkit(project_dir: str | Path, source: str = AI_SOURCE) -> Toolkit:

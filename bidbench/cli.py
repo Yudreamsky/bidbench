@@ -190,6 +190,18 @@ def cmd_log(args):
     print(f"排错日志（给开发用）：{debuglog.folder()}")
 
 
+def cmd_suggestions(args):
+    from .assistant import list_suggestions, suggestions_path
+    rows = list_suggestions()
+    if not rows:
+        print("还没有确认过的改进建议。")
+    for n, r in enumerate(rows, 1):
+        print(f"{n}. 【{r['title']}】（{str(r.get('time', ''))[:10]}）")
+        print(f"   问题：{r.get('problem', '')}")
+        print(f"   建议：{r.get('suggestion', '')}")
+    print(f"\n清单文件：{suggestions_path()}")
+
+
 def cmd_desktop(args):
     from .desktop import main as desktop_main
     project = args.project if (Path(args.project) / "bidbench.json").exists() else None
@@ -509,6 +521,9 @@ def main(argv=None):
     s.add_argument("--yes", action="store_true", help="不询问，直接更新")
     s.add_argument("--rollback", action="store_true", help="回到上一次更新之前的版本")
     s.set_defaults(fn=cmd_update)
+
+    s = sub.add_parser("suggestions", help="查看 AI 助手提出、经你确认的改进建议（给开发用）")
+    s.set_defaults(fn=cmd_suggestions)
 
     s = sub.add_parser("log", help="查看操作日志：收图、识别、导出、人工决定、AI 助手提议的时间线")
     s.add_argument("-n", "--limit", type=int, default=50, help="显示最近多少条（默认 50）")
