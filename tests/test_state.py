@@ -127,3 +127,23 @@ def test_decisions(demo_copy):
     st = state.build(p)
     assert sheets(st)["电施-01"]["status"] == "current"
     assert sheets(st)["电施-01"]["current_page"] == opt["value"]
+
+
+def test_number_gaps_only_within_a_series(tmp_path):
+    """分段编号（1xx 平面、2xx 剖面、9xx 系统图）之间的空档不算断号；同一段里连续缺 3 张以内才提示。"""
+    import make_sample
+    from bidbench import ingest, recognition
+    from bidbench.executors import simulated
+    from bidbench.store import Project
+
+    folder = tmp_path / "图纸"
+    folder.mkdir()
+    for n in (101, 102, 103, 105, 110, 201, 202, 203, 901):
+        (folder / f"建施-{n}.pdf").write_bytes(
+            make_sample.sheet_pdf(f"建施-{n}", f"图{n}", "A", "2026-01-01", [], [("A", "2026-01-01", "出图")]))
+    proj = Project.init(tmp_path / "p", "分段编号")
+    ingest.receive(proj, folder, "2026-01-01")
+    task = recognition.make_task(proj, render=False)
+    simulated.run(task)
+    assert not recognition.import_results(proj, task / "results").errors
+    assert missing(state.build(proj)) == {"建施-104"}  # 106~109 连缺 4 张、111~200、204~900 都不算

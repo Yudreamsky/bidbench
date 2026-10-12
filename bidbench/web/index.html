@@ -87,7 +87,32 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .edge.dim { opacity: .12; }
 .edge.on { stroke: var(--accent); stroke-width: 2; }
 .arrow { fill: var(--edge); } .arrow-crit { fill: var(--crit); } .arrow-on { fill: var(--accent); }
-.node { cursor: pointer; }
+.node { cursor: pointer; transform-box: fill-box; transform-origin: center; transition: transform .16s ease; }
+.node:hover, .node:focus-visible { transform: scale(1.12); }
+.node .flag { stroke: var(--surface); stroke-width: 1.5; }
+.node .lbl { font-size: 12.5px; font-weight: 600; fill: var(--ink); }
+.node.st-missing .lbl, .node.st-voided .lbl { fill: var(--muted); }
+.node .ghost { fill: var(--band); stroke: var(--edge); stroke-width: 1.2; }
+.gtip ul.vers { margin: 4px 0 0; padding: 0; list-style: none; font-variant-numeric: tabular-nums; color: var(--muted); }
+.gtip ul.vers li.cur { color: var(--ink); font-weight: 500; }
+.f-updated, .f-new { fill: var(--accent); } .f-changed, .f-pending_void { fill: var(--warn); }
+.f-conflict { fill: var(--crit); } .f-missing, .f-voided, .f-inner { fill: var(--muted); }
+.canvas { position: relative; }
+.gtip { position: absolute; z-index: 5; pointer-events: none; max-width: 340px; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .18); padding: 8px 10px;
+  font-size: 12.5px; line-height: 1.5; opacity: 0; transform: translateY(4px); transition: opacity .14s ease, transform .14s ease; }
+.gtip.show { opacity: 1; transform: none; }
+.gtip .tt { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.gtip .tt b { font-family: var(--font-mono); }
+.gtip .file { color: var(--muted); overflow-wrap: anywhere; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; font-size: 13px; border: 0; background: var(--band); color: var(--muted); padding: 3px 10px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+.gcolor { font: inherit; font-size: 13px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+#net { display: block; width: 100%; height: 100%; min-height: 480px; cursor: grab; touch-action: none; }
+.legend .grp { display: inline-flex; align-items: center; gap: 6px; }
+.gsearch { font: inherit; font-size: 13px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); width: 170px; }
+@media (prefers-reduced-motion: reduce) { .node, .gtip { transition: none; } }
 .node .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.25; }
 .node.st-updated .box, .node.st-new .box { stroke: var(--accent); stroke-width: 2; }
 .node.st-changed .box, .node.st-pending_void .box { stroke: var(--warn); stroke-width: 2; }
@@ -237,8 +262,17 @@ li.recent .linkbtn { flex: 1; }
     <div>
       <section class="view" id="view-graph" role="tabpanel" aria-labelledby="tab-graph">
         <div class="toolbar">
+          <span class="seg" role="group" aria-label="图谱样式">
+            <button type="button" id="g-mode-grid" aria-pressed="true">分组方块</button>
+            <button type="button" id="g-mode-net" aria-pressed="false">关系网</button>
+          </span>
+          <select class="gcolor" id="g-color" aria-label="关系网着色方式" hidden>
+            <option value="type">按图类着色</option><option value="disc">按专业着色</option>
+          </select>
+          <input type="search" class="gsearch" id="g-search" placeholder="搜图号、图名" aria-label="搜图号、图名">
           <label for="f-graph-issues"><input type="checkbox" id="f-graph-issues"> 只看有问题的图纸</label>
-          <div class="legend">
+          <div class="legend" id="net-legend" hidden></div>
+          <div class="legend" id="grid-legend">
             <span><i class="sw"></i>现行</span><span><i class="sw s-updated"></i>本批升版/新增</span>
             <span><i class="sw s-changed"></i>有变更/待确认</span><span><i class="sw s-conflict"></i>冲突</span>
             <span><i class="sw s-missing"></i>缺失/作废</span><span><i class="ln"></i>索引引用</span>
@@ -247,8 +281,9 @@ li.recent .linkbtn { flex: 1; }
           <span class="spacer"></span>
           <button class="btn" id="clear" type="button">清除选择</button>
         </div>
-        <div class="canvas"><svg id="graph" role="group" aria-label="图纸知识图谱"></svg></div>
-        <p class="hint">点击图纸查看详情；选中后只突出它的直接关联。红色连线指向缺失的图纸。</p>
+        <div class="canvas"><svg id="graph" role="group" aria-label="图纸知识图谱"></svg>
+          <canvas id="net" hidden aria-label="图纸关系网：圆点是图纸，线是引用关系"></canvas></div>
+        <p class="hint" id="graph-hint">鼠标指向图纸看源文件和说明，点击看详情；选中后只突出它的直接关联。红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。</p>
       </section>
       <section class="view" id="view-facts" role="tabpanel" aria-labelledby="tab-facts" hidden>
         <div class="toolbar">
@@ -271,7 +306,8 @@ li.recent .linkbtn { flex: 1; }
 <script>
 (() => {
 const NS = 'http://www.w3.org/2000/svg';
-const NW = 136, NH = 48;
+const NH = 28;            // 图谱里图号方块的高度
+const EDGE_ALL_MAX = 150; // 图纸不超过这么多时画出全部连线；更多时只画选中、指向的那张图的连线
 const STATUS = { current: '现行', new: '本批新增', updated: '本批升版', changed: '有变更单', conflict: '冲突',
   pending_void: '作废还是漏发', voided: '已作废', missing: '缺失' };
 const CONF = { confirmed: '人工确认', high: '高置信', mid: '中置信', low: '低置信', conflict: '冲突' };
@@ -385,37 +421,178 @@ function renderHeader() {
 /* ---------- 图谱 ---------- */
 const gsvg = document.getElementById('graph');
 let laidOutAt = 0;  // 上次排版时图谱区的宽度
+let ALIAS = {}, nodeBox = {}, edgeLayer = null, hoverNo = null;
 function graphWidth() {
   const w = gsvg.parentElement.clientWidth - 16;  // 去掉内边距；图谱区隐藏时为 0
   return w > 0 ? Math.max(700, w) : 1040;
 }
+/* 图谱上的短名：按“词 + 楼层”压缩到三个字以内（一串数字算一个字），例如 平面12、梁12、通风B2、剖面1-1、目录 */
+const CN_D = { 〇: 0, 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+function cnInt(t) {
+  if (/^\d+$/.test(t)) return +t;
+  const m = t.match(/^([一二两三四五六七八九])?十([一二三四五六七八九])?$/);
+  if (m) return (m[1] ? CN_D[m[1]] : 1) * 10 + (m[2] ? CN_D[m[2]] : 0);
+  return t.length === 1 && t in CN_D ? CN_D[t] : null;
+}
+const NUM = '[\\d一二两三四五六七八九十]+';
+function floorTag(t) {
+  let m;
+  if ((m = t.match(new RegExp(`(?:地下|负)\\s*(${NUM})\\s*层`))) && cnInt(m[1])) return 'B' + cnInt(m[1]);
+  if ((m = t.match(/(?:^|[^A-Za-z])B(\d+)(?:F|层)?/))) return 'B' + +m[1];
+  if ((m = t.match(new RegExp(`(${NUM})\\s*[~～\\-—至到]\\s*(${NUM})\\s*层`))) && cnInt(m[1]) && cnInt(m[2])) return `${cnInt(m[1])}~${cnInt(m[2])}`;
+  if ((m = t.match(/(\d+)\s*F\s*[~～\-—]\s*(\d+)\s*F/i))) return `${+m[1]}~${+m[2]}`;
+  if (/首层/.test(t)) return '1';
+  if ((m = t.match(new RegExp(`(${NUM})\\s*层`))) && cnInt(m[1])) return String(cnInt(m[1]));
+  if ((m = t.match(/(\d+)\s*F(?![a-z])/i))) return String(+m[1]);
+  return null;
+}
+const FLOOR_WORDS = [[/梁/, '梁'], [/板/, '板'], [/墙柱|柱/, '墙柱'], [/剪力墙|墙/, '墙'], [/给排水|给水|排水/, '给排'],
+  [/通风|排烟/, '通风'], [/空调/, '空调'], [/照明/, '照明'], [/动力/, '动力'], [/消防|喷淋|消火栓/, '消防'], [/弱电|智能/, '弱电'],
+  [/防雷|接地/, '防雷'], [/平面|布置/, '平面']];
+const SHEET_WORDS = [[/目录/, '目录'], [/总说明|设计说明|施工说明|说明/, '说明'], [/门窗表/, '门窗表'], [/门窗/, '门窗'],
+  [/立面.*剖面|剖面.*立面/, '立剖'], [/[东南西北]立面/, t => t.match(/([东南西北])立面/)[1] + '立面'], [/立面/, '立面'], [/剖面/, '剖面'],
+  [/卫生间/, '卫生间'], [/电梯/, '电梯'], [/楼梯/, '楼梯'], [/核心筒/, '核心筒'], [/女儿墙/, '女儿墙'], [/墙身/, '墙身'],
+  [/幕墙/, '幕墙'], [/屋面.*(?:节点|详图)/, '屋面节'], [/梁柱节点/, '梁柱节'], [/节点/, '节点'], [/基础/, '基础'], [/桩/, '桩基'],
+  [/柱平面|柱布置|柱定位/, '柱平面'], [/墙柱/, '墙柱'], [/剪力墙/, '剪力墙'], [/梁配筋/, '梁配筋'], [/板配筋/, '板配筋'],
+  [/柱/, '柱'], [/梁/, '梁'], [/板/, '板'], [/系统/, '系统'], [/人防/, '人防'], [/总图|总平面/, '总图'],
+  [/照明/, '照明'], [/动力/, '动力'], [/通风|排烟/, '通风'], [/空调/, '空调'], [/给排水|给水|排水/, '给排'], [/消防|喷淋/, '消防'],
+  [/弱电|智能/, '弱电'], [/详图|大样/, '详图'], [/表/, '表'], [/平面|布置/, '平面']];
+const SHORTER = { 核心筒: '核心', 卫生间: '卫生', 女儿墙: '女儿', 门窗表: '门窗', 剪力墙: '剪墙', 屋面节: '屋面', 梁柱节: '节点' };
+const units = t => (t.match(/[\u4e00-\u9fff]/g) || []).length + (t.match(/[0-9A-Za-z~\-]+/g) || []).length;
+function shortName(s) {
+  const t = (s.title || '').replace(/\s+/g, '');
+  if (!t) return ((s.discipline || '其')[0]) + ((s.no.match(/(\d+)\D*$/) || [, ''])[1]);  // 没有图名：专业加编号，如 建10
+  let m = t.match(/([0-9A-Z]{1,2})[-—]\1剖面/);
+  if (m) return `剖面${m[1]}-${m[1]}`;
+  const fl = floorTag(t), roof = /屋顶|屋面|机房层/.test(t), std = /标准层/.test(t);
+  const fw = FLOOR_WORDS.find(([re]) => re.test(t));
+  if (fw && (fl || roof || std) && !/详图|大样|节点|系统/.test(t)) {  // 分楼层的平面、配筋图：词 + 楼层
+    const w = fw[1];
+    if (fl) return w + fl;
+    if (roof) return w === '平面' ? '屋顶' : units('屋面' + w) <= 3 ? '屋面' + w : '屋' + w;
+    return w === '平面' ? '标准层' : '标' + w;
+  }
+  const hit = SHEET_WORDS.find(([re]) => re.test(t));
+  if (hit) {  // 不分楼层的图：关键词，带编号的加编号（墙身12、楼梯3）
+    let w = typeof hit[1] === 'function' ? hit[1](t) : hit[1];
+    m = t.match(/(\d+|[一二三四五六七八九十]+)$/);
+    const n = fl || (m ? String(cnInt(m[1]) ?? m[1]) : null);
+    if (n) {
+      if (units(w) >= 3) w = SHORTER[w] || w.slice(0, 2);
+      return w + n;
+    }
+    return w;
+  }
+  if (fl) return '层' + fl;
+  return t.replace(/^(建筑|结构|给排水|暖通|电气)/, '').replace(/图$/, '').slice(0, 3);
+}
+const DETAIL_SHORT = { 墙柱: '柱', 墙身: '墙', 楼梯: '梯', 节点: '节', 核心: '核', 卫生: '卫', 剪墙: '墙' };
+function altName(s, name) {  // 详图和同名的分层图撞名时换个写法：墙柱3 → 柱详3
+  const m = name.match(/^([一-鿿]+)(.+)$/);
+  return m && /详图|大样/.test(s.title || '') ? (DETAIL_SHORT[m[1]] || m[1][0]) + '详' + m[2] : null;
+}
+function shortNames() {
+  const out = {}, used = new Set();
+  S.sheets.forEach(s => {
+    const key = x => s.discipline + '|' + x;
+    let n = shortName(s);
+    if (used.has(key(n))) { const a = altName(s, n); if (a && !used.has(key(a))) n = a; }
+    let name = n, k = 1;
+    while (used.has(key(name))) name = `${n}·${++k}`;  // 还撞名就加序号
+    used.add(key(name));
+    out[s.no] = name;
+  });
+  return out;
+}
+function series(no) {  // 图号的百位段：建施-101~199 是一段，建施-201~ 另起一段
+  const m = no.match(/(\d+)\D*$/);
+  return m && m[1].length >= 3 ? m[1].slice(0, -2) : '';
+}
 function layout() {
   laidOutAt = graphWidth();
+  ALIAS = shortNames();
   const groups = {};
   S.sheets.forEach(s => (groups[s.discipline] ||= []).push(s));
   const discs = Object.keys(groups).sort((a, b) => DISC_ORDER.indexOf(a) - DISC_ORDER.indexOf(b));
-  const MAXW = laidOutAt, GAPX = 20, GAPY = 24, PAD = 12, COLW = NW + 20, ROWH = NH + 28;
-  let x = 12, y = 20, rowH = 0, maxX = 0;
+  const MAXW = laidOutAt, GAPX = 16, GAPY = 16, PAD = 12, GAP = 8, ROWH = NH + GAP, HEAD = 34;
+  let x = 12, y = 12, rowH = 0, maxX = 0;
   const bands = [], pos = {};
   discs.forEach(d => {
     const items = groups[d];
-    const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(items.length))));
-    const rows = Math.ceil(items.length / cols);
-    const bw = cols * COLW - 20 + PAD * 2, bh = rows * ROWH + 40;
+    const cw = Math.max(60, ...items.map(s => Math.ceil(textW(ALIAS[s.no], 12.5, 600)) + 22));  // 同一专业的方块一样宽，排得整齐
+    const fit = Math.max(1, Math.floor((MAXW - 24 - PAD * 2 + GAP) / (cw + GAP)));
+    const cols = Math.min(fit, Math.max(1, Math.ceil(Math.sqrt(items.length * 2.2))));  // 少时接近方形，多时铺满一行
+    const rows = [];
+    let row = [], ser = null;
+    items.forEach(s => {
+      const k = series(s.no);
+      if (row.length && (row.length >= cols || k !== ser)) { rows.push(row); row = []; }
+      row.push(s); ser = k;
+    });
+    if (row.length) rows.push(row);
+    const bw = Math.max(...rows.map(r => r.length)) * (cw + GAP) - GAP + PAD * 2;
+    const bh = HEAD + rows.length * ROWH - GAP + PAD;
     if (x + bw > MAXW && x > 12) { x = 12; y += rowH + GAPY; rowH = 0; }
-    bands.push({ d, x, y, w: bw, h: bh });
-    items.forEach((s, i) => { pos[s.no] = { x: x + PAD + (i % cols) * COLW, y: y + 36 + Math.floor(i / cols) * ROWH }; });
-    x += bw + GAPX; rowH = Math.max(rowH, bh); maxX = Math.max(maxX, x);
+    bands.push({ d, x, y, w: Math.max(bw, 120), h: bh, n: items.length });
+    rows.forEach((r, ri) => r.forEach((s, ci) => { pos[s.no] = { x: x + PAD + ci * (cw + GAP), y: y + HEAD + ri * ROWH, w: cw, h: NH }; }));
+    x += Math.max(bw, 120) + GAPX; rowH = Math.max(rowH, bh); maxX = Math.max(maxX, x);
   });
   return { bands, pos, w: Math.max(maxX, 400), h: y + rowH + 12 };
 }
-function clip(cx, cy, tx, ty) {
+function clip(cx, cy, tx, ty, w, h) {
   const dx = tx - cx, dy = ty - cy;
-  const s = Math.min((NW / 2 + 4) / Math.abs(dx || 1e-6), (NH / 2 + 4) / Math.abs(dy || 1e-6));
+  const s = Math.min((w / 2 + 4) / Math.abs(dx || 1e-6), (h / 2 + 4) / Math.abs(dy || 1e-6));
   return [cx + dx * s, cy + dy * s];
 }
+const bigGraph = () => S.sheets.length > EDGE_ALL_MAX;
+function drawEdges() {
+  // 图少画全部连线；图多只画选中、鼠标指着的那张图的连线，不然会缠成一团
+  edgeLayer.textContent = ''; edgeEls = [];
+  const keys = new Set([ui.selD, hoverNo].filter(Boolean));
+  const seen = new Set();
+  S.edges.forEach(e => {
+    if (bigGraph() && !keys.has(e.from) && !keys.has(e.to)) return;
+    const A = nodeBox[e.from], B = nodeBox[e.to];
+    const k = `${e.from}>${e.to}`;
+    if (!A || !B || seen.has(k)) return;
+    seen.add(k);
+    const ac = [A.x + A.w / 2, A.y + A.h / 2], bc = [B.x + B.w / 2, B.y + B.h / 2];
+    const p1 = clip(...ac, ...bc, A.w, A.h), p2 = clip(...bc, ...ac, B.w, B.h);
+    const dangling = sheetBy[e.to] && ['missing', 'voided'].includes(sheetBy[e.to].status);
+    const line = sv('line', { x1: p1[0], y1: p1[1], x2: p2[0], y2: p2[1], class: `edge ${e.type}${dangling ? ' dangling' : ''}` });
+    if (e.type !== 'cross') line.setAttribute('marker-end', `url(#${dangling ? 'g-arrow-crit' : 'g-arrow'})`);
+    line.append(sv('title', {}, `${e.from} → ${e.to}：${e.label}`));
+    edgeLayer.append(line);
+    edgeEls.push({ ...e, dangling, line });
+  });
+}
+const gtip = el('div', { class: 'gtip', role: 'tooltip' });
+gsvg.parentElement.append(gtip);
+function showTip(s, r) {  // r：图纸在屏幕上的位置（getBoundingClientRect 那样的 left/top/right/bottom）
+  // 鼠标指着的图：源文件名和简单说明
+  const src = (s.paths || [])[0];
+  gtip.replaceChildren(
+    el('div', { class: 'tt' }, el('b', {}, s.no), el('span', { class: `pill st-${s.status}` }, STATUS[s.status])),
+    el('div', {}, (s.title || '（图名未知）') + (s.current_rev ? `，${s.current_rev} 版` : '')),
+    el('div', { class: 'file' }, src ? `源文件：${src.split(' / ').pop()}` : (s.notes || []).join('；') || '没有收到'),
+    ...((s.versions || []).length > 1 ? [el('ul', { class: 'vers' }, s.versions.map(v =>
+      el('li', { class: v.state === '现行' ? 'cur' : '' }, `${v.rev || '?'} 版　${v.date || '日期不详'}　批次#${v.batch}　${v.state}`)))] : []),
+    ...((s.paths || []).length > 1 ? [el('div', { class: 'file' }, `另有 ${s.paths.length - 1} 处出处`)] : []));
+  gtip.classList.add('show');
+  const c = gsvg.parentElement, cr = c.getBoundingClientRect();
+  const tw = gtip.offsetWidth, th = gtip.offsetHeight;
+  let left = r.left - cr.left + c.scrollLeft, top = r.bottom - cr.top + c.scrollTop + 8;
+  if (top + th > c.scrollTop + c.clientHeight) top = r.top - cr.top + c.scrollTop - th - 8;  // 下面放不下就放上面
+  left = Math.max(c.scrollLeft + 4, Math.min(left, c.scrollLeft + c.clientWidth - tw - 8));
+  gtip.style.left = left + 'px'; gtip.style.top = top + 'px';
+}
+function hideTip() { gtip.classList.remove('show'); }
+function hoverSheet(no) {
+  if (!bigGraph() || hoverNo === no) return;
+  hoverNo = no; drawEdges(); paintGraph(true);
+}
 function buildGraph() {
-  gsvg.textContent = ''; nodeEls = {}; edgeEls = [];
+  gsvg.textContent = ''; nodeEls = {}; edgeEls = []; hoverNo = null; hideTip();
   if (!S.sheets.length) {
     gsvg.setAttribute('viewBox', '0 0 600 120'); gsvg.style.width = '100%';
     const pages = (S.recognition && S.recognition.pages) || 0;
@@ -424,6 +601,8 @@ function buildGraph() {
     return;
   }
   const L = layout();
+  nodeBox = L.pos;
+  if (net.on) { netBuild(); netKick(0.3); }  // 关系网也跟着新数据重建，已有的点留在原处
   gsvg.setAttribute('viewBox', `0 0 ${L.w} ${L.h}`);
   gsvg.style.width = '100%'; gsvg.style.maxWidth = L.w + 'px';  // 图谱区比图宽时按原大小画，不放大
   gsvg.style.minWidth = Math.min(L.w, 720) + 'px'; gsvg.style.height = 'auto';
@@ -434,39 +613,29 @@ function buildGraph() {
   gsvg.append(defs);
   L.bands.forEach(b => {
     gsvg.append(sv('rect', { class: 'band', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10 }));
-    gsvg.append(sv('text', { class: 'band-label', x: b.x + 12, y: b.y + 22 }, b.d));
+    gsvg.append(sv('text', { class: 'band-label', x: b.x + 12, y: b.y + 22 }, `${b.d}（${b.n}）`));
   });
-  const eg = sv('g');
-  const seen = new Set();
-  S.edges.forEach(e => {
-    const A = L.pos[e.from], B = L.pos[e.to];
-    const k = `${e.from}>${e.to}`;
-    if (!A || !B || seen.has(k)) return;
-    seen.add(k);
-    const ac = [A.x + NW / 2, A.y + NH / 2], bc = [B.x + NW / 2, B.y + NH / 2];
-    const p1 = clip(...ac, ...bc), p2 = clip(...bc, ...ac);
-    const dangling = sheetBy[e.to] && ['missing', 'voided'].includes(sheetBy[e.to].status);
-    const line = sv('line', { x1: p1[0], y1: p1[1], x2: p2[0], y2: p2[1], class: `edge ${e.type}${dangling ? ' dangling' : ''}` });
-    if (e.type !== 'cross') line.setAttribute('marker-end', `url(#${dangling ? 'g-arrow-crit' : 'g-arrow'})`);
-    line.append(sv('title', {}, `${e.from} → ${e.to}：${e.label}`));
-    eg.append(line);
-    edgeEls.push({ ...e, dangling, line });
-  });
-  gsvg.append(eg);
+  edgeLayer = sv('g');
+  gsvg.append(edgeLayer);
   S.sheets.forEach(s => {
     const p = L.pos[s.no];
-    const g = sv('g', { class: `node st-${s.status}`, tabindex: 0, role: 'button', 'aria-label': `${s.no} ${s.title || ''}，${STATUS[s.status]}` });
-    g.append(sv('rect', { class: 'ring', x: p.x - 4, y: p.y - 4, width: NW + 8, height: NH + 8, rx: 11 }));
-    g.append(sv('rect', { class: 'box', x: p.x, y: p.y, width: NW, height: NH, rx: 8 }));
-    g.append(sv('text', { class: 'num', x: p.x + 12, y: p.y + 20 }, s.no));
-    let title = s.title || (s.status === 'missing' ? '（图名未知）' : '');
-    while (title && textW(title, 12) > NW - 24) title = title.slice(0, -2) + '…';
-    g.append(sv('text', { class: 'ttl', x: p.x + 12, y: p.y + 38 }, title));
-    const tag = s.status !== 'current' ? [STATUS[s.status].replace('作废还是漏发', '待确认'), `t-${s.status}`] : s.inner ? ['内层包', 't-inner'] : null;
-    if (tag) g.append(sv('text', { class: `tag ${tag[1]}`, x: p.x + NW - 10, y: p.y + 19, 'text-anchor': 'end' }, tag[0]));
-    const open = () => { ui.focusSet = null; ui.backTo = null; selectSheet(s.no); };
+    const g = sv('g', { class: `node st-${s.status}`, tabindex: 0, role: 'button',
+      'aria-label': `${s.no} ${s.title || ''}，${STATUS[s.status]}${(s.versions || []).length > 1 ? `，${s.versions.length} 个版本` : ''}` });
+    g.append(sv('rect', { class: 'ring', x: p.x - 3, y: p.y - 3, width: p.w + 6, height: p.h + 6, rx: 9 }));
+    const nv = (s.versions || []).length;
+    for (let k = Math.min(nv - 1, 2); k >= 1; k--)  // 有几个版本就叠几层影子（最多两层）
+      g.append(sv('rect', { class: 'ghost', x: p.x + 3.5 * k, y: p.y - 3.5 * k, width: p.w, height: p.h, rx: 7 }));
+    g.append(sv('rect', { class: 'box', x: p.x, y: p.y, width: p.w, height: p.h, rx: 7 }));
+    g.append(sv('text', { class: 'lbl', x: p.x + p.w / 2, y: p.y + 18.5, 'text-anchor': 'middle' }, ALIAS[s.no]));
+    const flag = s.status !== 'current' ? s.status : s.inner ? 'inner' : null;  // 右上角小圆点：升版、变更、冲突、缺失……
+    if (flag) g.append(sv('circle', { class: `flag f-${flag}`, cx: p.x + p.w - 5, cy: p.y + 5, r: 3.5 }));
+    const open = () => { ui.focusSet = null; ui.backTo = null; hideTip(); selectSheet(s.no); };
     g.addEventListener('click', open);
     g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
+    g.addEventListener('mouseenter', () => { showTip(s, g.getBoundingClientRect()); hoverSheet(s.no); });
+    g.addEventListener('mouseleave', () => { hideTip(); hoverSheet(null); });
+    g.addEventListener('focus', () => showTip(s, g.getBoundingClientRect()));
+    g.addEventListener('blur', hideTip);
     gsvg.append(g);
     nodeEls[s.no] = g;
   });
@@ -478,7 +647,9 @@ function neighbors(no) {
   S.edges.forEach(e => { if (e.from === no) n.add(e.to); if (e.to === no) n.add(e.from); });
   return n;
 }
-function paintGraph() {
+function paintGraph(keepEdges) {
+  if (net.on) netKick();
+  if (!keepEdges && edgeLayer) drawEdges();
   const focus = ui.focusSet || (ui.selD ? neighbors(ui.selD) : null);
   S.sheets.forEach(s => {
     const n = nodeEls[s.no]; if (!n) return;
@@ -488,12 +659,247 @@ function paintGraph() {
   });
   edgeEls.forEach(e => {
     const on = !!ui.selD && !ui.focusSet && (e.from === ui.selD || e.to === ui.selD);
+    const hov = !!hoverNo && (e.from === hoverNo || e.to === hoverNo);
     const inFocus = focus ? focus.has(e.from) && focus.has(e.to) : true;
     const filtered = ui.graphIssues && !(hasIssue(sheetBy[e.from]) || hasIssue(sheetBy[e.to]));
-    e.line.classList.toggle('dim', !inFocus || filtered);
-    e.line.classList.toggle('on', on && !e.dangling);
-    if (e.type !== 'cross') e.line.setAttribute('marker-end', `url(#${e.dangling ? 'g-arrow-crit' : on ? 'g-arrow-on' : 'g-arrow'})`);
+    e.line.classList.toggle('dim', !hov && (!inFocus || filtered));
+    e.line.classList.toggle('on', (on || hov) && !e.dangling);
+    if (e.type !== 'cross') e.line.setAttribute('marker-end', `url(#${e.dangling ? 'g-arrow-crit' : on || hov ? 'g-arrow-on' : 'g-arrow'})`);
   });
+}
+
+/* ---------- 关系网（像 Obsidian 的图谱）：圆点是图纸，线是引用；同一类的图被轻轻拉到一起，自然聚成一团 ---------- */
+const netCanvas = document.getElementById('net');
+const net = { on: false, colorBy: 'type', nodes: [], byNo: {}, links: [], anchor: {}, groups: [], pos: {},
+  k: 1, tx: 0, ty: 0, alpha: 0, raf: 0, hover: null, drag: null, userView: false };
+const TYPE_ORDER = ['目录说明', '平面图', '配筋图', '立面剖面', '详图大样', '系统图', '表格', '其他'];
+const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948', '#b07aa1', '#9c755f', '#ff9da7', '#bab0ac'];
+function sheetType(s) {
+  const t = s.title || '';
+  if (/目录|说明/.test(t)) return '目录说明';
+  if (/系统/.test(t)) return '系统图';
+  if (/立面|剖面/.test(t)) return '立面剖面';
+  if (/详图|大样|节点/.test(t)) return '详图大样';
+  if (/配筋|梁|板|墙柱/.test(t)) return '配筋图';
+  if (/表/.test(t)) return '表格';
+  if (/平面|布置/.test(t)) return '平面图';
+  return '其他';
+}
+const netGroup = s => net.colorBy === 'type' ? sheetType(s) : s.discipline;
+function hash01(str, salt) {  // 每张图固定的伪随机数：每次打开关系网，点的初始位置都一样
+  let h = 2166136261 ^ salt;
+  for (const c of str) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return ((h >>> 0) % 10007) / 10007;
+}
+function netBuild() {
+  net.nodes.forEach(n => { net.pos[n.no] = { x: n.x, y: n.y }; });
+  if (!Object.keys(ALIAS).length) ALIAS = shortNames();
+  const order = net.colorBy === 'type' ? TYPE_ORDER : DISC_ORDER, rank = g => (order.includes(g) ? order.indexOf(g) : 99);
+  const count = {};
+  S.sheets.forEach(s => { const g = netGroup(s); count[g] = (count[g] || 0) + 1; });
+  net.groups = Object.keys(count).sort((a, b) => rank(a) - rank(b));
+  const G = net.groups.length, R = G > 1 ? 160 + 18 * Math.sqrt(S.sheets.length) : 0;
+  net.anchor = {};
+  net.groups.forEach((g, i) => {
+    const a = -Math.PI / 2 + 2 * Math.PI * i / G;
+    net.anchor[g] = { x: R * Math.cos(a), y: R * Math.sin(a), color: PALETTE[i % PALETTE.length], n: count[g] };
+  });
+  const deg = {};
+  S.edges.forEach(e => { deg[e.from] = (deg[e.from] || 0) + 1; deg[e.to] = (deg[e.to] || 0) + 1; });
+  net.nodes = S.sheets.map(s => {
+    const g = netGroup(s), a = net.anchor[g], old = net.pos[s.no], spread = 24 + 7 * Math.sqrt(a.n);
+    return { s, no: s.no, g, x: old ? old.x : a.x + (hash01(s.no, 1) - 0.5) * spread * 2, y: old ? old.y : a.y + (hash01(s.no, 2) - 0.5) * spread * 2,
+      vx: 0, vy: 0, r: 4 + Math.min(5, Math.sqrt(deg[s.no] || 0) * 1.3) };
+  });
+  net.byNo = Object.fromEntries(net.nodes.map(n => [n.no, n]));
+  const seen = new Set();
+  net.links = [];
+  S.edges.forEach(e => {
+    const a = net.byNo[e.from], b = net.byNo[e.to], k = [e.from, e.to].sort().join('>');
+    if (a && b && a !== b && !seen.has(k)) { seen.add(k); net.links.push({ a, b }); }
+  });
+  const legend = document.getElementById('net-legend');
+  legend.replaceChildren(...net.groups.map(g => el('span', { class: 'grp' },
+    el('i', { class: 'dot', style: `background:${net.anchor[g].color}` }), `${g}（${net.anchor[g].n}）`)),
+    el('span', {}, '外圈：红冲突、黄变更或待确认、蓝升版或新增；虚线圈缺失；叠影为有多个版本'));
+  net.alpha = 1;
+}
+function netTick() {
+  const nodes = net.nodes, a = net.alpha, cell = 60, grid = new Map();
+  nodes.forEach(n => { const k = Math.floor(n.x / cell) + ',' + Math.floor(n.y / cell); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(n); });
+  nodes.forEach(n => {  // 斥力：只和附近格子里的点算，几千张图也快
+    const cx = Math.floor(n.x / cell), cy = Math.floor(n.y / cell);
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+      const list = grid.get((cx + i) + ',' + (cy + j));
+      if (!list) continue;
+      for (const m of list) {
+        if (m === n) continue;
+        let dx = n.x - m.x, dy = n.y - m.y, d2 = dx * dx + dy * dy;
+        if (d2 > cell * cell) continue;
+        if (d2 < 0.01) { dx = hash01(n.no, 3) - 0.5; dy = hash01(m.no, 4) - 0.5; d2 = 0.5; }
+        const f = 260 * a / d2;
+        n.vx += dx * f; n.vy += dy * f;
+      }
+    }
+  });
+  net.links.forEach(({ a: p, b: q }) => {  // 引用关系：弹簧
+    const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 60) * 0.015 * a / d;
+    p.vx += dx * f; p.vy += dy * f; q.vx -= dx * f; q.vy -= dy * f;
+  });
+  nodes.forEach(n => {  // 同一类拉向各自的中心，形成群落
+    const c = net.anchor[n.g];
+    n.vx += (c.x - n.x) * 0.01 * a; n.vy += (c.y - n.y) * 0.01 * a;
+    if (n === (net.drag && net.drag.node)) { n.vx = n.vy = 0; return; }
+    n.vx *= 0.55; n.vy *= 0.55;
+    const v = Math.hypot(n.vx, n.vy);
+    if (v > 24) { n.vx *= 24 / v; n.vy *= 24 / v; }
+    n.x += n.vx; n.y += n.vy;
+  });
+  net.alpha *= 0.982;
+}
+function netFit(W, H) {
+  if (!net.nodes.length) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  net.nodes.forEach(n => { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); });
+  net.k = Math.min(2, Math.max(0.05, Math.min(W / (x1 - x0 + 120), H / (y1 - y0 + 120))));
+  net.tx = W / 2 - net.k * (x0 + x1) / 2; net.ty = H / 2 - net.k * (y0 + y1) / 2;
+}
+function netDraw() {
+  const c = netCanvas, ctx = c.getContext('2d'), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  if (!net.userView) netFit(W, H);
+  const css = getComputedStyle(document.documentElement), v = n => css.getPropertyValue(n).trim();
+  const col = { edge: v('--edge'), accent: v('--accent'), ink: v('--ink'), crit: v('--crit'), warn: v('--warn'), surface: v('--surface') };
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.setTransform(dpr * net.k, 0, 0, dpr * net.k, dpr * net.tx, dpr * net.ty);
+  const k = net.k, focus = net.hover || ui.selD, near = focus ? neighbors(focus) : null, found = ui.focusSet;
+  const lit = n => (!near || near.has(n.no)) && (!found || found.has(n.no)) && !(ui.graphIssues && !hasIssue(n.s));
+  ctx.lineWidth = 1 / k;
+  net.links.forEach(L => {
+    const on = !!near && (L.a.no === focus || L.b.no === focus);
+    ctx.globalAlpha = on ? 0.9 : near || found ? 0.04 : net.links.length > 300 ? 0.07 : 0.2;  // 连线多时更淡，不然一片灰
+    ctx.strokeStyle = on ? col.accent : col.edge;
+    ctx.beginPath(); ctx.moveTo(L.a.x, L.a.y); ctx.lineTo(L.b.x, L.b.y); ctx.stroke();
+  });
+  const RING = { conflict: col.crit, changed: col.warn, pending_void: col.warn, updated: col.accent, new: col.accent };
+  net.nodes.forEach(n => {
+    const color = net.anchor[n.g].color, a = lit(n) ? 1 : 0.12;
+    if ((n.s.versions || []).length > 1) {  // 多个版本：错开一点再画一个淡的圆，像叠影
+      ctx.globalAlpha = a * 0.35; ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(n.x + n.r * 0.7, n.y - n.r * 0.7, n.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = a;
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    if (['missing', 'voided'].includes(n.s.status)) {
+      ctx.setLineDash([2 / k, 2 / k]); ctx.lineWidth = 1.5 / k; ctx.strokeStyle = color; ctx.stroke(); ctx.setLineDash([]);
+    } else { ctx.fillStyle = color; ctx.fill(); }
+    const ring = RING[n.s.status];
+    if (ring) { ctx.lineWidth = 2 / k; ctx.strokeStyle = ring; ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 2.5 / k, 0, Math.PI * 2); ctx.stroke(); }
+    if (n.no === ui.selD) { ctx.lineWidth = 2.5 / k; ctx.strokeStyle = col.ink; ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 5 / k, 0, Math.PI * 2); ctx.stroke(); }
+  });
+  const font = getComputedStyle(document.body).fontFamily;
+  ctx.textAlign = 'center'; ctx.fillStyle = col.ink;
+  ctx.font = `${12 / k}px ${font}`;
+  net.nodes.forEach(n => {  // 放大后显示短名；指向、选中、搜到的图随时显示
+    if (!(k > 1.15 && lit(n)) && !(near && near.has(n.no)) && !(found && found.has(n.no))) return;
+    ctx.globalAlpha = lit(n) ? 1 : 0.4;
+    ctx.fillText(ALIAS[n.no] || n.no, n.x, n.y + n.r + 13 / k);
+  });
+  if (k < 1.6) {  // 缩小看全局时，在每个群落中间写上它是哪一类
+    ctx.font = `600 ${15 / k}px ${font}`;
+    net.groups.forEach(g => {
+      const ns = net.nodes.filter(n => n.g === g);
+      const cx = ns.reduce((t, n) => t + n.x, 0) / ns.length, top = Math.min(...ns.map(n => n.y));
+      ctx.globalAlpha = 0.9; ctx.fillStyle = net.anchor[g].color;
+      ctx.fillText(`${g}（${ns.length}）`, cx, top - 12 / k);
+    });
+  }
+  ctx.globalAlpha = 1;
+}
+function netLoop() {
+  net.raf = 0;
+  if (!net.on || ui.view !== 'graph') return;
+  if (net.alpha > 0.02) { netTick(); netTick(); }
+  netDraw();
+  if (net.alpha > 0.02 || net.drag) net.raf = requestAnimationFrame(netLoop);
+}
+function netKick(heat) {
+  if (!net.on) return;
+  if (heat) net.alpha = Math.max(net.alpha, heat);
+  if (!net.raf) net.raf = requestAnimationFrame(netLoop);
+}
+function netAt(ev) {
+  const r = netCanvas.getBoundingClientRect(), x = (ev.clientX - r.left - net.tx) / net.k, y = (ev.clientY - r.top - net.ty) / net.k;
+  let best = null, bd = Infinity;
+  net.nodes.forEach(n => { const d = Math.hypot(n.x - x, n.y - y); if (d < n.r + 6 / net.k && d < bd) { bd = d; best = n; } });
+  return { x, y, node: best };
+}
+function netRect(n) {
+  const r = netCanvas.getBoundingClientRect(), cx = r.left + net.tx + n.x * net.k, cy = r.top + net.ty + n.y * net.k, rad = n.r * net.k + 4;
+  return { left: cx - rad, right: cx + rad, top: cy - rad, bottom: cy + rad };
+}
+function netCenter(no) {
+  const n = net.byNo[no];
+  if (!n) return;
+  net.userView = true;
+  net.k = Math.max(net.k, 1.4);
+  net.tx = netCanvas.clientWidth / 2 - n.x * net.k; net.ty = netCanvas.clientHeight / 2 - n.y * net.k;
+  netKick();
+}
+netCanvas.addEventListener('wheel', ev => {  // 滚轮缩放，以鼠标所在处为中心
+  ev.preventDefault();
+  const r = netCanvas.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  const k = Math.min(8, Math.max(0.05, net.k * Math.exp(-ev.deltaY * 0.0015)));
+  net.tx = mx - (mx - net.tx) * k / net.k; net.ty = my - (my - net.ty) * k / net.k; net.k = k;
+  net.userView = true; hideTip(); netKick();
+}, { passive: false });
+netCanvas.addEventListener('pointerdown', ev => {
+  const hit = netAt(ev);
+  net.drag = { node: hit.node, sx: ev.clientX, sy: ev.clientY, tx: net.tx, ty: net.ty, moved: false };
+  netCanvas.setPointerCapture(ev.pointerId);
+});
+netCanvas.addEventListener('pointermove', ev => {
+  const d = net.drag;
+  if (d) {
+    if (!d.moved && Math.hypot(ev.clientX - d.sx, ev.clientY - d.sy) > 3) { d.moved = true; hideTip(); }
+    if (!d.moved) return;
+    if (d.node) { const p = netAt(ev); d.node.x = p.x; d.node.y = p.y; netKick(0.25); }  // 拖动圆点
+    else { net.tx = d.tx + ev.clientX - d.sx; net.ty = d.ty + ev.clientY - d.sy; net.userView = true; netKick(); }  // 拖动空白处平移
+    return;
+  }
+  const n = netAt(ev).node, no = n ? n.no : null;
+  if (no === net.hover) return;
+  net.hover = no;
+  netCanvas.style.cursor = no ? 'pointer' : 'grab';
+  if (n) showTip(n.s, netRect(n)); else hideTip();
+  netKick();
+});
+netCanvas.addEventListener('pointerup', () => {
+  const d = net.drag;
+  net.drag = null;
+  if (d && !d.moved && d.node) { ui.focusSet = null; ui.backTo = null; hideTip(); selectSheet(d.node.no); }
+  netKick();
+});
+netCanvas.addEventListener('pointerleave', () => { if (net.hover && !net.drag) { net.hover = null; hideTip(); netKick(); } });
+netCanvas.addEventListener('dblclick', ev => { if (!netAt(ev).node) { net.userView = false; netKick(); } });  // 双击空白处：看全图
+function setGraphMode(m) {
+  net.on = m === 'net';
+  gsvg.style.display = net.on ? 'none' : '';
+  netCanvas.hidden = !net.on;
+  document.getElementById('g-mode-grid').setAttribute('aria-pressed', String(!net.on));
+  document.getElementById('g-mode-net').setAttribute('aria-pressed', String(net.on));
+  document.getElementById('g-color').hidden = !net.on;
+  document.getElementById('net-legend').hidden = !net.on;
+  document.getElementById('grid-legend').hidden = net.on;
+  document.getElementById('graph-hint').textContent = net.on
+    ? '滚轮缩放，拖动空白处平移，拖动圆点调整位置，双击空白处看全图；鼠标指向圆点看源文件和说明，点击打开图纸卡片。'
+    : '鼠标指向图纸看源文件和说明，点击看详情；选中后只突出它的直接关联。红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。';
+  try { localStorage.setItem('bidbench.graphMode', m); } catch (e) { /* 忽略 */ }
+  hideTip();
+  if (!S) return;
+  if (net.on) { netBuild(); net.userView = false; netKick(1); } else buildGraph();
 }
 
 /* ---------- 思维导图 ---------- */
@@ -636,11 +1042,19 @@ function renderOverview() {
   if (b) {
     const d = S.diff || {};
     const lines = [];
-    if (d.upgraded?.length) lines.push('升版：' + d.upgraded.join('、'));
-    if (d.added?.length) lines.push('新增：' + d.added.join('、'));
-    if (d.resolved_missing?.length) lines.push('核销缺图：' + d.resolved_missing.join('、'));
-    if (d.new_missing?.length) lines.push('新发现缺图：' + d.new_missing.join('、'));
-    if (d.new_conflicts?.length) lines.push('新的版本冲突：' + d.new_conflicts.join('、'));
+    // 图号多（比如首次收到几百张图）时先按专业汇总，点开再看明细
+    const sheetList = (label, items) => {
+      if (items.length <= 30) return label + '：' + items.join('、');
+      const by = {};
+      items.forEach(x => { const d0 = (sheetBy[x.split(' ')[0]] || {}).discipline || '其他'; by[d0] = (by[d0] || 0) + 1; });
+      const sum = Object.entries(by).sort((a, b) => DISC_ORDER.indexOf(a[0]) - DISC_ORDER.indexOf(b[0])).map(([k, v]) => `${k} ${v}`).join('、');
+      return el('details', {}, el('summary', {}, `${label} ${items.length} 张（${sum}）`), el('p', { class: 'meta' }, items.join('、')));
+    };
+    if (d.upgraded?.length) lines.push(sheetList('升版', d.upgraded));
+    if (d.added?.length) lines.push(sheetList('新增', d.added));
+    if (d.resolved_missing?.length) lines.push(sheetList('核销缺图', d.resolved_missing));
+    if (d.new_missing?.length) lines.push(sheetList('新发现缺图', d.new_missing));
+    if (d.new_conflicts?.length) lines.push(sheetList('新的版本冲突', d.new_conflicts));
     if (d.new_fact_conflicts?.length) lines.push('新的事实冲突：' + d.new_fact_conflicts.join('；'));
     if (d.pending_void?.length) lines.push('待确认作废：' + d.pending_void.join('、'));
     if (d.floor_gaps?.length) lines.push('楼层缺口：' + d.floor_gaps.join('；'));
@@ -835,6 +1249,7 @@ function setView(v) {
   try { history.replaceState(null, '', '#' + v); } catch (e) { /* 忽略 */ }
   if (!S) return;
   if (v === 'facts') renderMind();
+  else if (net.on) netKick();
   else if (Math.abs(graphWidth() - laidOutAt) > 40) buildGraph();  // 在思维导图页时改过窗口大小
   else paintGraph();
 }
@@ -850,7 +1265,15 @@ function showSources(key, no) {
   ui.focusSet = new Set(factBy[key].sources); ui.backTo = key;
   setView('graph'); ui.selD = no; ui.selF = key; paintGraph(); renderSheet(no);
 }
-function clearAll() { ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null; paintGraph(); renderMind(); renderOverview(); }
+function clearAll() {
+  ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null;
+  document.getElementById('g-search').value = '';
+  paintGraph(); renderMind(); renderOverview();
+}
+function searchSheets(q) {
+  q = q.trim().toLowerCase();
+  return q ? S.sheets.filter(s => s.no.toLowerCase().includes(q) || (s.title || '').toLowerCase().includes(q)) : [];
+}
 
 /* ---------- 桌面工作台：项目、操作、后台任务、设置 ---------- */
 // 桌面窗口的本机功能（系统选文件对话框）要等窗口准备好才能用：页面可能先画出来，那时还没有“选择…”按钮，
@@ -1290,6 +1713,25 @@ function renderJob(j) {
 document.getElementById('tab-graph').addEventListener('click', () => setView('graph'));
 document.getElementById('tab-facts').addEventListener('click', () => setView('facts'));
 document.getElementById('clear').addEventListener('click', clearAll);
+document.getElementById('g-mode-grid').addEventListener('click', () => setGraphMode('grid'));
+document.getElementById('g-mode-net').addEventListener('click', () => setGraphMode('net'));
+document.getElementById('g-color').addEventListener('change', e => {
+  net.colorBy = e.target.value; net.pos = {}; net.nodes = [];  // 换着色方式，群落重新聚
+  if (S && net.on) { netBuild(); net.userView = false; netKick(1); }
+});
+document.getElementById('g-search').addEventListener('input', e => {
+  if (!S) return;
+  const hits = searchSheets(e.target.value);
+  ui.focusSet = e.target.value.trim() ? new Set(hits.map(s => s.no)) : null;
+  paintGraph();
+  if (hits.length && net.on) netCenter(hits[0].no);
+  else if (hits.length && nodeEls[hits[0].no]) nodeEls[hits[0].no].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+});
+document.getElementById('g-search').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || !S) return;
+  const hits = searchSheets(e.target.value);
+  if (hits.length) { ui.focusSet = null; selectSheet(hits[0].no); }
+});
 document.getElementById('f-graph-issues').addEventListener('change', e => { ui.graphIssues = e.target.checked; paintGraph(); });
 document.getElementById('f-facts-issues').addEventListener('change', e => { ui.factIssues = e.target.checked; renderMind(); });
 document.getElementById('mm-expand').addEventListener('click', () => { ui.collapsed.clear(); renderMind(); });
@@ -1299,10 +1741,14 @@ document.getElementById('as-of').addEventListener('change', e => { const v = Num
 setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');
 checkUpdate(false);
 checkFresh();
+try { if (localStorage.getItem('bidbench.graphMode') === 'net') setGraphMode('net'); } catch (e) { /* 忽略 */ }
 let resizeTimer = null;
 window.addEventListener('resize', () => {  // 窗口大小变了，图谱按新的宽度重新排
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (S && ui.view === 'graph' && Math.abs(graphWidth() - laidOutAt) > 40) buildGraph(); }, 200);
+  resizeTimer = setTimeout(() => {
+    if (S && ui.view === 'graph' && net.on) netKick();
+    else if (S && ui.view === 'graph' && Math.abs(graphWidth() - laidOutAt) > 40) buildGraph();
+  }, 200);
 });
 boot().catch(() => { panel.replaceChildren(el('div', { class: 'note crit' }, '连接本地服务失败。请重新打开工作台。')); });
 })();

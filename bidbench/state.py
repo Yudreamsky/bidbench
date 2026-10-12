@@ -18,6 +18,7 @@ from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
 SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
 SAME_DHASH = 10       # 差值哈希距离阈值（256 位）
 FULL_REISSUE = 0.8    # 图号覆盖率达到它，判断为整套重发
+GAP_MAX = 3           # 编号断号：同一百位段里连续缺这么多张以内才提示
 
 STATUS_LABEL = {
     "current": "现行", "new": "本批新增", "updated": "本批升版", "changed": "有变更单",
@@ -468,10 +469,15 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     for pre, nums in by_prefix.items():
         if len(nums) < 3:
             continue
-        for n in range(min(nums), max(nums)):
-            t = f"{pre}-{n:02d}"
-            if n not in nums and t not in missing:
-                missing[t] = {"no": t, "title": None, "evidence": [f"{pre} 编号断号"], "level": "中", "gap": True}
+        ordered = sorted(nums)
+        for a, b in zip(ordered, ordered[1:]):
+            # 只在同一百位段里、连续缺几张时才算断号；更大的空档多半是分段编号（1xx 平面、2xx 剖面、9xx 系统图）
+            if not (1 < b - a <= GAP_MAX + 1 and a // 100 == b // 100):
+                continue
+            for n in range(a + 1, b):
+                t = f"{pre}-{n:02d}"
+                if t not in missing:
+                    missing[t] = {"no": t, "title": None, "evidence": [f"{pre} 编号断号"], "level": "中", "gap": True}
     for t, m in sorted(missing.items()):
         d = decisions.get(("missing", t))
         if d and d["value"] == "not_needed":
