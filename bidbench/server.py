@@ -23,7 +23,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import antivirus, appconfig, debuglog, export, oplog, ops, recognition, release, state, updater
+from . import antivirus, appconfig, chat, debuglog, export, oplog, ops, recognition, release, state, updater
 from .store import Project, SchemaTooNew, add_decision, now_iso
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk"}
@@ -88,6 +88,7 @@ class _App:
         self.httpd = None
         self.update_cache: tuple[float, dict] | None = None
         self.job: Job | None = None
+        self.chat = chat.Chat(proj) if proj else None  # 工作台的 AI 助手（Codex）
         self.on_quit: list = []  # 桌面窗口注册的关闭动作
 
     # ---- 更新 ----
@@ -108,7 +109,7 @@ class _App:
 
     def quit(self, delay: float = 0.5) -> None:
         def go():
-            self.abandon_job()
+            self.close_down()
             for fn in self.on_quit:
                 try:
                     fn()
@@ -119,9 +120,12 @@ class _App:
 
     # ---- 项目 ----
     def set_project(self, proj: Project | None) -> None:
+        if self.chat:
+            self.chat.stop()
         with self.lock:
             self.proj = proj
             self.cache.clear()
+            self.chat = chat.Chat(proj) if proj else None
         log.info("打开项目：%s", proj.root if proj else "（无，回到项目选择）")
         if proj is not None:
             appconfig.add_recent(proj.root, proj.meta["name"])
@@ -178,6 +182,12 @@ class _App:
 
         threading.Thread(target=run, daemon=True, name=f"job-{kind}").start()
         return job
+
+    def close_down(self) -> None:
+        """退出前：还在跑的任务记一笔“中断”，还在回答的 AI 助手停下来。"""
+        self.abandon_job()
+        if self.chat:
+            self.chat.stop()
 
     def abandon_job(self) -> None:
         """退出时还有任务在跑（关窗口时用户确认了退出）：操作日志里记一笔“中断”。"""
@@ -376,6 +386,15 @@ def make_handler(app: _App):
                 return self._json(app.info())
             if u.path == "/api/job":
                 return self._json(app.job.as_dict() if app.job else None)
+            if u.path == "/api/chat":
+                if not self._need_project():
+                    return None
+                st = app.chat.state()
+                if "status" in parse_qs(u.query):  # 打开面板时才查 Codex（要调用几次命令行）
+                    from .assistant import list_suggestions
+                    st.update(codex=ops.codex_status(refresh="refresh" in parse_qs(u.query)),
+                              prefs=appconfig.prefs().get("assistant") or {}, suggestions=len(list_suggestions()))
+                return self._json(st)
             if u.path == "/api/recognizers":
                 return self._json(_recognizers(refresh="refresh" in parse_qs(u.query)))
             if u.path == "/api/log":
@@ -459,6 +478,20 @@ def make_handler(app: _App):
                 st = dict(app.state())
                 st["last_outcome"] = r["outcome"]
                 return self._json(st)
+            if path == "/api/chat":
+                model = _model(body)
+                st = ops.codex_status()
+                if not st["ready"]:
+                    raise ValueError(st["hint"] or "Codex 还不能用")
+                app.chat.ask(str(body.get("question") or ""), model)
+                appconfig.remember("assistant", {"model": model})
+                return self._json(app.chat.state())
+            if path == "/api/chat/stop":
+                app.chat.stop()
+                return self._json(app.chat.state())
+            if path == "/api/chat/new":
+                app.chat.reset()
+                return self._json(app.chat.state())
             if path == "/api/baseline":
                 name = (body.get("name") or "").strip()
                 if not name:

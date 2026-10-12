@@ -79,6 +79,8 @@ def _summary(kind: str, r: dict) -> str | None:
         return r.get("path")
     if kind == "scan":
         return f"{r['pending']} 个风险文件待确认" if r.get("pending") else "没有待确认的风险文件"
+    if kind == "assistant":
+        return f"查询 {r.get('tools', 0)} 次" + (f"，生成提议 {r['proposals']} 条" if r.get("proposals") else "")
     return None
 
 
