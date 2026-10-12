@@ -75,10 +75,14 @@ jobs:
 
       - name: 静默安装测试
         shell: pwsh
+        timeout-minutes: 10
         run: |
           $setup = "dist\bidbench-setup-b${{ github.run_number }}.exe"
-          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
-          Start-Sleep -Seconds 3
+          # 不用 Start-Process -Wait：它会连安装完自动打开的工作台窗口一起等，永远等不完
+          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -PassThru
+          $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "安装程序退出码 $($p.ExitCode)" }
+          Start-Sleep -Seconds 5
           Get-Process bidbench-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
           $exe = "$env:LOCALAPPDATA\Programs\bidbench\bidbench.exe"
           if (-not (Test-Path $exe)) { throw "安装后找不到 $exe" }
