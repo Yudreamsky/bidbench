@@ -760,9 +760,10 @@ function netTick() {
 function netFit(W, H) {
   if (!net.nodes.length) return;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  net.nodes.forEach(n => { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); });
-  net.k = Math.min(2, Math.max(0.05, Math.min(W / (x1 - x0 + 120), H / (y1 - y0 + 120))));
-  net.tx = W / 2 - net.k * (x0 + x1) / 2; net.ty = H / 2 - net.k * (y0 + y1) / 2;
+  net.nodes.forEach(n => { x0 = Math.min(x0, n.x - n.r); y0 = Math.min(y0, n.y - n.r); x1 = Math.max(x1, n.x + n.r); y1 = Math.max(y1, n.y + n.r); });
+  const PX = 40, PT = 44, PB = 24;  // 四周留的边（屏幕像素）：上面多留，放得下群落名
+  net.k = Math.min(2, Math.max(0.05, Math.min((W - 2 * PX) / Math.max(1, x1 - x0), (H - PT - PB) / Math.max(1, y1 - y0))));
+  net.tx = W / 2 - net.k * (x0 + x1) / 2; net.ty = PT + (H - PT - PB) / 2 - net.k * (y0 + y1) / 2;
 }
 function netDraw() {
   const c = netCanvas, ctx = c.getContext('2d'), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
@@ -1064,12 +1065,17 @@ function renderOverview() {
   }
   const FL = { ok: '完整', no_gap: '已出现楼层之间不缺', missing: '有缺层', accepted: '缺层已确认不需要', unchecked: '无法检查' };
   const fc = S.floor_coverage || [];
-  if (fc.length) parts.push(section('楼层覆盖', el('ul', { class: 'list' }, fc.map(r => el('li', {},
-    el('button', { class: 'chip', type: 'button', onclick: () => goTarget({ floor_group: r.group }) }, r.group), ' ',
-    el('span', { style: `color:var(${r.status === 'missing' ? '--warn' : '--muted'})` }, FL[r.status]),
-    el('small', { style: 'display:block;color:var(--muted)' },
-      (r.covered.map(c => `${c.floors}（${c.sheets[0]}${c.tentative ? '，待确认' : ''}）`).join('；') || '无楼层信息') + (r.missing.length ? `；缺 ${r.missing_text}` : '')
-        + (r.remarks || []).map(x => `；${x}`).join('')))))));
+  if (fc.length) parts.push(section('楼层覆盖', el('ul', { class: 'list' }, fc.map(r => {
+    const each = r.covered.map(c => `${c.floors}（${c.sheets[0]}${c.tentative ? '，待确认' : ''}）`).join('；');
+    const many = r.covered.length > 8;  // 超高层几十上百张图：先写楼层范围，逐张的点开再看
+    return el('li', {},
+      el('button', { class: 'chip', type: 'button', onclick: () => goTarget({ floor_group: r.group }) }, r.group), ' ',
+      el('span', { style: `color:var(${r.status === 'missing' ? '--warn' : '--muted'})` }, FL[r.status]),
+      el('small', { style: 'display:block;color:var(--muted)' },
+        (many ? `已有 ${r.covered_text}（${r.covered.length} 张图）` : each || '无楼层信息') + (r.missing.length ? `；缺 ${r.missing_text}` : '')
+          + (r.remarks || []).map(x => `；${x}`).join('')),
+      ...(many ? [el('details', {}, el('summary', {}, '逐张看'), el('p', { class: 'meta' }, each))] : []));
+  }))));
   const RD = { safe: '已确认安全', dangerous: '已确认有风险' };
   const scanText = x => x.ok ? `${x.engine} 扫描${x.batch_seq ? '批次 #' + x.batch_seq : '全部文件'}的 ${x.files} 个文件，${x.threats ? '发现 ' + x.threats + ' 个有问题' : '未发现病毒'}`
     : `${x.engine} 扫描没有完成：${x.message}`;

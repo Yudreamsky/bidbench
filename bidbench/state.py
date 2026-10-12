@@ -19,6 +19,7 @@ SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，�
 SAME_DHASH = 10       # 差值哈希距离阈值（256 位）
 FULL_REISSUE = 0.8    # 图号覆盖率达到它，判断为整套重发
 GAP_MAX = 3           # 编号断号：同一百位段里连续缺这么多张以内才提示
+COVER_LIST_MAX = 8    # 楼层覆盖：图多于这么多张时只写汇总的楼层范围，不逐张列
 
 STATUS_LABEL = {
     "current": "现行", "new": "本批新增", "updated": "本批升版", "changed": "有变更单",
@@ -715,6 +716,7 @@ def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> 
             "group": gname, "discipline": disc, "basis": basis,
             "covered": [{"floors": floors.compress(fl), "sheets": [no], "from": how, "tentative": no in pending}
                         for no, _t, fl, how in members if fl],
+            "covered_text": floors.compress(covered),
             "unknown": [no for no, *_ in unknown],
             "missing": [floors.label(f) for f in missing], "missing_text": floors.compress(missing),
             "status": "missing" if missing else ("ok" if full and expected else "no_gap" if expected else "unchecked"),
@@ -727,8 +729,12 @@ def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> 
                 row["status"] = "accepted"
             else:
                 row["confirmed"] = bool(d and d["value"] == "ask")
-                have = "；".join(f"{c['floors']}（{c['sheets'][0]}{'，待确认是否作废' if c['tentative'] else ''}）"
-                                for c in row["covered"]) or "无"
+                if len(row["covered"]) > COVER_LIST_MAX:  # 几十上百张图：只写楼层范围
+                    have = f"{row['covered_text']}（{len(row['covered'])} 张图）" + (
+                        f"，其中 {row['tentative']} 只有待确认是否作废的图" if row["tentative"] else "")
+                else:
+                    have = "；".join(f"{c['floors']}（{c['sheets'][0]}{'，待确认是否作废' if c['tentative'] else ''}）"
+                                    for c in row["covered"]) or "无"
                 issues.append(_issue(
                     "warn", "楼层覆盖", f"floor:{gname}", f"{gname}缺 {row['missing_text']}",
                     f"{basis}。已有：{have}。缺：{row['missing_text']}。", {"floor_group": gname},
