@@ -1,0 +1,121 @@
+# Windows 安装包：每个 PR 都打包并自检（产物可在 Actions 页面下载试用）；合并到 main 后发布到公开的发布仓库。
+# 发布需要在仓库 Secrets 里配置 RELEASES_TOKEN（只对 bidbench-releases 有 Contents 读写权限的令牌）。
+name: windows-installer
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASES_REPO: Yudreamsky/bidbench-releases
+  PYTHONUTF8: "1"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 写入构建信息
+        shell: bash
+        run: |
+          python packaging/write_build_info.py "${{ github.run_number }}" "${{ github.sha }}"
+          echo "APP_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)" >> "$GITHUB_ENV"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[claude,mcp,archives,desktop]" pytest pyinstaller
+
+      - name: Windows 上跑测试
+        run: pytest -q
+
+      - name: 生成图标
+        run: python packaging/make_icon.py
+
+      - name: 打包
+        run: pyinstaller packaging/bidbench.spec --noconfirm --clean --distpath dist --workpath build
+
+      - name: 打包后自检（演示流水线 + MCP + 桌面服务）
+        shell: bash
+        run: |
+          python packaging/smoke.py dist/bidbench/bidbench.exe "$RUNNER_TEMP/smoke"
+          dist/bidbench/bidbench-desktop.exe --smoke
+          du -sh dist/bidbench
+
+      - name: 安装 Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: 生成安装包
+        shell: bash
+        run: |
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          [ -x "$ISCC" ] || ISCC="$(ls /c/Program\ Files*/Inno\ Setup*/ISCC.exe | head -1)"
+          "$ISCC" //DAppVersion="$APP_VERSION" //DBuild="${{ github.run_number }}" packaging/bidbench.iss
+          cd dist
+          f="bidbench-setup-b${{ github.run_number }}.exe"
+          sha256sum "$f" | awk -v f="$f" '{print $1"  "f}' > "$f.sha256"
+          ls -la "$f" "$f.sha256"
+
+      - name: 静默安装测试
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $setup = "dist\bidbench-setup-b${{ github.run_number }}.exe"
+          # 不用 Start-Process -Wait：它会连安装完自动打开的工作台窗口一起等，永远等不完
+          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -PassThru
+          $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "安装程序退出码 $($p.ExitCode)" }
+          Start-Sleep -Seconds 5
+          Get-Process bidbench-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
+          $exe = "$env:LOCALAPPDATA\Programs\bidbench\bidbench.exe"
+          if (-not (Test-Path $exe)) { throw "安装后找不到 $exe" }
+          & $exe --version
+          & "$env:LOCALAPPDATA\Programs\bidbench\bidbench-desktop.exe" --smoke | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "安装后桌面服务自检失败" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bidbench-setup-b${{ github.run_number }}
+          path: |
+            dist/bidbench-setup-*.exe
+            dist/bidbench-setup-*.exe.sha256
+          retention-days: 14
+
+      - name: 发布到 ${{ env.RELEASES_REPO }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::没有配置 RELEASES_TOKEN，本次只打包不发布"
+            exit 0
+          fi
+          # 发布仓库还是空的（没有任何提交）时，先放一个说明文件，否则无法建发布
+          if ! gh api "repos/$RELEASES_REPO/commits?per_page=1" >/dev/null 2>&1; then
+            printf '%s\n' "# 投标图纸工作台 安装包" "" "在 Releases 里下载最新的 bidbench-setup-b*.exe 安装。装好后在工作台里点“更新”即可升级。" > README.md
+            gh api -X PUT "repos/$RELEASES_REPO/contents/README.md" -f message="说明" -f content="$(base64 -w0 README.md)" >/dev/null
+          fi
+          prev=$(gh release view --repo "$RELEASES_REPO" --json body -q .body 2>/dev/null | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1)
+          python packaging/release_notes.py "$prev" > notes.md
+          cat notes.md
+          b="b${{ github.run_number }}"
+          gh release create "$b" --repo "$RELEASES_REPO" --title "$APP_VERSION 构建 ${{ github.run_number }}" \
+            --notes-file notes.md "dist/bidbench-setup-$b.exe" "dist/bidbench-setup-$b.exe.sha256"

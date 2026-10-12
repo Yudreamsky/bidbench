@@ -5,13 +5,19 @@
 
 ## 准备
 
+**安装版**（用安装包装的）已经带了 MCP，`bidbench.exe` 在
+`%LOCALAPPDATA%\Programs\bidbench\bidbench.exe`（安装时勾选了“加入 PATH”的话，直接写 `bidbench` 也行）。
+
+**源码版**：
+
 ```bash
 pip install -e ".[mcp]"          # MCP Python SDK，1.x 和 2.x 都支持
 bidbench -p 项目目录 mcp           # 能启动即可（它通过标准输入输出通信，按 Ctrl+C 退出）
 ```
 
-下面的配置里，`bidbench` 最好写成**虚拟环境里的完整路径**，因为桌面应用不会帮你激活虚拟环境：
-Windows 是 `项目源码\.venv\Scripts\bidbench.exe`，macOS / Linux 是 `项目源码/.venv/bin/bidbench`。
+下面的配置里，`bidbench` 最好写成**完整路径**，因为桌面应用不会帮你激活虚拟环境：
+安装版是 `C:\Users\你\AppData\Local\Programs\bidbench\bidbench.exe`，
+源码版 Windows 是 `项目源码\.venv\Scripts\bidbench.exe`，macOS / Linux 是 `项目源码/.venv/bin/bidbench`。
 
 ## Claude Code
 
@@ -27,7 +33,7 @@ claude mcp add bidbench -- /完整路径/bidbench -p "/图纸项目目录" mcp
 {
   "mcpServers": {
     "bidbench": {
-      "command": "C:\\code\\bidbench\\.venv\\Scripts\\bidbench.exe",
+      "command": "C:\\Users\\你\\AppData\\Local\\Programs\\bidbench\\bidbench.exe",
       "args": ["-p", "D:\\投标\\示例项目", "mcp"]
     }
   }

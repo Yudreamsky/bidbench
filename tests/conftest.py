@@ -22,6 +22,12 @@ def _recognize(proj):
         assert not res.errors, res.errors
 
 
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path_factory, monkeypatch):
+    """用户设置（最近项目、API 密钥）写到临时目录，不碰真实的用户目录。"""
+    monkeypatch.setenv("BIDBENCH_CONFIG_DIR", str(tmp_path_factory.mktemp("cfg")))
+
+
 @pytest.fixture(scope="session")
 def sample_zips(tmp_path_factory):
     return make_sample.build(tmp_path_factory.mktemp("zips"))

@@ -159,7 +159,7 @@ def test_workbench_update_endpoints(demo_copy, monkeypatch):
         v = json.loads(urllib.request.urlopen(base + "/api/version").read())
         assert "version" in v
         req = urllib.request.Request(base + "/api/update/apply", method="POST", data=b"{}",
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json", "X-Bidbench-Token": httpd.app.token})
         r = json.loads(urllib.request.urlopen(req).read())
         assert r["restarting"] is True and restarted == [None]
     finally:

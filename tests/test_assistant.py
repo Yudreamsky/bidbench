@@ -148,7 +148,8 @@ def test_workbench_confirms_proposal(kit, demo_copy):
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         st = json.loads(urllib.request.urlopen(base + "/api/state").read())
         assert [x["id"] for x in st["proposals"]] == [p["proposal_id"]]
-        req = urllib.request.Request(base + "/api/proposal", method="POST", headers={"Content-Type": "application/json"},
+        req = urllib.request.Request(base + "/api/proposal", method="POST",
+                                     headers={"Content-Type": "application/json", "X-Bidbench-Token": httpd.app.token},
                                      data=json.dumps({"id": p["proposal_id"], "action": "confirm"}).encode())
         st = json.loads(urllib.request.urlopen(req).read())
         assert st["proposals"] == [] and st["notes"][0]["text"] == "测试笔记"

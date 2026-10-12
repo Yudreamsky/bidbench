@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bidbench"
-version = "0.1.0"
+version = "0.2.0"
 description = "投标图纸工作台：面向 AI agent 的投标图纸数据底座"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,10 +17,14 @@ dependencies = [
 archives = ["py7zr>=0.20"]  # 可选：加密 7z；rar 和普通 7z 用系统自带的 tar / 7-Zip / WinRAR
 claude = ["anthropic>=1.13"]
 mcp = ["mcp>=1.2"]
+desktop = ["pywebview>=5.4"]  # 独立窗口；Windows 上用系统自带的 Edge WebView2
 dev = ["pytest>=8", "anthropic>=1.13", "mcp>=1.2"]
 
 [project.scripts]
 bidbench = "bidbench.cli:main"
+
+[project.gui-scripts]
+bidbench-desktop = "bidbench.desktop:main"
 
 [tool.setuptools.packages.find]
 include = ["bidbench*"]

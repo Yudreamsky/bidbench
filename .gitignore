@@ -43,3 +43,4 @@ Desktop.ini
 /samples/out/
 *.sqlite
 *.egg-info/
+/packaging/build/

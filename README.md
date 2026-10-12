@@ -10,12 +10,21 @@
 > - **外部 agent**：把识别任务包交给 Codex 等 agent 的目标模式，见 [docs/外部执行器.md](docs/外部执行器.md)
 > - **模拟执行器**：只读 PDF 文字层、按规则抽取，用于演示和测试，扫描件无法识别
 
+## 安装（Windows）
+
+到 [发布页](https://github.com/Yudreamsky/bidbench-releases/releases) 下载最新的 `bidbench-setup-b*.exe`，双击安装，
+开始菜单里打开“投标图纸工作台”。这是一个独立窗口，收图、识别、导出、设置都在里面点按钮完成；
+有新版本时点“更新并重启”就能升级。详见 [docs/安装与更新.md](docs/安装与更新.md)。
+
+下面是源码版的用法（开发、或在 macOS / Linux 上用）。
+
 ## 快速体验
 
 ```bash
 pip install -e ".[dev]"
 ./samples/run_demo.sh demo-project      # 生成 4 批合成图纸，逐批收图、识别、计算
-bidbench -p demo-project serve          # 打开 http://127.0.0.1:8765/
+bidbench -p demo-project serve          # 浏览器打开 http://127.0.0.1:8765/
+bidbench -p demo-project desktop        # 或者开独立窗口（需要 pip install -e ".[desktop]"）
 ```
 
 演示数据覆盖：目录列出但缺失的图、引用不存在的图、合订本、整套重发中消失的图、内层压缩包补来的图、加密压缩包、
@@ -92,6 +101,8 @@ bidbench recognize --executor claude --tier strong --scope weak       # 强档�
 - 图纸页面会发送到 Anthropic API 识别。图纸涉密时，先确认这符合项目的保密要求。
 
 ## 更新
+
+安装版见 [docs/安装与更新.md](docs/安装与更新.md)。下面是用 git clone 安装的源码版。
 
 工作台检测到 GitHub 上有新版本时，顶部会出现“有新版本”，点开能看到更新内容，点“更新并重启”即可；
 页头的版本号也能打开这个面板。命令行：
@@ -176,7 +187,8 @@ bidbench update --rollback  # 回到上一次更新之前的版本
 | 识别 | 任务包 + `spec/schema.json` 约定输出；执行器可替换；导入前严格校验 | `bidbench/recognition.py`、`bidbench/executors/` |
 | 派生状态 | 台账、版本链、现行版、冲突、作废还是漏发、缺图、关系、事实层、基线 | `bidbench/state.py` |
 | 报告与导出 | 解包报告、到图差异报告、图纸台账、缺图清单、答疑问题清单、项目事实；现行图纸文件夹；数据镜像 | `bidbench/reports.py`、`bidbench/export.py` |
-| 工作台 | 图纸知识图谱、事实思维导图、问题中心，可回看任意批次 | `bidbench/server.py`、`bidbench/web/index.html` |
+| 工作台 | 图纸知识图谱、事实思维导图、问题中心，可回看任意批次；收图、识别、导出等操作在后台任务里跑 | `bidbench/server.py`、`bidbench/web/index.html`、`bidbench/ops.py` |
+| 桌面版与安装包 | 独立窗口（WebView2）；PyInstaller + Inno Setup 打包；从发布仓库下载安装包更新 | `bidbench/desktop.py`、`bidbench/release.py`、`packaging/` |
 
 **数据原则**：数据库只存原始登记（批次、文件、出处、页面、识别结果）和人工决定。台账、事实等派生结果每次重新计算，
 所以任意批次的状态都能还原，规则改进后旧项目也能直接受益。
