@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .debuglog import safe_command, tail
+from .proc import NO_WINDOW
 
 TIMEOUT = 3600
 log = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     t = time.monotonic()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           env=_env(), timeout=TIMEOUT, stdin=subprocess.DEVNULL)
+                           env=_env(), timeout=TIMEOUT, stdin=subprocess.DEVNULL, **NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("解压工具没能运行：%s：%s", safe_command(cmd), e)
         raise
@@ -111,7 +112,7 @@ def find_bsdtar() -> str | None:
     cands += [shutil.which("bsdtar"), shutil.which("tar")]
     for tar in dict.fromkeys(c for c in cands if c and os.path.isfile(c)):
         try:
-            out = subprocess.run([tar, "--version"], capture_output=True, text=True, timeout=10).stdout
+            out = subprocess.run([tar, "--version"], capture_output=True, text=True, timeout=10, **NO_WINDOW).stdout
         except (OSError, subprocess.SubprocessError):
             continue
         if "bsdtar" in out or "libarchive" in out:

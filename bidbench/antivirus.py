@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .debuglog import safe_command, tail
+from .proc import NO_WINDOW
 
 TIMEOUT = 3600
 log = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def find_engine() -> Engine | None:
 def _run(cmd: list[str]) -> tuple[int, str]:
     t = time.monotonic()
     try:
-        r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT)
+        r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT, **NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("杀毒软件没能运行：%s：%s", safe_command(cmd), e)
         raise

@@ -56,7 +56,13 @@ def cmd_recognize(args):
     proj = _proj(args)
     if args.executor == "simulated":
         return ops.recognize_simulated(proj, Path(args.task) if args.task else None)
-    est = ops.prepare_claude(proj, args.scope, args.tier, args.model, args.tiles, Path(args.task) if args.task else None)
+    if args.effort == "ultra" and args.executor != "codex":
+        sys.exit("错误：思考强度 ultra 只有 Codex 能用")
+    given = Path(args.task) if args.task else None
+    if args.executor == "codex":
+        est = ops.prepare_codex(proj, args.scope, args.tier, args.model, args.tiles, given, args.workers)
+    else:
+        est = ops.prepare_claude(proj, args.scope, args.tier, args.model, args.tiles, given)
     if est is None:
         print(f"范围「{recognition.SCOPES[args.scope]}」内没有需要识别的页面。")
         return None
@@ -64,14 +70,18 @@ def cmd_recognize(args):
     print(f"任务包：{task}")
     print(ops.estimate_text(est))
     if args.dry_run:
-        print("只做了估算（--dry-run），没有调用 API。去掉 --dry-run 正式运行，或用 --task 指定这个任务包。")
+        print("只做了估算（--dry-run），没有开始识别。去掉 --dry-run 正式运行，或用 --task 指定这个任务包。")
         return est
+    again = f"bidbench recognize --executor {args.executor} --task {task}"
     try:  # 每识别完一页输出一行（识别过程日志）
-        r = ops.recognize_claude(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers)
+        if args.executor == "codex":
+            r = ops.recognize_codex(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers)
+        else:
+            r = ops.recognize_claude(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers or 4)
     except ops.OpError as e:
-        sys.exit(f"错误：{e}：bidbench recognize --executor claude --task {task}")
+        sys.exit(f"错误：{e}：{again}")
     if r["failed"]:
-        print(f"失败的页面可以重跑：bidbench recognize --executor claude --task {task}")
+        print(f"失败的页面可以重跑：{again}")
     return r
 
 
@@ -323,9 +333,10 @@ def _op(args) -> tuple[str, str, str] | None:
     if c == "recognize":
         if args.executor == "simulated":
             return "recognize", oplog.TITLES["simulated"], args.project
+        who = "Codex" if args.executor == "codex" else "Claude"
         if args.dry_run:
-            return "estimate", f"{oplog.TITLES['estimate']}（{tier}）", args.project
-        return "recognize", f"{oplog.TITLES['claude']}（{tier}）", args.project
+            return "estimate", f"{oplog.TITLES['estimate']}（{who} {tier}）", args.project
+        return "recognize", f"{oplog.TITLES[args.executor]}（{tier}）", args.project
     if c == "build":
         return "build", oplog.TITLES["build"] + (f"（截至批次 #{args.as_of}）" if args.as_of else ""), args.project
     if c == "export":
@@ -432,16 +443,19 @@ def main(argv=None):
     s.set_defaults(fn=cmd_tasks)
 
     s = sub.add_parser("recognize", help="用内置执行器识别并导入")
-    s.add_argument("--executor", default="simulated", choices=["simulated", "claude"])
+    s.add_argument("--executor", default="simulated", choices=["simulated", "claude", "codex"],
+                   help="simulated=模拟（演示）；claude=Anthropic API，按量付费；codex=本机的 Codex，用 ChatGPT 账号的额度")
     s.add_argument("--task", help="已有任务包路径（续跑）；不填则新建")
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES),
                    help="claude 执行器挑选哪些页面：" + "；".join(f"{k}={v}" for k, v in recognition.SCOPES.items()))
     s.add_argument("--tier", default="economy", choices=["economy", "strong"],
-                   help="economy=claude-haiku-5-5 全量识别；strong=claude-opus-5-5 加局部切片，用于复核")
-    s.add_argument("--model", help="覆盖档位的默认模型")
-    s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="覆盖档位的默认 effort")
+                   help="economy=首次全量识别（Claude：claude-haiku-5-5；Codex：gpt-6.1-sol 中等思考）；"
+                        "strong=加局部切片，用于复核（Claude：claude-opus-5-5；Codex：gpt-6.1-sol 深入思考）")
+    s.add_argument("--model", help="覆盖档位的默认模型（Codex 能用的模型见 codex debug models）")
+    s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max", "ultra"],
+                   help="覆盖档位的默认思考强度（ultra 只有 Codex 能用）")
     s.add_argument("--tiles", type=int, help="局部切片 N×N，0 表示不切")
-    s.add_argument("--workers", type=int, default=4, help="并发页数")
+    s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
     s.add_argument("--dry-run", action="store_true", help="只生成任务包并估算花费，不调用 API")
     s.set_defaults(fn=cmd_recognize)
 

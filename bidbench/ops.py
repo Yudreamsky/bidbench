@@ -95,10 +95,32 @@ def prepare_claude(proj: Project, scope: str = "new", tier: str = "economy", mod
     return {"task": str(task), **claude.estimate(task, tier, model, tiles)}
 
 
+def prepare_codex(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
+                  tiles: int | None = None, task: Path | None = None, workers: int | None = None) -> dict | None:
+    """生成任务包并估算用时（不调用 Codex）。没有要识别的页面时返回 None。"""
+    from .executors import codex
+    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope)
+    if task is None:
+        return None
+    return {"task": str(task), **codex.estimate(task, tier, model, tiles, workers or codex.DEFAULT_WORKERS)}
+
+
 def estimate_text(est: dict) -> str:
+    if est.get("executor") == "codex":
+        return (f"待识别 {est['pages']} 页，{est['images']} 张图片，用 Codex（模型 {est['model']}，思考强度 {est['effort']}），"
+                f"同时识别 {est['workers']} 页，预计约 {est['minutes']} 分钟。不另外花钱，占用你 ChatGPT 账号的 Codex 用量额度。")
     usd = f"约 ${est['estimated_usd']:.2f}" if est["estimated_usd"] is not None else "未知（模型不在价格表里）"
     return (f"待识别 {est['pages']} 页，{est['images']} 张图片，模型 {est['model']}，粗略估算输入 {est['input_tokens']} tokens、"
             f"输出 {est['output_tokens']} tokens，花费{usd}。")
+
+
+def _finish_recognition(proj: Project, task: Path, r, usage_text: str, log: Log) -> dict:
+    log(f"识别 {r.done} 页，跳过 {r.skipped} 页，失败 {len(r.failed)} 页；{usage_text}。")
+    for f in r.failed[:5]:
+        log(f"  ✗ {f['file']}：{f['error']}")
+    res = recognition.import_results(proj, Path(task) / "results")
+    log(f"导入 {res.imported} 页。" + (f"{len(res.errors)} 个文件未通过校验，详见 reports/识别结果导入问题.md" if res.errors else ""))
+    return {"done": r.done, "failed": len(r.failed), "imported": res.imported, "task": str(task), "model": r.model}
 
 
 def recognize_claude(proj: Project, task: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
@@ -109,13 +131,28 @@ def recognize_claude(proj: Project, task: Path, tier: str = "economy", model: st
     except claude.FatalError as e:
         raise OpError(f"{e}。任务包已保留，配置好后可以续跑") from e
     cost = r.usage.cost(r.model)
-    log(f"识别 {r.done} 页，跳过 {r.skipped} 页，失败 {len(r.failed)} 页；实际用量 输入 {r.usage.input} / 输出 {r.usage.output} tokens"
-        + (f"，约 ${cost:.4f}" if cost is not None else "") + "。")
-    for f in r.failed[:5]:
-        log(f"  ✗ {f['file']}：{f['error']}")
-    res = recognition.import_results(proj, Path(task) / "results")
-    log(f"导入 {res.imported} 页。" + (f"{len(res.errors)} 个文件未通过校验，详见 reports/识别结果导入问题.md" if res.errors else ""))
-    return {"done": r.done, "failed": len(r.failed), "imported": res.imported, "usd": cost, "task": str(task)}
+    out = _finish_recognition(proj, task, r, f"实际用量 输入 {r.usage.input} / 输出 {r.usage.output} tokens"
+                              + (f"，约 ${cost:.4f}" if cost is not None else ""), log)
+    return {**out, "usd": cost}
+
+
+def recognize_codex(proj: Project, task: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
+                    tiles: int | None = None, workers: int | None = None, log: Log = print, progress=None,
+                    runner=None) -> dict:
+    """用本机的 Codex（ChatGPT 账号）识别。runner 只在测试里用，代替真的 Codex。"""
+    from .executors import claude, codex
+    try:
+        r = codex.run(Path(task), tier, model, effort, tiles, workers or codex.DEFAULT_WORKERS, progress=progress,
+                      log_fn=log, runner=runner)
+    except claude.FatalError as e:
+        raise OpError(f"{e}。任务包已保留，可以续跑") from e
+    return _finish_recognition(proj, task, r, f"用量 输入 {r.usage.input} / 输出 {r.usage.output} tokens"
+                               "（ChatGPT 账号的 Codex 额度，不另外计费）", log)
+
+
+def codex_status(refresh: bool = False) -> dict:
+    from .executors import codex
+    return codex.status(refresh)
 
 
 def has_claude_credentials() -> bool:

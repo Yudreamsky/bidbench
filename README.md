@@ -65,6 +65,32 @@ bidbench log                                                 # 操作日志：�
 
 ## 图纸识别
 
+有两种识别方式，工作台「识别」里可以选，也可以选模型（会记住上次的选择）：
+
+| 识别方式 | 费用 | 需要 |
+| --- | --- | --- |
+| Codex | 不另外花钱，占用 ChatGPT 账号的 Codex 用量额度 | 本机装好 Codex 命令行并用 ChatGPT 账号登录 |
+| Claude API | 按用量付费，先估算花费 | Anthropic API 密钥 |
+
+### 用 Codex 识别
+
+```bash
+npm install -g @openai/codex@latest    # 装好或更新 Codex 命令行（gpt-6.1-sol 需要 0.162 以上）
+codex login                            # 用 ChatGPT 账号登录
+bidbench recognize --executor codex --dry-run               # 只生成任务包并估算用时
+bidbench recognize --executor codex                         # 经济档：gpt-6.1-sol，中等思考
+bidbench recognize --executor codex --tier strong --scope conflict   # 强档：加局部切片，深入思考
+bidbench recognize --executor codex --model gpt-6-astra     # 换模型（能用的模型见 codex debug models）
+```
+
+- 每页调用一次 `codex exec`，一页约半分钟到一分钟，默认同时识别 3 页。识别要求、格式校验、失败重试、续跑、逐页记录都和 Claude 一样。
+- 安全：Codex 在只读沙箱里运行，不读你自己的 Codex 设置（不带上全权限、插件和 MCP），不保存会话记录，
+  工作目录是只放了这一页图片的临时文件夹。PATH 里的 Codex 和 Codex 桌面版自带的命令行，自动用版本新的那个。
+- 模型不能用、没登录、额度用完时第一页就停下，并说明怎么办；任务包保留，之后用 `--task` 续跑。
+- 图纸页面会通过 Codex 发送给 OpenAI 识别。图纸涉密时，先确认这符合项目的保密要求。
+
+### 用 Claude API 识别
+
 先配置 Claude API 凭据（任选其一）：
 
 ```bash
@@ -123,6 +149,19 @@ bidbench update --rollback  # 回到上一次更新之前的版本
 - 依赖有变化时自动补装（保留你已装的可选功能，如 `claude`、`mcp`）；Windows 上在工作台退出后再装，避开被占用的 `bidbench.exe`。
 - 项目数据不在代码目录里，更新不会碰到。数据库结构升级时会先备份为 `bidbench.sqlite.bak-v版本-时间`。
 - 更新过程记录在代码目录的 `.git/bidbench_update.log`。
+
+## 让 Codex 帮忙验收
+
+`docs/验收清单.md` 列出了要核对的功能（测试、演示流水线、收图、台账与问题、日志、工作台接口、识别、安全约束）。
+运行下面的命令，Codex 会在一个临时的代码副本里按清单实际操作，写出验收报告；它只验证、不改代码，只用合成数据，
+不调用 Claude API，也不真的用 Codex 识图：
+
+```bash
+.venv/Scripts/python tools/codex_accept.py                # 全部条目，约十几分钟
+.venv/Scripts/python tools/codex_accept.py --items A1,D1  # 只验部分条目
+```
+
+报告在 `验收报告/` 里（不入库），终端也会打印每一项的结果。验收的是已提交的版本，未提交的改动不在范围内。
 
 ## 日志
 

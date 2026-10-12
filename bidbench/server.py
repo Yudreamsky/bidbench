@@ -222,18 +222,21 @@ def _job_fn(app: _App, kind: str, body: dict):
 
     if kind == "estimate":
         scope, tier = body.get("scope") or "new", body.get("tier") or "economy"
-        if scope not in recognition.SCOPES or tier not in ("economy", "strong"):
-            raise ValueError("识别范围或档位不对")
+        executor, model = body.get("executor") or "claude", _model(body)
+        if scope not in recognition.SCOPES or tier not in ("economy", "strong") or executor not in EXECUTORS:
+            raise ValueError("识别范围、档位或识别方式不对")
+        appconfig.remember("recognize", {"executor": executor, "scope": scope, "tier": tier, "model": model})
 
         def fn(job):
             job.log("正在生成识别任务包（渲染页面图片）……")
-            est = ops.prepare_claude(need_proj(), scope, tier)
+            prepare = ops.prepare_codex if executor == "codex" else ops.prepare_claude
+            est = prepare(need_proj(), scope, tier, model)
             if est is None:
                 job.log(f"范围「{recognition.SCOPES[scope]}」内没有需要识别的页面。")
                 return None
             job.log(ops.estimate_text(est))
-            return {**est, "tier": tier, "scope": scope}
-        return oplog.TITLES["estimate"], fn
+            return {**est, "tier": tier, "scope": scope, "executor": executor}
+        return f"{oplog.TITLES['estimate']}（{EXECUTORS[executor]} {'经济档' if tier == 'economy' else '强档'}）", fn
 
     if kind == "recognize":
         executor = body.get("executor")
@@ -243,23 +246,29 @@ def _job_fn(app: _App, kind: str, body: dict):
                 ops.build(proj, log=job.log)
                 return r
             return oplog.TITLES["simulated"], fn
-        if executor != "claude":
+        if executor not in EXECUTORS:
             raise ValueError("未知的识别方式")
         task = Path(str(body.get("task") or ""))
         tasks_root = need_proj().path("recognition", "tasks").resolve()
         if not task.is_dir() or tasks_root not in task.resolve().parents:
-            raise ValueError("任务包不存在，请先估算花费")
+            raise ValueError("任务包不存在，请先估算")
         tier = body.get("tier") if body.get("tier") in ("economy", "strong") else "economy"
-        if not ops.has_claude_credentials():
+        model = _model(body)
+        if executor == "claude" and not ops.has_claude_credentials():
             raise ValueError("还没有设置 Claude API 密钥，请先到“设置”里填写")
+        if executor == "codex":
+            st = ops.codex_status()
+            if not st["ready"]:
+                raise ValueError(st["hint"] or "Codex 还不能用")
 
         def fn(job):
             def progress(n, total):
                 job.progress = (n, total)
-            r = ops.recognize_claude(proj, task, tier, log=job.log, progress=progress)
+            recognize = ops.recognize_codex if executor == "codex" else ops.recognize_claude
+            r = recognize(proj, task, tier, model, log=job.log, progress=progress)
             ops.build(proj, log=job.log)
             return r
-        return f"{oplog.TITLES['claude']}（{'经济档' if tier == 'economy' else '强档'}）", fn
+        return f"{oplog.TITLES[executor]}（{'经济档' if tier == 'economy' else '强档'}）", fn
 
     if kind == "build":
         return oplog.TITLES["build"], lambda job: ops.build(need_proj(), log=job.log)
@@ -289,6 +298,27 @@ def _job_fn(app: _App, kind: str, body: dict):
         return ("更新" if kind == "update" else "回退到上一版"), fn
 
     raise ValueError("未知的操作")
+
+
+EXECUTORS = {"claude": "Claude", "codex": "Codex"}
+
+
+def _model(body: dict) -> str | None:
+    """界面选的模型；不选就按档位默认。只接受模型名里会出现的字符，防止拼进命令行的参数被当成选项。"""
+    m = body.get("model")
+    if not m:
+        return None
+    if not isinstance(m, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", m):
+        raise ValueError("模型名称不对")
+    return m
+
+
+def _recognizers(refresh: bool = False) -> dict:
+    """识别页面用：两种识别方式能不能用、有哪些模型。"""
+    from .executors import claude
+    return {"claude": {"ready": ops.has_claude_credentials(), "models": claude.model_list(),
+                       "defaults": {t: c["model"] for t, c in claude.TIERS.items()}},
+            "codex": ops.codex_status(refresh), "prefs": appconfig.prefs().get("recognize") or {}}
 
 
 def _open_folder(path: Path) -> None:
@@ -345,6 +375,8 @@ def make_handler(app: _App):
                 return self._json(app.info())
             if u.path == "/api/job":
                 return self._json(app.job.as_dict() if app.job else None)
+            if u.path == "/api/recognizers":
+                return self._json(_recognizers(refresh="refresh" in parse_qs(u.query)))
             if u.path == "/api/log":
                 if not self._need_project():
                     return None

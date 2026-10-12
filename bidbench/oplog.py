@@ -20,7 +20,7 @@ from .store import Project, now_iso
 FOLDER = "logs"
 MAX_LINES = 400
 STATUS_WORD = {"done": "完成", "error": "出错", "interrupted": "中断"}
-TITLES = {"estimate": "估算识别花费", "simulated": "模拟识别", "claude": "Claude 识别", "build": "重新计算报告",
+TITLES = {"estimate": "识别估算", "simulated": "模拟识别", "claude": "Claude 识别", "codex": "Codex 识别", "build": "重新计算报告",
           "current": "导出现行图纸", "mirror": "导出数据镜像", "scan": "文件安全扫描", "tasks": "生成识别任务包",
           "import": "导入识别结果"}
 
@@ -71,7 +71,8 @@ def _summary(kind: str, r: dict) -> str | None:
             f"，导入 {r.get('imported', 0)} 页" + usd
     if kind == "estimate":
         cost = f"，估算约 ${r['estimated_usd']:.2f}" if r.get("estimated_usd") is not None else ""
-        return f"{r['pages']} 页{cost}"
+        minutes = f"，预计约 {r['minutes']} 分钟" if r.get("minutes") else ""
+        return f"{r['pages']} 页{cost}{minutes}"
     if kind == "build":
         return f"截至批次 #{r['as_of']}：严重问题 {r['crit']} 项，提醒 {r['warn']} 项"
     if kind == "export":

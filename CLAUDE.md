@@ -7,7 +7,8 @@
 - 拿不准的判断（版本、作废、冲突）不要自动拍板，生成问题并给出决定选项。
 - `bidbench/web/index.html` 是本地工具，不加载任何外部资源（字体、CDN），图纸不出电脑。
 - 新的到图情况先在 `samples/make_sample.py` 里加一个合成案例，再写对应测试。
-- 识别执行器只读任务包、只写 `results/`；新执行器放在 `bidbench/executors/`，测试用假的 API 客户端，不联网。
+- 识别执行器只读任务包、只写 `results/`；新执行器放在 `bidbench/executors/`，逐页流程用 `claude.run_pages`，测试用假的 API 客户端或假的 Codex（`tests/test_codex_executor.py` 的 FakeCodex），不联网。
+- 调用外部命令行程序（解压工具、杀毒软件、Codex）都加 `**proc.NO_WINDOW`，桌面版才不会弹出黑色命令行窗口。
 - Claude 执行器的提示词在 `bidbench/executors/claude.py` 的 `SYSTEM_PROMPT`，改识别要求时与 `spec/任务说明.md` 保持一致。
 - AI 助手的工具都在 `bidbench/assistant.py`，MCP 只是一层注册（`bidbench/mcp_server.py`）。改动类工具只能写 `proposals` 表，确认、驳回不得暴露给 AI。
 - 修改已有数据表结构时：`store.SCHEMA_SQL` 写成最新样子，`SCHEMA_VERSION` 加 1，在 `MIGRATIONS` 里写升级 SQL，并加迁移测试。
