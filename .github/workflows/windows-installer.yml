@@ -1,9 +1,9 @@
-# Windows 安装包：每个 PR 都打包并自检（产物可在 Actions 页面下载试用）；合并到 main 后发布到本仓库的 Releases。
+# Windows 安装包：合并到 main 后打包、自检并发布到本仓库的 Releases；也可以在 Actions 页面手动运行。
+# 高速迭代期 PR 上不打包（省时间），PR 只跑 test 工作流；打包出问题在 main 上修。
 # 发布用 Actions 自带的 GITHUB_TOKEN，不需要另配令牌。
 name: windows-installer
 
 on:
-  pull_request:
   push:
     branches: [main]
   workflow_dispatch:

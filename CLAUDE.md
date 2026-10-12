@@ -16,4 +16,4 @@
 - 收图、识别、导出等日常操作写在 `bidbench/ops.py`（输出走 log 回调），命令行和工作台后台任务都调用它，不要在两边各写一份。
 - 日志：会改动项目的新命令或新后台任务，要记进项目操作日志（`bidbench/oplog.py`；命令行在 `cli._op` 里登记，工作台在 `server.PROJECT_JOBS` 里登记）；人工决定、提议已在数据库里，查看时合并，不要重复记。程序内部情况用 `logging.getLogger(__name__)` 写排错日志（`bidbench/debuglog.py`），不得写入图纸内容、识别出的文字、API 密钥和密码，外部命令用 `debuglog.safe_command()` 去掉密码。
 - 工作台的改动类接口都要校验令牌（`X-Bidbench-Token`）和 Host 头；新接口放进 `server.py` 已有的 POST 分发里，不要绕过。
-- 安装包相关在 `packaging/` 和 `.github/workflows/windows-installer.yml`；新增依赖时确认 `packaging/bidbench.spec` 能打进去，PR 上的 Windows 打包自检要通过。
+- 安装包相关在 `packaging/` 和 `.github/workflows/windows-installer.yml`；新增依赖时确认 `packaging/bidbench.spec` 能打进去。高速迭代期 PR 上不打包，合并到 main 后自动打包发布，打包出问题在 main 上修。
