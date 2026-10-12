@@ -258,6 +258,20 @@ async function post(url, body) {
   setState(data);
   return true;
 }
+async function actProposal(id, action) {
+  const r = await fetch('/api/proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action }) });
+  const data = await r.json();
+  if (!r.ok) { toast(data.error || '操作失败'); return; }
+  setState(data);
+  toast(data.last_outcome || (action === 'confirm' ? '已确认' : '已驳回'));
+}
+function proposalSummary(p) {
+  const d = p.payload;
+  if (p.kind === 'decision') return `${d.issue_title} → ${d.label}`;
+  if (p.kind === 'baseline') return `锁定基线「${d.name}」（${d.sheets ? d.sheets.join('、') : '全部现行图纸'}）`;
+  if (p.kind === 'note') return `项目笔记「${d.topic}」：${d.text}`;
+  return p.kind;
+}
 async function decide(opt) {
   if (await post('/api/decision', { kind: opt.kind, key: opt.key, value: opt.value })) toast('已记录：' + opt.label);
 }
@@ -497,6 +511,14 @@ function renderOverview() {
       el('div', { class: 'stat warn' }, el('b', {}, String(S.issues.filter(i => i.level === 'warn').length)), el('span', {}, '提醒'))),
   ];
   if (!latest()) parts.push(el('div', { class: 'note warn' }, '正在查看历史状态，只读。切回最新批次后才能做决定。'));
+  const props = S.proposals || [];
+  if (props.length) parts.push(section(`AI 助手提议（${props.length}）`, el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, props.map(p =>
+    el('div', { class: 'issue' },
+      el('div', { class: 'head' }, el('i', { class: 'dot c-mid' }),
+        el('div', {}, el('span', { style: 'font-weight:500' }, `#${p.id} ${proposalSummary(p)}`), el('small', {}, `理由：${p.reason}`))),
+      latest() ? el('div', { class: 'opts' },
+        el('button', { class: 'btn primary', type: 'button', onclick: () => actProposal(p.id, 'confirm') }, '确认'),
+        el('button', { class: 'btn', type: 'button', onclick: () => actProposal(p.id, 'reject') }, '驳回')) : null)))));
   parts.push(section('待处理', S.issues.length ? el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, S.issues.map(i =>
     el('div', { class: 'issue' },
       el('div', { class: 'head' }, el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : i.level === 'warn' ? 'c-low' : 'c-mid'}` }),
@@ -525,6 +547,9 @@ function renderOverview() {
     el('span', { style: `color:var(${r.status === 'missing' ? '--warn' : '--muted'})` }, FL[r.status]),
     el('small', { style: 'display:block;color:var(--muted)' },
       (r.covered.map(c => `${c.floors}（${c.sheets[0]}）`).join('；') || '无楼层信息') + (r.missing.length ? `；缺 ${r.missing_text}` : '')))))));
+  const notes = S.notes || [];
+  if (notes.length) parts.push(section('项目笔记', el('ul', { class: 'list' }, notes.map(n =>
+    el('li', {}, el('b', {}, n.topic), `：${n.text}`, el('small', { style: 'display:block;color:var(--muted)' }, `${n.source}，${n.created_at.slice(0, 10)}`))))));
   parts.push(section('收图批次', el('ul', { class: 'list' }, S.batches.map(x => el('li', {},
     el('b', { class: 'mono' }, `#${x.seq}`), ` ${x.received_at} ${x.archive}：${x.kinds.join('、')}（${x.sheets} 张图）`)))));
   const bl = S.baselines.map(x => el('li', {}, `${x.name}（${x.sheets} 张图，批次 #${x.as_of_batch}）`,

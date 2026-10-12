@@ -139,6 +139,57 @@ def cmd_export(args):
         print(f"数据镜像已导出：{export.export_mirror(proj, st, Path(args.out) if args.out else None)}")
 
 
+def cmd_mcp(args):
+    try:
+        from .mcp_server import run_stdio
+    except ImportError:
+        sys.exit("错误：需要先安装 MCP SDK：pip install -e \".[mcp]\"")
+    from .assistant import Toolkit
+    run_stdio(Toolkit(_proj(args)))
+
+
+def cmd_proposals(args):
+    from .assistant import Toolkit
+    rows = Toolkit(_proj(args), source="命令行").list_proposals("all" if args.all else "pending")
+    if not rows:
+        print("没有待确认的 AI 助手提议。" if not args.all else "还没有任何提议。")
+        return
+    label = {"pending": "待确认", "confirmed": "已确认", "rejected": "已驳回", "stale": "已失效"}
+    for r in rows:
+        print(f"#{r['id']} [{label.get(r['status'], r['status'])}] {r['summary']}")
+        print(f"    理由：{r['reason']}")
+        if r["outcome"]:
+            print(f"    结果：{r['outcome']}")
+
+
+def cmd_confirm(args):
+    from .assistant import Toolkit, ToolError
+    kit = Toolkit(_proj(args), source="命令行")
+    try:
+        r = kit.confirm(args.id)
+    except ToolError as e:
+        sys.exit(f"错误：{e}")
+    print(f"提议 #{r['proposal_id']}：{r['outcome']}")
+
+
+def cmd_reject(args):
+    from .assistant import Toolkit, ToolError
+    try:
+        r = Toolkit(_proj(args), source="命令行").reject(args.id, args.note)
+    except ToolError as e:
+        sys.exit(f"错误：{e}")
+    print(f"已驳回提议 #{r['proposal_id']}。")
+
+
+def cmd_notes(args):
+    from .assistant import Toolkit
+    rows = Toolkit(_proj(args)).list_notes()
+    if not rows:
+        print("还没有项目笔记。")
+    for n in rows:
+        print(f"[{n['topic']}] {n['text']}（{n['source']}，{n['created_at'][:10]}）")
+
+
 def cmd_serve(args):
     from .server import serve
     proj = _proj(args)
@@ -213,6 +264,25 @@ def main(argv=None):
     s.add_argument("what", choices=["current", "mirror"])
     s.add_argument("--out")
     s.set_defaults(fn=cmd_export)
+
+    s = sub.add_parser("mcp", help="以 MCP 服务方式运行（stdio），供 Claude 桌面版、Claude Code 等 agent 调用")
+    s.set_defaults(fn=cmd_mcp)
+
+    s = sub.add_parser("proposals", help="查看 AI 助手的提议")
+    s.add_argument("--all", action="store_true", help="包括已处理的提议")
+    s.set_defaults(fn=cmd_proposals)
+
+    s = sub.add_parser("confirm", help="确认一条 AI 助手提议，使其生效")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_confirm)
+
+    s = sub.add_parser("reject", help="驳回一条 AI 助手提议")
+    s.add_argument("id", type=int)
+    s.add_argument("--note")
+    s.set_defaults(fn=cmd_reject)
+
+    s = sub.add_parser("notes", help="查看已确认的项目笔记")
+    s.set_defaults(fn=cmd_notes)
 
     s = sub.add_parser("serve", help="启动本地工作台")
     s.add_argument("--host", default="127.0.0.1")

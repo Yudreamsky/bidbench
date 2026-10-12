@@ -83,6 +83,20 @@ def make_handler(app: _App):
                 add_decision(app.proj, kind, key, value, body.get("note"))
                 app.invalidate()
                 return self._json(app.state())
+            if u.path == "/api/proposal":
+                from .assistant import Toolkit, ToolError
+                pid, action = body.get("id"), body.get("action")
+                if not isinstance(pid, int) or action not in ("confirm", "reject"):
+                    return self._json({"error": "提议操作的格式不对"}, 400)
+                kit = Toolkit(app.proj, source="工作台")
+                try:
+                    r = kit.confirm(pid) if action == "confirm" else kit.reject(pid, body.get("note"))
+                except ToolError as e:
+                    return self._json({"error": str(e)}, 400)
+                app.invalidate()
+                st = dict(app.state())
+                st["last_outcome"] = r["outcome"]
+                return self._json(st)
             if u.path == "/api/baseline":
                 name = (body.get("name") or "").strip()
                 if not name:

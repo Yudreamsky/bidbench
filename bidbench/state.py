@@ -184,13 +184,24 @@ def _same_content(a: PageRec, b: PageRec) -> bool:
 
 # ---------------- 主计算 ----------------
 
+def _assistant_rows(con) -> dict:
+    """AI 助手的待确认提议和已确认的项目笔记。它们是原始输入，不参与派生计算，只随状态一起给界面看。"""
+    props = []
+    for r in con.execute("SELECT * FROM proposals WHERE status='pending' ORDER BY id"):
+        props.append({"id": r["id"], "kind": r["kind"], "payload": json.loads(r["payload"]), "reason": r["reason"],
+                      "source": r["source"], "created_at": r["created_at"]})
+    notes = [dict(r) for r in con.execute("SELECT * FROM notes ORDER BY id")]
+    return {"proposals": props, "notes": notes}
+
+
 def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> dict:
     with proj.connect() as con:
         batches = [dict(b) for b in con.execute("SELECT * FROM batches ORDER BY seq")]
+        assistant = _assistant_rows(con)
         if not batches:
             return {"project": proj.meta, "generated_at": now_iso(), "as_of": 0, "batches": [], "sheets": [],
                     "edges": [], "issues": [], "facts": {"groups": []}, "baselines": [], "notices": [],
-                    "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}}}
+                    "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}}, **assistant}
         as_of = as_of or batches[-1]["seq"]
         batches = [b for b in batches if b["seq"] <= as_of]
         decisions = latest_decisions(con)
@@ -203,6 +214,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
             " FROM occurrences o JOIN files f ON f.sha256=o.sha256 WHERE f.kind!='archive' GROUP BY o.batch_seq")}
 
     state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of)
+    state.update(assistant)
     if with_diff and as_of > 1:
         prev = build(proj, as_of - 1, with_diff=False)
         state["diff"] = diff_states(prev, state)
