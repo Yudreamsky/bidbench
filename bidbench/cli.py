@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import export, ingest, recognition, reports, state
+from . import antivirus, export, ingest, recognition, reports, risk, state
 from .executors import simulated
 from .store import Project, add_decision
 
@@ -25,14 +25,68 @@ def cmd_init(args):
 def cmd_receive(args):
     proj = _proj(args)
     r = ingest.receive(proj, Path(args.archive), args.date, args.name, args.password, args.note)
-    rep = reports.receive_report(proj, r)
     kinds = "、".join(f"{reports.KIND_LABEL.get(k, k)} {n}" for k, n in sorted(r.by_kind.items()))
     print(f"批次 #{r.seq}「{r.name}」：解出 {r.files} 个文件（{kinds}），新增 {r.new_pages} 页。")
     if r.nested_archives:
         print(f"  内层压缩包 {len(r.nested_archives)} 个，已自动展开。")
     for i in r.issues:
         print(f"  ⚠ {reports.ISSUE_LABEL.get(i['kind'], i['kind'])}：{i['path']}")
+    av = _antivirus(proj, r.seq, args.no_av)
+    sec = risk.batch_summary(proj, r.seq)
+    sec["av"] = av
+    _print_risks(sec["files"])
+    rep = reports.receive_report(proj, r, sec)
     print(f"解包报告：{rep}")
+
+
+def _antivirus(proj, seq, skip: bool) -> str | None:
+    """返回用到的杀毒软件名；跳过时返回 skipped，没有杀毒软件时返回 None。"""
+    if skip:
+        return "skipped"
+    engine = antivirus.find_engine()
+    if engine is None:
+        print("  本机没有找到杀毒软件，只做了静态检查。")
+        return None
+    print(f"  正在用 {engine.name} 扫描新文件……", flush=True)
+    res = antivirus.scan_project(proj, seq, engine)
+    if not res.ok:
+        print(f"  ⚠ {res.message}")
+    elif res.threats or res.vanished:
+        print(f"  ✗ {engine.name} 发现 {len(res.threats) + len(res.vanished)} 个有问题的文件，详见问题中心。")
+    else:
+        print(f"  {engine.name}：{res.scanned} 个文件未发现病毒。")
+    return engine.name
+
+
+def _print_risks(files) -> None:
+    for f in files:
+        mark = "✗" if f["level"] == "high" else "⚠" if f["level"] == "medium" else "·"
+        print(f"  {mark} {reports.LEVEL[f['level']]}风险 [{f['sha'][:12]}] {f['path'].split(' / ')[-1]}——{f['details'][0]}")
+    if any(f["level"] == "high" for f in files):
+        print("  不要双击运行这些文件，也不要和图纸放在同一个文件夹里用 CAD 打开。")
+
+
+def cmd_scan(args):
+    proj = _proj(args)
+    n = risk.rescan_static(proj)
+    print(f"静态检查完成（规则第 {risk.RULES_VERSION} 版）：{n} 个文件有发现。")
+    if not args.no_av:
+        engine = antivirus.find_engine()
+        if engine is None:
+            print("本机没有找到杀毒软件（Windows 自带 Defender；其他系统可装 ClamAV），跳过杀毒扫描。")
+        else:
+            print(f"正在用 {engine.name} 扫描全部文件……", flush=True)
+            res = antivirus.scan_project(proj, None, engine)
+            print(reports.scan_line({"batch_seq": 0, "engine": engine.name, "scanned_at": "", "ok": res.ok,
+                                     "message": res.message, "files": res.scanned,
+                                     "threats": len(res.threats) + len(res.vanished)}).strip() + "。")
+    st = state.build(proj, with_diff=False)
+    p = proj.path("reports", "文件安全检查.md")
+    p.write_text(reports.security_report(st), encoding="utf-8")
+    pending = [f for f in st["security"]["files"] if f["level"] != "low" and not f["decision"]]
+    for f in pending:
+        print(f"  {'✗' if f['level'] == 'high' else '⚠'} {f['level_word']}风险 [{f['key']}] {f['name']}——{f['findings'][0]}")
+    print(f"报告：{p}" + (f"。{len(pending)} 个文件待你确认，在工作台问题中心或用 bidbench decide risk <编号> safe|dangerous" if pending else ""))
 
 
 def cmd_tasks(args):
@@ -280,7 +334,12 @@ def main(argv=None):
     s.add_argument("--name")
     s.add_argument("--password", action="append", default=[], help="压缩包密码，可多次指定")
     s.add_argument("--note")
+    s.add_argument("--no-av", action="store_true", help="不调用杀毒软件（静态检查照做）")
     s.set_defaults(fn=cmd_receive)
+
+    s = sub.add_parser("scan", help="风险文件检查：按最新规则重查全部文件，并用本机杀毒软件扫描")
+    s.add_argument("--no-av", action="store_true", help="只做静态检查")
+    s.set_defaults(fn=cmd_scan)
 
     s = sub.add_parser("tasks", help="生成识别任务包，交给外部 agent 执行")
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="挑选哪些页面（默认 new）")
@@ -311,7 +370,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_build)
 
     s = sub.add_parser("decide", help="记录人工决定")
-    s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact"])
+    s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk"])
     s.add_argument("key")
     s.add_argument("value")
     s.add_argument("--note")

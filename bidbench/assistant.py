@@ -73,6 +73,7 @@ class Toolkit:
             "floor_coverage": [f"{r['group']}：{reports.FLOOR_STATUS[r['status']]}"
                                + (f"，缺 {r['missing_text']}" if r["missing"] else "") for r in st["floor_coverage"]],
             "recognition": st["recognition"],
+            "risk_files_pending": st["security"]["pending"],
             "pending_proposals": len(st["proposals"]),
             "notes": [f"{n['topic']}：{n['text']}" for n in st["notes"]],
             "hint": "逐层往下查：list_sheets / get_sheet 看图纸，list_facts / get_fact 看事实，list_issues 看问题。",
@@ -231,7 +232,8 @@ class Toolkit:
                 continue
             rows.append({"id": i["id"], "level": {"crit": "严重", "warn": "提醒", "info": "信息"}[i["level"]],
                          "kind": i["kind"], "title": i["title"], "detail": i["detail"],
-                         "options": [o["label"] for o in i["options"]], "confirmed": i.get("confirmed", False)})
+                         "options": [] if i["kind"] == "风险文件" else [o["label"] for o in i["options"]],
+                         "confirmed": i.get("confirmed", False)})
         return {"total": len(rows), "issues": rows,
                 "hint": "要处理某个问题，用 propose_issue_resolution(issue_id, option) 提议，等用户确认。"}
 
@@ -296,6 +298,8 @@ class Toolkit:
         issue = next((i for i in st["issues"] if i["id"] == issue_id), None)
         if not issue:
             raise ToolError(f"没有问题 {issue_id}。用 list_issues 查看问题编号。")
+        if issue["kind"] == "风险文件":
+            raise ToolError("文件安全问题只能由用户自己判断，助手不提议。可以提醒用户在工作台问题中心处理。")
         if not issue["options"]:
             raise ToolError("这个问题没有可选的处理方式，需要用户自己处理。")
         opts = issue["options"]

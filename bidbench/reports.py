@@ -10,10 +10,15 @@ from .store import Project
 
 KIND_LABEL = {"pdf": "PDF", "cad": "CAD 图纸", "office": "Office 文档", "image": "图片", "text": "文本", "other": "其他"}
 ISSUE_LABEL = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷", "symlink": "符号链接",
-               "too_deep": "嵌套过深", "too_large": "超出上限"}
+               "too_deep": "嵌套过深", "too_large": "超出上限", "blocked": "被拦截"}
+SAFETY_TIPS = ["不要双击运行投标文件里的程序，也不要随手点 Office 的“启用宏”。",
+               "用 CAD 打开图纸前，先确认同一个文件夹里没有 acad.lsp、acaddoc.lsp、acad.fas、*.mnl 这类文件；"
+               "建议在 CAD 的“选项 → 系统 → 安全”里把 SECURELOAD 设为 1 或 2，只从受信任位置加载脚本。",
+               "“导出现行图纸”时，带脚本的 PDF 会自动去掉脚本后再导出。"]
 
 
-def receive_report(proj: Project, r: ReceiveResult) -> Path:
+def receive_report(proj: Project, r: ReceiveResult, security: dict | None = None) -> Path:
+
     kinds = "、".join(f"{KIND_LABEL.get(k, k)} {n} 个" for k, n in sorted(r.by_kind.items())) or "无"
     lines = [f"# 批次 #{r.seq} 解包报告：{r.name}", "",
              f"共解出 {r.files} 个文件：{kinds}。新增 PDF 页面 {r.new_pages} 页（与已收文件内容相同的不重复计算）。", ""]
@@ -27,9 +32,58 @@ def receive_report(proj: Project, r: ReceiveResult) -> Path:
         lines += [f"| {ISSUE_LABEL.get(i['kind'], i['kind'])} | {i['path']} | {i['detail']} |" for i in r.issues] + [""]
     else:
         lines += ["没有解不开的文件。", ""]
+    lines += security_section(security)
     out = proj.path("reports", f"批次{r.seq:02d}-解包报告.md")
     out.write_text("\n".join(lines), encoding="utf-8")
     return out
+
+
+def scan_line(s: dict) -> str:
+    where = f"批次 #{s['batch_seq']}" if s["batch_seq"] else "全部文件"
+    if not s["ok"]:
+        return f"{s['scanned_at'][:16].replace('T', ' ')} {s['engine']} 扫描{where}没有完成：{s['message']}"
+    res = f"发现 {s['threats']} 个有问题的文件" if s["threats"] else "未发现病毒"
+    return f"{s['scanned_at'][:16].replace('T', ' ')} {s['engine']} 扫描{where}的 {s['files']} 个文件，{res}"
+
+
+def security_section(security: dict | None) -> list[str]:
+    if security is None:
+        return []
+    lines = ["## 文件安全检查", ""]
+    scans = security.get("scans") or []
+    lines += [f"- 杀毒扫描：{scan_line(s)}。" for s in scans] or [
+        "- 杀毒扫描：本机没有找到可用的杀毒软件（Windows 自带 Defender；其他系统可装 ClamAV），只做了静态检查。"
+        if security.get("av") is None else "- 杀毒扫描：已跳过（--no-av）。"]
+    files = security.get("files") or []
+    if not files:
+        return lines + ["- 静态检查：没有发现 CAD 自动加载脚本、可执行文件、宏或带脚本的 PDF。", ""]
+    lines += ["", "| 风险 | 文件 | 发现 |", "| --- | --- | --- |"]
+    lines += [f"| {LEVEL.get(f['level'], f['level'])} | {f['path']} | {'；'.join(f['details'])} |" for f in files]
+    return lines + ["", *[f"- {t}" for t in SAFETY_TIPS], ""]
+
+
+LEVEL = {"high": "高", "medium": "中", "low": "低"}
+
+
+def security_report(state: dict) -> str:
+    sec = state.get("security") or {}
+    lines = [f"# 文件安全检查（截至批次 #{state['as_of']}）", ""]
+    scans = sec.get("scans") or []
+    lines += ["## 杀毒扫描", ""] + ([f"- {scan_line(s)}" for s in scans] or ["- 还没有做过杀毒扫描。"]) + [""]
+    files = sec.get("files") or []
+    lines += ["## 风险文件", ""]
+    if not files:
+        lines += ["没有发现风险文件。", ""]
+    else:
+        from .state import RISK_DECISION
+        lines += ["| 风险 | 文件 | 发现 | 处理 | 位置 |", "| --- | --- | --- | --- | --- |"]
+        for f in files:
+            lines.append(f"| {f['level_word']} | {f['name']} | {'；'.join(f['findings'])} | "
+                         f"{RISK_DECISION.get(f['decision'], '待确认' if f['level'] != 'low' else '—')} | {'<br>'.join(f['paths'])} |")
+        lines.append("")
+    lines += ["## 注意", ""] + [f"- {t}" for t in SAFETY_TIPS] + [
+        "- 静态检查只看文件名和内容特征，不能代替杀毒软件；DWG 文件本身不能运行代码，风险在同目录的脚本和插件。"]
+    return "\n".join(lines) + "\n"
 
 
 def diff_report(state: dict) -> str:
@@ -112,6 +166,10 @@ def qa_report(state: dict) -> str:
             items.append(f"{i['title']}：{i['detail']}请明确以哪一份为准。")
         if i["kind"] == "事实冲突":
             items.append(f"{i['title']}：{i['detail']}请澄清。")
+    for f in (state.get("security") or {}).get("files", []):
+        if f["decision"] == "dangerous":
+            items.append(f"收到的文件 {f['name']}（{f['paths'][0] if f['paths'] else ''}）{'；'.join(f['findings'])}。"
+                         "请核实来源，并重新提供不含程序、脚本和宏的文件。")
     lines = [f"# 答疑问题清单（草稿，截至批次 #{state['as_of']}）", "",
              "由系统根据缺图和冲突自动整理，提交前请人工核对措辞。", ""]
     lines += [f"{n}. {t}" for n, t in enumerate(items, 1)] or ["暂无需要答疑的问题。"]
@@ -133,7 +191,7 @@ def write_all(proj: Project, state: dict, subdir: str | None = None) -> list[Pat
     out = []
     base = ("reports", subdir) if subdir else ("reports",)
     for name, fn in (("图纸台账", register_report), ("缺图清单", missing_report), ("答疑问题清单", qa_report),
-                     ("项目事实", facts_report)):
+                     ("项目事实", facts_report), ("文件安全检查", security_report)):
         p = proj.path(*base, f"{name}.md")
         p.write_text(fn(state), encoding="utf-8")
         out.append(p)

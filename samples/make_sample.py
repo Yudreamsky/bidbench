@@ -5,7 +5,9 @@
   建筑平面图缺 3F（标准层只适用 4F~20F）和两层地下室
 - 批次2 整套重发：多数图原样重发（文件去重）；若干图升 B 版；建施-05 消失（作废还是漏发）；
   结施-01 B 版把地上层数写成 21 层（事实冲突）；新增电施-01；夹带一个 docx
-- 批次3 部分修改：结施-04 升 C 版（KL3 截面改变）；内层压缩包里补来结施-03；一个加密压缩包
+- 批次3 部分修改：结施-04 升 C 版（KL3 截面改变）；内层压缩包里补来结施-03；一个加密压缩包；
+  风险文件（内容都是无害的占位）：结构文件夹里的 acad.lsp、双扩展名的“查看说明.pdf.exe”、带宏的 xlsm、
+  打开即运行脚本的结施-04 PDF
 - 批次4 补充：电施-01 同为 B 版但内容不同（改图未升版）；设计变更单；压缩包文件名为 GBK 编码
 
 用法：python samples/make_sample.py <输出目录>
@@ -122,6 +124,24 @@ def make_gbk_zip(entries: dict[str, bytes]) -> bytes:
     return data
 
 
+def with_open_script(pdf: bytes) -> bytes:
+    """给 PDF 加一个打开时运行的 JavaScript（只弹一句提示），模拟带脚本的图纸。"""
+    doc = pymupdf.open(stream=pdf, filetype="pdf")
+    doc.xref_set_key(doc.pdf_catalog(), "OpenAction", "<</S/JavaScript/JS(app.alert\\('demo'\\))>>")
+    return doc.tobytes()
+
+
+# 无害的占位内容：只用来触发风险检查规则，不能运行
+LISP_STUB = (";; 演示用占位文件，不做任何事。下面是 CAD 病毒常见写法的注释示例：\n"
+             ";; (vl-file-copy \"acad.lsp\" \"acaddoc.lsp\")\n(princ)\n").encode("utf-8")
+EXE_STUB = b"MZ" + b"\0" * 62 + "演示用占位文件，不是程序".encode("utf-8")
+
+
+def xlsm_stub() -> bytes:
+    return make_zip({"[Content_Types].xml": b"<?xml version='1.0'?><Types/>", "xl/workbook.xml": b"<workbook/>",
+                     "xl/vbaProject.bin": b"demo placeholder"})
+
+
 def docx_stub() -> bytes:
     return make_zip({"[Content_Types].xml": b"<?xml version='1.0'?><Types/>", "word/document.xml": "招标说明".encode()})
 
@@ -212,7 +232,10 @@ def build(out: Path) -> list[tuple[Path, str]]:
     })
     h_c = h_b + [("C", "2026-09-15", "调整 KL3 截面")]
     b3 = {
-        "0915修改/结施-04 三层梁配筋图(修).pdf": jg04("C", h_c, "350×700"),
+        "0915修改/结施-04 三层梁配筋图(修).pdf": with_open_script(jg04("C", h_c, "350×700")),
+        "0915修改/结构/acad.lsp": LISP_STUB,
+        "0915修改/查看说明.pdf.exe": EXE_STUB,
+        "0915修改/工程量清单.xlsm": xlsm_stub(),
         "0915修改/结构/补充图纸.zip": make_zip({"结施-03 剪力墙配筋图.pdf": jg03}),
         "0915修改/给排水/修改.zip": make_zip({"水施-02 给排水平面图.pdf": b"%PDF-1.4 placeholder"}, encrypt=True),
     }

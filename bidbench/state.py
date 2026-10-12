@@ -11,7 +11,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from . import floors, pdfpages
+from . import floors, pdfpages, risk
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
 
 SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
@@ -201,7 +201,8 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
         if not batches:
             return {"project": proj.meta, "generated_at": now_iso(), "as_of": 0, "batches": [], "sheets": [],
                     "edges": [], "issues": [], "facts": {"groups": []}, "baselines": [], "notices": [],
-                    "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}}, **assistant}
+                    "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}},
+                    "security": {"files": [], "scans": [], "pending": 0}, **assistant}
         as_of = as_of or batches[-1]["seq"]
         batches = [b for b in batches if b["seq"] <= as_of]
         decisions = latest_decisions(con)
@@ -212,8 +213,16 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
         file_counts = {r["batch_seq"]: dict(r) for r in con.execute(
             "SELECT o.batch_seq, COUNT(*) AS n, SUM(f.kind='pdf') AS pdf, SUM(o.depth>1) AS nested"
             " FROM occurrences o JOIN files f ON f.sha256=o.sha256 WHERE f.kind!='archive' GROUP BY o.batch_seq")}
+        risk_rows = [dict(r) for r in con.execute("SELECT * FROM risk_findings WHERE batch_seq<=? ORDER BY id", (as_of,))]
+        scans = [dict(r) for r in con.execute("SELECT * FROM av_scans WHERE batch_seq<=? ORDER BY id", (as_of,))]
+        risk_paths: dict[str, list] = defaultdict(list)
+        for r in con.execute("SELECT o.sha256, o.path FROM occurrences o WHERE o.batch_seq<=? AND o.sha256 IN"
+                             " (SELECT sha256 FROM risk_findings) ORDER BY o.batch_seq, o.id", (as_of,)):
+            risk_paths[r["sha256"]].append(r["path"])
 
     state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of)
+    state["security"] = _security(risk_rows, scans, risk_paths, decisions, state["issues"])
+    state["issues"].sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
     state.update(assistant)
     if with_diff and as_of > 1:
         prev = build(proj, as_of - 1, with_diff=False)
@@ -467,7 +476,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     # ---- 解包问题 ----
     for i in ext_issues:
         label = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷",
-                 "too_deep": "嵌套过深", "too_large": "超出上限", "symlink": "符号链接"}.get(i["kind"], i["kind"])
+                 "too_deep": "嵌套过深", "too_large": "超出上限", "symlink": "符号链接",
+                 "blocked": "被拦截"}.get(i["kind"], i["kind"])
         if i["kind"] == "symlink":
             issues.append(_issue("info", "解包问题", f"extract:{i['id']}", f"{label}：{i['path'].split(' / ')[-1]}",
                                  f"{i['detail']}。位置：{i['path']}。", {"batch": i["batch_seq"]}, []))
@@ -514,8 +524,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                             "inner": False, "notes": m["evidence"], "missing_level": m["level"],
                             "confirmed": bool(m.get("confirmed")), "borrowed": False})
     sheets_list.sort(key=lambda s: (_disc_order(s["discipline"]), no_parts(s["no"])[0], no_parts(s["no"])[1] or 0, s["no"]))
-    order = {"crit": 0, "warn": 1, "info": 2}
-    issues.sort(key=lambda i: (order[i["level"]], i["kind"], i["title"]))
+    issues.sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
     executors = defaultdict(int)
     for p in pages:
         if p.rec and not p.rec_borrowed:
@@ -625,6 +634,49 @@ def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> 
                     level_word="中", confirmed=row["confirmed"]))
         out.append(row)
     return out
+
+
+ISSUE_ORDER = {"crit": 0, "warn": 1, "info": 2}
+RISK_DECISION = {"safe": "已确认安全", "dangerous": "已确认有风险"}
+
+
+def _security(rows, scans, paths, decisions, issues) -> dict:
+    """风险文件：按内容（SHA-256）合并各项发现。高风险算严重问题，中风险算提醒，低风险只写进报告。"""
+    by_sha: dict[str, dict] = {}
+    for r in sorted(rows, key=lambda r: risk.LEVEL_ORDER[r["level"]]):
+        f = by_sha.setdefault(r["sha256"], {"sha": r["sha256"], "key": r["sha256"][:12], "level": r["level"],
+                                            "findings": [], "sources": [], "first_batch": r["batch_seq"]})
+        if risk.LEVEL_ORDER[r["level"]] < risk.LEVEL_ORDER[f["level"]]:
+            f["level"] = r["level"]
+        if r["detail"] not in f["findings"]:
+            f["findings"].append(r["detail"])
+        if r["source"] not in f["sources"]:
+            f["sources"].append(r["source"])
+        if r["sha256"] not in paths and r["path"] not in f.setdefault("_paths", []):
+            f["_paths"].append(r["path"])
+    files = []
+    for sha, f in by_sha.items():
+        f["paths"] = paths.get(sha) or f.pop("_paths", [])
+        f.pop("_paths", None)
+        f["name"] = f["paths"][0].split(" / ")[-1] if f["paths"] else "（未定位）"
+        f["level_word"] = risk.LEVEL_WORD[f["level"]]
+        d = decisions.get(("risk", f["key"]))
+        f["decision"] = d["value"] if d else None
+        files.append(f)
+        if f["level"] == "low" or f["decision"] == "safe":
+            continue
+        where = "；".join(f["paths"][:3]) + (f" 等 {len(f['paths'])} 处" if len(f["paths"]) > 3 else "")
+        issues.append(_issue(
+            "crit" if f["level"] == "high" else "warn", "风险文件", f"risk:{f['key']}",
+            f"{f['name']}（{f['level_word']}风险）",
+            "；".join(f["findings"]) + f"。位置：{where}。不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。",
+            {"file": f["key"]},
+            [{"label": "确认安全（来源可信）", "kind": "risk", "key": f["key"], "value": "safe"},
+             {"label": "确认有风险，列入答疑请发图方核实", "kind": "risk", "key": f["key"], "value": "dangerous"}],
+            level_word=f["level_word"], confirmed=f["decision"] == "dangerous"))
+    files.sort(key=lambda f: (risk.LEVEL_ORDER[f["level"]], f["name"]))
+    pending = sum(1 for f in files if f["level"] != "low" and not f["decision"])
+    return {"files": files, "scans": scans, "pending": pending}
 
 
 def _disc_order(d: str) -> int:
