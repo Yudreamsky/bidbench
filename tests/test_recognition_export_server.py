@@ -83,3 +83,22 @@ def test_server(demo_copy):
         assert "投标图纸工作台" in html
     finally:
         httpd.shutdown()
+
+
+def test_web_script_parses(tmp_path):
+    """工作台页面的内联脚本能通过语法检查（CI 上有 Node）。"""
+    import shutil
+    import subprocess
+    from importlib import resources
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("没有 Node，跳过脚本语法检查")
+    html = resources.files("bidbench").joinpath("web/index.html").read_text(encoding="utf-8")
+    js = html[html.index("<script>") + len("<script>"): html.rindex("</script>")]
+    f = tmp_path / "page.js"
+    f.write_text(js, encoding="utf-8")
+    r = subprocess.run([node, "--check", str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

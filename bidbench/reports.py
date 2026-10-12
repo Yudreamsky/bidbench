@@ -49,6 +49,7 @@ def diff_report(state: dict) -> str:
     sec("新发现的缺图", d.get("new_missing"))
     sec("新出现的版本冲突", d.get("new_conflicts"))
     sec("作废还是漏发，待确认", d.get("pending_void"))
+    sec("新发现的楼层缺口", d.get("floor_gaps"))
     sec("事实变化", d.get("fact_changes"))
     sec("受影响的建模任务", d.get("baselines"))
     notices = [n for n in state.get("notices", []) if n["batch"] == b["seq"]]
@@ -73,13 +74,28 @@ def missing_report(state: dict) -> str:
     rows = [s for s in state["sheets"] if s["status"] == "missing"]
     lines = [f"# 缺图清单（截至批次 #{state['as_of']}）", ""]
     if not rows:
-        return "\n".join(lines + ["目前没有发现缺图。"]) + "\n"
+        return "\n".join(lines + ["目前没有发现缺图号的图纸。"] + floor_section(state)) + "\n"
     lines += ["| 图号 | 图名 | 可靠程度 | 依据 |", "| --- | --- | --- | --- |"]
     lines += [f"| {s['no']} | {s['title'] or ''} | {s.get('missing_level', '')} | {'；'.join(s['notes'])} |" for s in rows]
+    lines += floor_section(state)
     ext = [i for i in state["issues"] if i["kind"] == "解包问题"]
     if ext:
         lines += ["", "另有以下文件没能解开，里面可能还有图纸：", ""] + [f"- {i['title']}：{i['detail']}" for i in ext]
     return "\n".join(lines) + "\n"
+
+
+FLOOR_STATUS = {"ok": "完整", "missing": "有缺层", "accepted": "缺层已确认不需要", "unchecked": "无法检查"}
+
+
+def floor_section(state: dict) -> list[str]:
+    rows = state.get("floor_coverage") or []
+    if not rows:
+        return []
+    out = ["", "## 楼层覆盖", "", "| 图类 | 结果 | 已覆盖 | 缺少 | 依据 |", "| --- | --- | --- | --- | --- |"]
+    for r in rows:
+        have = "；".join(f"{c['floors']}（{c['sheets'][0]}）" for c in r["covered"]) or "—"
+        out.append(f"| {r['group']} | {FLOOR_STATUS[r['status']]} | {have} | {r['missing_text'] or '—'} | {r['basis'] or ''} |")
+    return out
 
 
 def qa_report(state: dict) -> str:
@@ -88,6 +104,9 @@ def qa_report(state: dict) -> str:
     for s in state["sheets"]:
         if s["status"] == "missing" and (s.get("missing_level") == "高" or s.get("confirmed")):
             items.append(f"招标图纸中缺少 {s['no']} {s['title'] or ''}（{'；'.join(s['notes'])}），请补发。")
+    for f in state.get("floor_coverage") or []:
+        if f["status"] == "missing" and f.get("confirmed"):
+            items.append(f"{f['group']}缺少 {f['missing_text']} 的图纸（{f['basis']}），请补发或说明。")
     for i in state["issues"]:
         if i["kind"] == "版本冲突":
             items.append(f"{i['title']}：{i['detail']}请明确以哪一份为准。")

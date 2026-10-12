@@ -93,6 +93,10 @@ def export_mirror(proj: Project, state: dict, target: Path | None = None) -> Pat
     l0 += ["", "## 各专业图纸", ""]
     for disc, items in by_disc.items():
         l0.append(f"- {disc}（{len(items)}）：" + "，".join(f"{s['no']}{'【' + STATUS_LABEL[s['status']] + '】' if s['status'] != 'current' else ''}" for s in items))
+    if state.get("floor_coverage"):
+        l0 += ["", "## 楼层覆盖", ""] + [
+            f"- {r['group']}：" + ("；".join(f"{c['floors']}（{c['sheets'][0]}）" for c in r["covered"]) or "无楼层信息")
+            + (f"；缺 {r['missing_text']}" if r["missing"] else "") for r in state["floor_coverage"]]
     l0 += ["", "## 待处理问题", ""] + [f"- [{i['kind']}] {i['title']}：{i['detail']}" for i in state["issues"]]
     (target / "L0-项目地图.md").write_text("\n".join(l0) + "\n", encoding="utf-8")
 

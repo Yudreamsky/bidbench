@@ -476,6 +476,12 @@ function issueFor(target) {
 function goTarget(t) {
   if (t.fact) jumpFact(t.fact);
   else if (t.sheet) jumpSheet(t.sheet);
+  else if (t.floor_group) {
+    const row = (S.floor_coverage || []).find(r => r.group === t.floor_group);
+    if (!row) return;
+    ui.focusSet = new Set(row.covered.flatMap(c => c.sheets)); ui.selD = null; ui.backTo = null;
+    setView('graph'); paintGraph();
+  }
 }
 
 function renderOverview() {
@@ -507,10 +513,18 @@ function renderOverview() {
     if (d.new_missing?.length) lines.push('新发现缺图：' + d.new_missing.join('、'));
     if (d.new_conflicts?.length) lines.push('新冲突：' + d.new_conflicts.join('、'));
     if (d.pending_void?.length) lines.push('待确认作废：' + d.pending_void.join('、'));
+    if (d.floor_gaps?.length) lines.push('楼层缺口：' + d.floor_gaps.join('；'));
     if (d.fact_changes?.length) lines.push('事实变化：' + d.fact_changes.join('；'));
     parts.push(section(`本批差异（批次 #${b.seq}：${b.kinds.join('、')}）`,
       lines.length ? el('ul', { class: 'list' }, lines.map(t => el('li', {}, t))) : el('p', { class: 'meta' }, '与上一批相比没有变化。')));
   }
+  const FL = { ok: '完整', missing: '有缺层', accepted: '缺层已确认不需要', unchecked: '无法检查' };
+  const fc = S.floor_coverage || [];
+  if (fc.length) parts.push(section('楼层覆盖', el('ul', { class: 'list' }, fc.map(r => el('li', {},
+    el('button', { class: 'chip', type: 'button', onclick: () => goTarget({ floor_group: r.group }) }, r.group), ' ',
+    el('span', { style: `color:var(${r.status === 'missing' ? '--warn' : '--muted'})` }, FL[r.status]),
+    el('small', { style: 'display:block;color:var(--muted)' },
+      (r.covered.map(c => `${c.floors}（${c.sheets[0]}）`).join('；') || '无楼层信息') + (r.missing.length ? `；缺 ${r.missing_text}` : '')))))));
   parts.push(section('收图批次', el('ul', { class: 'list' }, S.batches.map(x => el('li', {},
     el('b', { class: 'mono' }, `#${x.seq}`), ` ${x.received_at} ${x.archive}：${x.kinds.join('、')}（${x.sheets} 张图）`)))));
   const bl = S.baselines.map(x => el('li', {}, `${x.name}（${x.sheets} 张图，批次 #${x.as_of_batch}）`,
