@@ -11,7 +11,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from . import pdfpages
+from . import floors, pdfpages
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
 
 SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
@@ -190,7 +190,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
         if not batches:
             return {"project": proj.meta, "generated_at": now_iso(), "as_of": 0, "batches": [], "sheets": [],
                     "edges": [], "issues": [], "facts": {"groups": []}, "baselines": [], "notices": [],
-                    "recognition": {"pages": 0, "recognized": 0, "executors": {}}}
+                    "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}}}
         as_of = as_of or batches[-1]["seq"]
         batches = [b for b in batches if b["seq"] <= as_of]
         decisions = latest_decisions(con)
@@ -471,6 +471,9 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     # ---- 事实层 ----
     facts = _facts(sheets, sheet_out, current_page, notices, decisions, issues, live)
 
+    # ---- 楼层覆盖 ----
+    floor_coverage = _floor_coverage(sheet_out, current_page, facts, decisions, issues, live)
+
     # ---- 图纸基线 ----
     baselines = []
     for b in baselines_rows:
@@ -504,10 +507,108 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     return {
         "project": proj.meta, "generated_at": now_iso(), "as_of": as_of,
         "batches": batch_out, "sheets": sheets_list, "edges": edges, "notices": notice_out,
-        "issues": issues, "facts": facts, "baselines": baselines,
+        "issues": issues, "facts": facts, "baselines": baselines, "floor_coverage": floor_coverage,
         "recognition": {"pages": len(pages), "recognized": sum(1 for p in pages if p.rec),
                         "borrowed": sum(1 for p in pages if p.rec_borrowed), "executors": dict(executors)},
     }
+
+
+def _fact_int(facts: dict, key: str) -> tuple[int | None, str | None]:
+    """从事实层取整数（地上层数、地下层数），返回 (值, 说明)。冲突时按当前展示的值，并在说明里写明。"""
+    for g in facts["groups"]:
+        for f in g["facts"]:
+            if f["key"] == key:
+                m = re.search(r"\d+", f["value"])
+                if not m:
+                    return None, None
+                note = f"{f['name']} {m.group(0)} 层（{CONF_LABEL[f['conf']]}）"
+                if f["conf"] == "conflict":
+                    note += "，该事实存在冲突，确认后结果可能变化"
+                return int(m.group(0)), note
+    return None, None
+
+
+def _sheet_floors(title: str, page) -> tuple[set[int], str]:
+    """一张图覆盖的楼层：先看图名；图名没有（如“标准层平面图”）再看“适用楼层”类说明和关键数值。"""
+    got = floors.parse_floors(title or "")
+    if got:
+        return got, "图名"
+    rec = page.rec
+    for n in rec["content"]["notes"]:
+        if floors.STANDARD_HINT.search(n["text"]):
+            got = floors.parse_floors(n["text"])
+            if got:
+                return got, "说明"
+    for kv in rec["content"]["key_values"]:
+        if "层高" in kv["name"]:
+            got |= floors.parse_floors(kv["name"].replace("层高", ""))
+    return got, ("关键数值" if got else "")
+
+
+def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> list[dict]:
+    above, above_note = _fact_int(facts, "地上层数")
+    below, below_note = _fact_int(facts, "地下层数")
+    out = []
+    for disc, gname, include, exclude, full in floors.GROUPS:
+        members = []
+        for no in sorted(live):
+            s = sheet_out[no]
+            title = s["title"] or ""
+            if s["discipline"] != disc or not re.search(include, title) or (exclude and re.search(exclude, title)):
+                continue
+            fl, how = _sheet_floors(title, current_page[no])
+            members.append((no, title, fl, how))
+        if not members:
+            continue
+        covered: dict[int, list[str]] = defaultdict(list)
+        for no, _title, fl, _how in members:
+            for f in fl:
+                covered[f].append(no)
+        unknown = [m for m in members if not m[2]]
+        for no, title, _fl, _how in unknown:
+            if "标准层" in title:
+                issues.append(_issue("warn", "楼层覆盖", f"floor_unknown:{no}", f"{no} {title} 未注明楼层范围",
+                                     "图名和说明里都没有写适用楼层，无法判断标准层覆盖了哪几层。", {"sheet": no}, []))
+        ground = sorted(f for f in covered if 0 < f < floors.ROOF)
+        basis = None
+        if full:
+            top = above or (max(ground) if ground else None)
+            expected = set(range(1, top + 1)) if top else set()
+            expected |= {-n for n in range(1, (below or 0) + 1)}
+            expected.add(floors.ROOF)
+            basis = "；".join(x for x in (above_note, below_note) if x) or (
+                f"事实层没有层数，按图纸里出现的最高楼层 {top}F 检查" if top else None)
+        elif len(ground) >= 2:
+            expected = set(range(min(ground), max(ground) + 1))
+            basis = f"只检查已出现楼层 {floors.label(min(ground))}~{floors.label(max(ground))} 之间的断档"
+        else:
+            expected = set()
+            basis = ("图名和说明里都没有楼层信息，无法检查" if not ground
+                     else f"只知道 {floors.label(ground[0])} 一层，无法判断有没有断档")
+        missing = sorted(expected - set(covered))
+        row = {
+            "group": gname, "discipline": disc, "basis": basis,
+            "covered": [{"floors": floors.compress(fl), "sheets": [no], "from": how} for no, _t, fl, how in members if fl],
+            "unknown": [no for no, *_ in unknown],
+            "missing": [floors.label(f) for f in missing], "missing_text": floors.compress(missing),
+            "status": "missing" if missing else ("ok" if expected else "unchecked"),
+        }
+        if missing:
+            key = f"楼层|{gname}|{row['missing_text']}"
+            d = decisions.get(("missing", key))
+            if d and d["value"] == "not_needed":
+                row["status"] = "accepted"
+            else:
+                row["confirmed"] = bool(d and d["value"] == "ask")
+                have = "；".join(f"{c['floors']}（{c['sheets'][0]}）" for c in row["covered"]) or "无"
+                issues.append(_issue(
+                    "warn", "楼层覆盖", f"floor:{gname}", f"{gname}缺 {row['missing_text']}",
+                    f"{basis}。已有：{have}。缺：{row['missing_text']}。", {"floor_group": gname},
+                    [{"label": "列入答疑，向招标方要图", "kind": "missing", "key": key, "value": "ask"},
+                     {"label": "确认不需要（已有图纸覆盖或该层不存在）", "kind": "missing", "key": key, "value": "not_needed"}],
+                    level_word="中", confirmed=row["confirmed"]))
+        out.append(row)
+    return out
 
 
 def _disc_order(d: str) -> int:
@@ -610,7 +711,7 @@ def diff_states(prev: dict | None, cur: dict) -> dict:
     ps = {s["no"]: s for s in (prev or {}).get("sheets", [])}
     cs = {s["no"]: s for s in cur["sheets"]}
     out = {"batch": cur["as_of"], "upgraded": [], "added": [], "resolved_missing": [], "new_missing": [],
-           "new_conflicts": [], "pending_void": [], "fact_changes": [], "baselines": []}
+           "new_conflicts": [], "pending_void": [], "fact_changes": [], "baselines": [], "floor_gaps": []}
     for no, s in cs.items():
         p = ps.get(no)
         if s["status"] == "missing":
@@ -635,6 +736,10 @@ def diff_states(prev: dict | None, cur: dict) -> dict:
                 out["fact_changes"].append(f"{f['name']}：{old['value']}（{CONF_LABEL[old['conf']]}）→ {f['value']}（{CONF_LABEL[f['conf']]}）")
             elif not old and prev is not None:
                 out["fact_changes"].append(f"新增 {f['name']}：{f['value']}")
+    prev_gaps = {r["group"]: r["missing_text"] for r in (prev or {}).get("floor_coverage", []) if r["status"] == "missing"}
+    for r in cur.get("floor_coverage", []):
+        if r["status"] == "missing" and prev_gaps.get(r["group"]) != r["missing_text"]:
+            out["floor_gaps"].append(f"{r['group']}缺 {r['missing_text']}")
     for b in cur["baselines"]:
         if b["outdated"]:
             out["baselines"].append(f"{b['name']}：" + "、".join(f"{o['sheet']} {o['base_rev']}→{o['current_rev']}" for o in b["outdated"]))
