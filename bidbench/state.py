@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from . import floors, pdfpages, risk
 from .ingest import FOLDER_MARK
+from .recognition import weak_reason
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
 
 SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
@@ -20,6 +21,10 @@ SAME_DHASH = 10       # 差值哈希距离阈值（256 位）
 FULL_REISSUE = 0.8    # 图号覆盖率达到它，判断为整套重发
 GAP_MAX = 3           # 编号断号：同一百位段里连续缺这么多张以内才提示
 COVER_LIST_MAX = 8    # 楼层覆盖：图多于这么多张时只写汇总的楼层范围，不逐张列
+# 不分楼层、建哪一层都要看的“通用图”：设计说明，以及没写楼层的柱、剪力墙平面
+GENERAL_SHEET = re.compile(r"说明|(?:柱|剪力墙|核心筒).{0,4}(?:平面|布置|定位)")
+# 只对这张图有效的值（本层标高、适用楼层）：每张图各写各的，不跨图比较
+SHEET_SCOPED = re.compile(r"^(?:本层|本图|本页|该层|此层|本张)|适用(?:楼层|范围)|楼层范围")
 
 STATUS_LABEL = {
     "current": "现行", "new": "本批新增", "updated": "本批升版", "changed": "有变更单",
@@ -338,7 +343,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             "no": no, "title": title, "discipline": s.discipline, "status": status,
             "current_rev": cur["rev"], "current_page": cp.page_id, "versions": vlist,
             "paths": cp.paths, "inner": all(_in_nested_archive(x) for x in cp.paths),
-            "notes": notes, "borrowed": cp.rec_borrowed,
+            "notes": notes, "borrowed": cp.rec_borrowed, "own_values": [],
+            "rec_notes": [{"type": x["type"], "text": x["description"]} for x in cp.rec["issues"]],
         }
 
     # ---- 变更单 ----
@@ -419,6 +425,10 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                               {"label": "仍然有效（漏发）", "kind": "sheet_void", "key": no, "value": "keep"}]))
 
     live = {no for no, s in sheet_out.items() if s["status"] != "voided"}
+
+    # ---- 每张图管哪几层（图纸卡片上的同层图纸、楼层覆盖都用） ----
+    for no, s in sheet_out.items():
+        _set_floors(s, *_sheet_floors(s["title"], current_page[no]))
 
     # ---- 关系 ----
     edges, dangling = [], defaultdict(list)
@@ -515,13 +525,18 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     if unrecognized:
         issues.append(_issue("info", "待识别", "unrecognized", f"{len(unrecognized)} 页尚未识别",
                              "运行 bidbench tasks 生成识别任务包，跑完后 bidbench import。", {}, []))
-    weak = [p for p in pages if p.rec and any(x["type"] in ("其他", "图签缺失") for x in p.rec["issues"])]
-    if weak:
-        issues.append(_issue("info", "识别不完整", "weak_rec", f"{len(weak)} 页识别不完整",
-                             "包括扫描件或缺少图签的页面，需要交给多模态执行器复核。", {}, []))
+    reasons: dict[str, int] = defaultdict(int)  # 只数缺图号、字迹不清这类；“没写单位”之类的备注显示在图纸卡片上
+    for p in pages:
+        r = p.rec and weak_reason(p.rec)
+        if r:
+            reasons[r] += 1
+    if reasons:
+        issues.append(_issue("info", "识别不完整", "weak_rec", f"{sum(reasons.values())} 页识别不完整",
+                             "其中" + "、".join(f"{r} {n} 页" for r, n in sorted(reasons.items(), key=lambda x: -x[1]))
+                             + "。扫描件或图签不全的页面，识别时选“识别不完整的页面”交给多模态执行器复核。", {}, []))
 
     # ---- 事实层 ----
-    facts = _facts(sheets, sheet_out, current_page, notices, decisions, issues, live)
+    facts = _facts(sheets, sheet_out, current_page, notice_out, decisions, issues, live)
 
     # ---- 楼层覆盖 ----
     floor_coverage = _floor_coverage(sheet_out, current_page, facts, decisions, issues, live)
@@ -546,10 +561,13 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     # ---- 汇总 ----
     sheets_list = list(sheet_out.values())
     for t, m in sorted(missing.items()):
-        sheets_list.append({"no": t, "title": m["title"], "discipline": discipline_of(t), "status": "missing",
-                            "current_rev": None, "current_page": None, "versions": [], "paths": [],
-                            "inner": False, "notes": m["evidence"], "missing_level": m["level"],
-                            "confirmed": bool(m.get("confirmed")), "borrowed": False})
+        out = {"no": t, "title": m["title"], "discipline": discipline_of(t), "status": "missing",
+               "current_rev": None, "current_page": None, "versions": [], "paths": [],
+               "inner": False, "notes": m["evidence"], "missing_level": m["level"],
+               "confirmed": bool(m.get("confirmed")), "borrowed": False, "own_values": [], "rec_notes": []}
+        fl = floors.parse_floors(m["title"] or "")
+        _set_floors(out, fl, "图名" if fl else "")
+        sheets_list.append(out)
     sheets_list.sort(key=lambda s: (_disc_order(s["discipline"]), no_parts(s["no"])[0], no_parts(s["no"])[1] or 0, s["no"]))
     issues.sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
     executors = defaultdict(int)
@@ -653,9 +671,49 @@ def _sheet_floors(title: str, page) -> tuple[set[int], str]:
             if got:
                 return got, "说明"
     for kv in rec["content"]["key_values"]:
+        if re.search(r"适用(?:楼层|范围)|楼层范围", kv["name"]):
+            got = floors.parse_floors(f"{kv['value'] or ''} {kv['raw_text'] or ''}")
+            if got:
+                return got, "说明"
+    for kv in rec["content"]["key_values"]:
         if "层高" in kv["name"]:
             got |= floors.parse_floors(kv["name"].replace("层高", ""))
     return got, ("关键数值" if got else "")
+
+
+def _set_floors(s: dict, fl: set[int], how: str) -> None:
+    title = s["title"] or ""
+    s["floors"], s["floors_from"], s["floors_text"] = sorted(fl), how, floors.compress(fl) or None
+    # 通用图只看图名：没写楼层的柱平面布置图，即使层高表里列了各层，也是建哪一层都要看的图
+    s["general"] = bool(GENERAL_SHEET.search(title)) and "目录" not in title and not floors.parse_floors(title)
+
+
+def same_floor(st: dict, no: str, limit: int | None = None) -> dict:
+    """一张图的同层图纸（各专业管同一层的图）和通用图（设计说明、没写楼层的柱平面等）。
+
+    同层的按专业排，楼层完全一样的排前面；有严重问题的图带上问题标题，从这里就能看到。"""
+    by_no = {s["no"]: s for s in st["sheets"]}
+    s = by_no[no]
+    crit = defaultdict(list)
+    for i in st["issues"]:
+        if i["level"] == "crit" and i["kind"] != "缺图" and i["target"].get("sheet"):  # 缺图看状态就知道
+            crit[i["target"]["sheet"]].append(i["title"])
+
+    def row(t):
+        return {"no": t["no"], "title": t["title"], "discipline": t["discipline"], "status": STATUS_LABEL[t["status"]],
+                "floors": t["floors_text"], "problems": crit.get(t["no"], [])}
+
+    mine = set(s["floors"])
+    near = [t for t in st["sheets"]
+            if t["no"] != no and t["status"] != "voided" and not t["general"] and mine & set(t["floors"])]
+    near.sort(key=lambda t: (_disc_order(t["discipline"]), len(mine ^ set(t["floors"])), no_parts(t["no"])[0],
+                             no_parts(t["no"])[1] or 0))
+    general = [t for t in st["sheets"] if t["no"] != no and t["status"] != "voided" and t["general"]]
+    general.sort(key=lambda t: (_disc_order(t["discipline"]), no_parts(t["no"])[0], no_parts(t["no"])[1] or 0))
+    out = {"floors": s["floors_text"], "same_floor": [row(t) for t in near[:limit]], "general": [row(t) for t in general]}
+    if limit is not None and len(near) > limit:
+        out["more_same_floor"] = len(near) - limit
+    return out
 
 
 def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> list[dict]:
@@ -669,8 +727,7 @@ def _floor_coverage(sheet_out, current_page, facts, decisions, issues, live) -> 
             title = s["title"] or ""
             if s["discipline"] != disc or not re.search(include, title) or (exclude and re.search(exclude, title)):
                 continue
-            fl, how = _sheet_floors(title, current_page[no])
-            members.append((no, title, fl, how))
+            members.append((no, title, set(s["floors"]), s["floors_from"]))
         if not members:
             continue
         covered: dict[int, list[str]] = defaultdict(list)
@@ -834,6 +891,12 @@ def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live):
             for kv in p.rec["content"]["key_values"]:
                 if kv["value"] is None:
                     continue
+                if SHEET_SCOPED.search(norm_fact_key(kv["name"])):  # 本层标高、适用楼层：只记在这张图上，不跨图比
+                    own = sheet_out[no]["own_values"]
+                    item = {"name": kv["name"], "value": str(kv["value"]), "unit": kv["unit"], "text": kv["raw_text"]}
+                    if active and item not in own:
+                        own.append(item)
+                    continue
                 add(norm_fact_key(kv["name"]), kv["name"], str(kv["value"]), kv["unit"], kv["raw_text"],
                     no, rev, p, kv["source"], kv["confidence"], active)
             for st in p.rec["content"]["standards"]:
@@ -892,9 +955,17 @@ def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live):
             old = changed[0]
             up = f"来源已升版：{old['sheet']} {old['rev']} 版为 {old['value']}，现行版为 {best[0]['value']}。"
             note = (note + " " if note else "") + up
+        # 出处图全都被变更单改过：数值可能已经不对了（变更单的内容不进事实层，要打开变更单核对）
+        act_sheets = {e["sheet"] for e in act}
+        by_notice = sorted({n["id"] for n in notices if act_sheets & set(n["affects"])})
+        if by_notice and conf != "confirmed" and all(any(x in n["affects"] for n in notices) for x in act_sheets):
+            note = (note + " " if note else "") + (
+                f"出处 {'、'.join(sorted(act_sheets))} 有{'、'.join(by_notice)}，这个数值可能已被修改，以变更单为准。")
+        else:
+            by_notice = []
         groups[fact_group(names[key], is_std[key])].append({
             "key": key, "name": names[key], "value": display, "conf": conf, "note": note,
-            "evidence": act + stale, "sources": sorted({e["sheet"] for e in act}),
+            "evidence": act + stale, "sources": sorted(act_sheets), "notices": by_notice,
         })
     order = ["工程概况", "楼层", "结构构件", "执行规范", "其他"]
     return {"groups": [{"id": g, "label": g, "facts": sorted(groups[g], key=lambda f: f["name"])}

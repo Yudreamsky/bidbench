@@ -160,6 +160,11 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 .note { padding: 8px 10px; border-radius: 6px; font-size: 13px; background: var(--band); border-left: 3px solid var(--edge); }
 .note.warn { background: var(--warn-tint); border-left-color: var(--warn); }
 .note.crit { background: var(--crit-tint); border-left-color: var(--crit); }
+.note .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.crit-line { display: block; color: var(--crit); font-size: 12px; }
+.sgroup + .sgroup { margin-top: 6px; }
+.sgroup > .meta { font-size: 12px; }
+.panel details > summary { cursor: pointer; color: var(--accent); font-size: 13px; }
 ul.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 ul.list li { min-width: 0; overflow-wrap: anywhere; }
 .issue { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--band); }
@@ -994,6 +999,30 @@ function optionButtons(issue) {
   if (!issue || !issue.options.length || !latest()) return null;
   return el('div', { class: 'opts' }, issue.options.map(o => el('button', { class: 'btn', type: 'button', onclick: () => decide(o) }, o.label)));
 }
+function sheetChip(no) {
+  return sheetBy[no] ? el('button', { class: 'chip', type: 'button', onclick: () => { ui.focusSet = null; selectSheet(no); } }, no) : el('span', { class: 'mono' }, no);
+}
+/* 同层图纸：楼层有交集的图（通用图另列），楼层完全一样的排前面；通用图：设计说明、没写楼层的柱平面等。规则与 state.same_floor 相同 */
+function sameFloor(no) {
+  const s = sheetBy[no], mine = new Set(s.floors || []);
+  const order = new Map(S.sheets.map((t, i) => [t.no, i]));
+  const live = S.sheets.filter(t => t.no !== no && t.status !== 'voided');
+  const diff = t => (t.floors || []).filter(f => !mine.has(f)).length + [...mine].filter(f => !(t.floors || []).includes(f)).length;
+  const near = mine.size ? live.filter(t => !t.general && (t.floors || []).some(f => mine.has(f))) : [];
+  near.sort((a, b) => DISC_ORDER.indexOf(a.discipline) - DISC_ORDER.indexOf(b.discipline) || diff(a) - diff(b) || order.get(a.no) - order.get(b.no));
+  return { near, general: live.filter(t => t.general) };
+}
+function sheetRows(list, max = 6) {  // 按专业分组列图纸，有严重问题的直接写出来；每组多于 max 张时其余的折叠
+  const by = {};
+  list.forEach(t => (by[t.discipline] = by[t.discipline] || []).push(t));
+  const row = t => el('li', {}, sheetChip(t.no), ' ', t.title || '（图名未知）', ' ',
+    ['current', 'new', 'updated'].includes(t.status) ? null : el('span', { class: `pill st-${t.status}` }, STATUS[t.status]),
+    issueFor({ sheet: t.no }).filter(i => i.level === 'crit' && i.kind !== '缺图').map(i => el('small', { class: 'crit-line' }, i.title)));
+  return el('div', {}, Object.entries(by).map(([d, ts]) => el('div', { class: 'sgroup' }, el('div', { class: 'meta' }, `${d}（${ts.length}）`),
+    el('ul', { class: 'list' }, ts.slice(0, max).map(row)),
+    ts.length > max ? el('details', {}, el('summary', {}, `其余 ${ts.length - max} 张`), el('ul', { class: 'list' }, ts.slice(max).map(row))) : null)));
+}
+const pageLink = (page_id, text) => el('a', { href: `/api/page/${page_id}.pdf`, target: '_blank', rel: 'noopener' }, text);
 function issueFor(target) {
   return S.issues.filter(i => (target.sheet && i.target.sheet === target.sheet) || (target.fact && i.target.fact === target.fact));
 }
@@ -1063,6 +1092,10 @@ function renderOverview() {
     parts.push(section(`本批差异（批次 #${b.seq}：${b.kinds.join('、')}）`,
       lines.length ? el('ul', { class: 'list' }, lines.map(t => el('li', {}, t))) : el('p', { class: 'meta' }, '与上一批相比没有变化。')));
   }
+  const nts = S.notices || [];
+  if (nts.length) parts.push(section(`变更单、答疑（${nts.length}）`, el('ul', { class: 'list' }, nts.map(n => el('li', {},
+    el('b', {}, n.id), ` ${n.title || n.kind}，批次#${n.batch} `, pageLink(n.page_id, '原图'),
+    el('small', { style: 'display:block;color:var(--muted)' }, n.affects.length ? ['改了 ', ...n.affects.flatMap(x => [sheetChip(x), ' '])] : '没有写明改了哪些图'))))));
   const FL = { ok: '完整', no_gap: '已出现楼层之间不缺', missing: '有缺层', accepted: '缺层已确认不需要', unchecked: '无法检查' };
   const fc = S.floor_coverage || [];
   if (fc.length) parts.push(section('楼层覆盖', el('ul', { class: 'list' }, fc.map(r => {
@@ -1120,7 +1153,14 @@ function renderSheet(no) {
     if (s.current_page) parts.push(el('a', { class: 'btn', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, '打开现行版原图'));
     if (s.borrowed) parts.push(el('p', { class: 'meta' }, '这一页与已识别过的页面像素完全相同，直接复用了识别结果。'));
   }
-  s.notes.forEach(n => parts.push(el('div', { class: 'note' }, n)));
+  const myNotices = (S.notices || []).filter(n => n.affects.includes(no));
+  s.notes.filter(t => !myNotices.some(n => t.startsWith(n.id + '（'))).forEach(n => parts.push(el('div', { class: 'note' }, n)));
+  myNotices.forEach(n => {  // 改了这张图的变更单：能打开原件，看得到它还改了哪些图
+    const others = n.affects.filter(x => x !== no);
+    parts.push(el('div', { class: 'note warn' }, `${n.id}（批次#${n.batch}）修改了此图的局部，相关内容以变更文件为准。`,
+      el('div', { class: 'row' }, el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.kind === '变更单' ? '变更单' : '答疑'}原图`),
+        others.length ? el('span', { class: 'meta' }, '它还改了') : null, others.map(sheetChip))));
+  });
   if (s.versions.length) parts.push(section('版本链', el('ul', { class: 'list versions' }, s.versions.map(v =>
     el('li', { class: v.state === '现行' ? '' : 'old' }, el('b', { class: 'mono' }, v.rev), el('span', { class: 'mono' }, v.date || '—'),
       el('span', {}, `批次#${v.batch} ${v.state}`), el('a', { href: `/api/page/${v.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '原图'))))));
@@ -1130,15 +1170,28 @@ function renderSheet(no) {
     return el('li', {}, el('button', { class: 'chip', type: 'button', onclick: () => { ui.focusSet = null; selectSheet(other); } }, other), ' ',
       e.from === no ? e.label : `被引用：${e.label}`);
   }))));
+  const around = sameFloor(no);
+  if (around.near.length) parts.push(section(`同层图纸（${s.floors_text}，${around.near.length} 张）`, sheetRows(around.near)));
+  if (around.general.length) parts.push(section(`通用图（${around.general.length}）`,
+    el('p', { class: 'meta' }, '设计说明、没写楼层的柱平面等，建哪一层都要看。'), sheetRows(around.general)));
   const fs = S.facts.groups.flatMap(g => g.facts).filter(f => f.sources.includes(no));
-  parts.push(section(`来自此图的事实（${fs.length}）`, fs.length ? el('ul', { class: 'list' }, fs.map(f => {
-    // 有冲突或人工确认过的，显示本图自己写的原文：可能和全项目取值不同
-    const own = (f.conf === 'conflict' || f.conf === 'confirmed') && f.evidence.find(e => e.active && e.sheet === no);
-    return el('li', {}, el('button', { class: 'linkbtn', type: 'button', onclick: () => jumpFact(f.key) }, el('i', { class: `dot c-${f.conf}` }),
-      el('span', {}, own ? `${f.name}：本图写“${own.text || own.value}”` : `${f.name}：${f.value}`,
-        el('small', {}, CONF[f.conf] + (own ? `，全项目取 ${f.value}` : '')))));
-  }))
+  const ownVals = s.own_values || [];  // 本层标高、适用楼层：只对这张图有效，不跟别的图比
+  parts.push(section(`来自此图的事实（${fs.length + ownVals.length}）`, fs.length || ownVals.length ? el('ul', { class: 'list' },
+    ownVals.map(v => el('li', {}, el('div', { class: 'linkbtn', style: 'cursor:default' }, el('i', { class: 'dot c-mid' }),
+      el('span', {}, `${v.name}：${v.value}${v.unit && !String(v.value).endsWith(v.unit) ? ' ' + v.unit : ''}`, el('small', {}, '只对本图有效，不跟别的图比'))))),
+    fs.map(f => {
+      // 有冲突或人工确认过的，显示本图自己写的原文：可能和全项目取值不同
+      const own = (f.conf === 'conflict' || f.conf === 'confirmed') && f.evidence.find(e => e.active && e.sheet === no);
+      return el('li', {}, el('button', { class: 'linkbtn', type: 'button', onclick: () => jumpFact(f.key) }, el('i', { class: `dot c-${f.conf}` }),
+        el('span', {}, own ? `${f.name}：本图写“${own.text || own.value}”` : `${f.name}：${f.value}`,
+          el('small', {}, CONF[f.conf] + (own ? `，全项目取 ${f.value}` : '') + ((f.notices || []).length ? '；可能已被变更单修改' : '')))));
+    }))
     : el('p', { class: 'meta' }, s.status === 'missing' ? '缺失图纸没有可抽取的内容。' : '暂未从此图抽取事实。')));
+  const rn = s.rec_notes || [];  // 识别时记下的问题：字迹不清等要注意；“没写单位”之类的备注收起来
+  rn.filter(x => x.type !== '其他').forEach(x => parts.push(el('div', { class: 'note warn' }, `识别提示（${x.type}）：${x.text}`)));
+  const minor = rn.filter(x => x.type === '其他');
+  if (minor.length) parts.push(el('details', {}, el('summary', {}, `识别备注（${minor.length}）`),
+    el('ul', { class: 'list' }, minor.map(x => el('li', { class: 'meta' }, x.text)))));
   panel.replaceChildren(...parts);
   ui.statePanel = panel.firstChild;
 }
@@ -1148,7 +1201,9 @@ function renderFact(key) {
   const parts = [el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
     el('div', { class: 'ptitle' }, el('span', { class: 'meta' }, factGroupOf[key]), el('h2', {}, `${f.name}：${f.value}`),
       el('span', { class: `pill conf-${f.conf}` }, CONF[f.conf]))];
-  if (f.note) parts.push(el('div', { class: `note ${f.conf === 'conflict' ? 'crit' : f.note.includes('升版') ? 'warn' : ''}` }, f.note));
+  const fNotices = (S.notices || []).filter(n => (f.notices || []).includes(n.id));
+  if (f.note) parts.push(el('div', { class: `note ${f.conf === 'conflict' ? 'crit' : f.note.includes('升版') || fNotices.length ? 'warn' : ''}` }, f.note,
+    fNotices.length ? el('div', { class: 'row' }, fNotices.map(n => el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.id}原图`))) : null));
   const iss = issueFor({ fact: key });
   iss.forEach(i => { const o = optionButtons(i); if (o) parts.push(o); });
   if (!iss.length && f.conf !== 'confirmed' && latest())

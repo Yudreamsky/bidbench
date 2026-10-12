@@ -52,6 +52,21 @@ def demo(tmp_path_factory, sample_zips):
 
 
 @pytest.fixture
+def sheets_project(tmp_path):
+    """把几张合成图纸（文件名 → PDF 内容）作为一批收进新项目，用模拟执行器识别。"""
+    def build(files: dict, name: str = "合成项目"):
+        folder = tmp_path / "图纸"
+        folder.mkdir()
+        for fn, data in files.items():
+            (folder / fn).write_bytes(data)
+        proj = Project.init(tmp_path / "p", name)
+        ingest.receive(proj, folder, "2026-01-01")
+        _recognize(proj)
+        return proj
+    return build
+
+
+@pytest.fixture
 def demo_copy(demo, tmp_path):
     """可写副本：做决定的测试不污染共享项目。"""
     dst = tmp_path / "copy"
