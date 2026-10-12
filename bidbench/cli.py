@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import argparse
-import os
+import contextlib
+import io
 import json
+import logging
+import os
 import sys
+import time
 from pathlib import Path
 
-from . import ops, recognition, state
-from .store import Project, add_decision
+from . import debuglog, oplog, ops, recognition, state
+from .store import Project, add_decision, now_iso
+
+SOURCE = "命令行"
+log = logging.getLogger(__name__)
 
 
 def _proj(args) -> Project:
@@ -26,12 +33,12 @@ def cmd_receive(args):
         if total >= 20:  # 文件多时显示进度
             print(f"\r  已处理 {n}/{total} 个文件", end="" if n < total else "\n", flush=True)
 
-    ops.receive(_proj(args), [Path(a) for a in args.archive], args.date, args.name, args.password, args.note,
-                av=not args.no_av, progress=progress)
+    return ops.receive(_proj(args), [Path(a) for a in args.archive], args.date, args.name, args.password, args.note,
+                       av=not args.no_av, progress=progress)
 
 
 def cmd_scan(args):
-    ops.scan(_proj(args), av=not args.no_av)
+    return ops.scan(_proj(args), av=not args.no_av)
 
 
 def cmd_tasks(args):
@@ -48,30 +55,24 @@ def cmd_tasks(args):
 def cmd_recognize(args):
     proj = _proj(args)
     if args.executor == "simulated":
-        ops.recognize_simulated(proj, Path(args.task) if args.task else None)
-        return
+        return ops.recognize_simulated(proj, Path(args.task) if args.task else None)
     est = ops.prepare_claude(proj, args.scope, args.tier, args.model, args.tiles, Path(args.task) if args.task else None)
     if est is None:
         print(f"范围「{recognition.SCOPES[args.scope]}」内没有需要识别的页面。")
-        return
+        return None
     task = Path(est["task"])
     print(f"任务包：{task}")
     print(ops.estimate_text(est))
     if args.dry_run:
         print("只做了估算（--dry-run），没有调用 API。去掉 --dry-run 正式运行，或用 --task 指定这个任务包。")
-        return
-
-    def progress(n, total):
-        print(f"\r  已完成 {n}/{total}", end="", flush=True)
-
-    try:
-        r = ops.recognize_claude(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers,
-                                 log=lambda m: print("\n" + m if m.startswith("识别 ") else m), progress=progress)
+        return est
+    try:  # 每识别完一页输出一行（识别过程日志）
+        r = ops.recognize_claude(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers)
     except ops.OpError as e:
-        print()
         sys.exit(f"错误：{e}：bidbench recognize --executor claude --task {task}")
     if r["failed"]:
         print(f"失败的页面可以重跑：bidbench recognize --executor claude --task {task}")
+    return r
 
 
 def cmd_import(args):
@@ -85,7 +86,7 @@ def cmd_import(args):
 
 
 def cmd_build(args):
-    ops.build(_proj(args), args.as_of)
+    return ops.build(_proj(args), args.as_of)
 
 
 def cmd_decide(args):
@@ -101,7 +102,7 @@ def cmd_baseline(args):
 
 
 def cmd_export(args):
-    ops.export_(_proj(args), args.what, Path(args.out) if args.out else None)
+    return {"path": str(ops.export_(_proj(args), args.what, Path(args.out) if args.out else None))}
 
 
 def cmd_mcp(args):
@@ -153,6 +154,30 @@ def cmd_notes(args):
         print("还没有项目笔记。")
     for n in rows:
         print(f"[{n['topic']}] {n['text']}（{n['source']}，{n['created_at'][:10]}）")
+
+
+def cmd_log(args):
+    proj = _proj(args)
+    rows = oplog.read(proj, args.limit)[::-1]  # 最新的在最下面，紧挨着命令提示符
+    if not rows:
+        print("还没有操作记录。")
+    day = None
+    for e in rows:
+        t = oplog.when(e["time"])
+        if t.date() != day:
+            day = t.date()
+            print(f"\n{day:%Y-%m-%d}")
+        who = e.get("source") or e.get("actor") or ""
+        state_word = {"error": " —— 出错", "interrupted": " —— 中断"}.get(e.get("status"), "")
+        print(f"  {t:%H:%M}  {e['title']}" + (f" · {who}" if who else "") + state_word)
+        for extra in (e.get("summary"), e.get("error") and f"错误：{e['error']}"):
+            if extra:
+                print(f"         {extra}")
+        if args.lines:
+            for ln in e.get("lines") or []:
+                print(f"           {ln}")
+    print(f"\n项目操作日志：{proj.root / oplog.FOLDER}")
+    print(f"排错日志（给开发用）：{debuglog.folder()}")
 
 
 def cmd_desktop(args):
@@ -285,6 +310,86 @@ def _version_text() -> str:
     return f"bidbench {__version__}" + (f"（构建 b{BUILD}，{COMMIT[:7]}）" if BUILD else "")
 
 
+# ---------------- 日志 ----------------
+
+def _op(args) -> tuple[str, str, str] | None:
+    """会改动项目的命令：(类型, 标题, 项目目录)，记进项目的操作日志。查询类命令和长时间运行的服务不记。"""
+    c = args.cmd
+    tier = "经济档" if getattr(args, "tier", "") == "economy" else "强档"
+    if c == "init":
+        return "init", f"新建项目「{args.name}」", args.dir
+    if c == "receive":
+        return "receive", oplog.receive_title(args.archive), args.project
+    if c == "recognize":
+        if args.executor == "simulated":
+            return "recognize", oplog.TITLES["simulated"], args.project
+        if args.dry_run:
+            return "estimate", f"{oplog.TITLES['estimate']}（{tier}）", args.project
+        return "recognize", f"{oplog.TITLES['claude']}（{tier}）", args.project
+    if c == "build":
+        return "build", oplog.TITLES["build"] + (f"（截至批次 #{args.as_of}）" if args.as_of else ""), args.project
+    if c == "export":
+        return "export", oplog.TITLES[args.what], args.project
+    if c in ("scan", "tasks", "import"):
+        return c, oplog.TITLES[c], args.project
+    return None
+
+
+class _Tee(io.TextIOBase):
+    """命令的输出照常显示，同时留一份写进操作日志。进度行（\r 覆盖）只留最后的样子。"""
+
+    def __init__(self, out):
+        self.out, self.buf, self.lines = out, "", []
+
+    @property
+    def encoding(self):
+        return getattr(self.out, "encoding", "utf-8")
+
+    def isatty(self):
+        return self.out.isatty()
+
+    def write(self, s):
+        self.out.write(s)
+        *done, self.buf = (self.buf + s).split("\n")
+        self.lines += [ln.rsplit("\r", 1)[-1] for ln in done]
+        return len(s)
+
+    def flush(self):
+        self.out.flush()
+
+    def finish(self) -> list[str]:
+        if self.buf.strip():
+            self.lines.append(self.buf.rsplit("\r", 1)[-1])
+        return self.lines
+
+
+def _run(args):
+    op = _op(args)
+    if op is None:
+        return args.fn(args)
+    kind, title, root = op
+    tee, started, t0 = _Tee(sys.stdout), now_iso(), time.monotonic()
+    status, error, result = "done", None, None
+    try:
+        with contextlib.redirect_stdout(tee):
+            result = args.fn(args)
+        return result
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            status, error = "error", str(e.code).removeprefix("错误：")
+        raise
+    except KeyboardInterrupt:
+        status, error = "interrupted", "按 Ctrl+C 中断"
+        raise
+    except Exception as e:
+        status, error = "error", str(e) if isinstance(e, (ValueError, OSError)) else f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        if (Path(root) / "bidbench.json").exists():  # 新建项目失败等情况下没有项目，不记
+            oplog.write(Project.open(Path(root)), kind, title, source=SOURCE, status=status, lines=tee.finish(),
+                        error=error, started=started, seconds=time.monotonic() - t0, result=result)
+
+
 def _utf8_output() -> None:
     """输出一律用 UTF-8。Windows 上输出被重定向或接管道时默认是本地代码页（cp936 / cp1252），中文和符号会报错。"""
     for stream in (sys.stdout, sys.stderr):
@@ -391,6 +496,11 @@ def main(argv=None):
     s.add_argument("--rollback", action="store_true", help="回到上一次更新之前的版本")
     s.set_defaults(fn=cmd_update)
 
+    s = sub.add_parser("log", help="查看操作日志：收图、识别、导出、人工决定、AI 助手提议的时间线")
+    s.add_argument("-n", "--limit", type=int, default=50, help="显示最近多少条（默认 50）")
+    s.add_argument("--lines", action="store_true", help="同时显示每次操作的运行记录")
+    s.set_defaults(fn=cmd_log)
+
     s = sub.add_parser("desktop", help="打开桌面工作台（独立窗口）")
     s.add_argument("--browser", action="store_true", help="用默认浏览器打开")
     s.set_defaults(fn=cmd_desktop)
@@ -401,10 +511,25 @@ def main(argv=None):
     s.set_defaults(fn=cmd_serve)
 
     args = ap.parse_args(argv)
+    debuglog.setup(args.cmd)
+    log.info("命令：%s", debuglog.safe_command(["bidbench", *(sys.argv[1:] if argv is None else argv)]))
+    t0 = time.monotonic()
     try:
-        args.fn(args)
+        _run(args)
     except (FileNotFoundError, FileExistsError, ValueError) as e:
+        log.info("命令没有完成：%s", e)
         sys.exit(f"错误：{e}")
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            log.info("命令没有完成：%s", e.code)
+        raise
+    except KeyboardInterrupt:
+        log.info("命令被中断")
+        raise
+    except Exception:
+        log.exception("命令意外出错")
+        raise
+    log.info("命令结束，用时 %.1f 秒", time.monotonic() - t0)
 
 
 if __name__ == "__main__":

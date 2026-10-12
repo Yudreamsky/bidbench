@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT / "samples"))
 
 import make_sample  # noqa: E402
 
-from bidbench import ingest, recognition, state  # noqa: E402
+from bidbench import debuglog, ingest, recognition, state  # noqa: E402
 from bidbench.executors import simulated  # noqa: E402
 from bidbench.store import Project  # noqa: E402
 
@@ -24,8 +24,10 @@ def _recognize(proj):
 
 @pytest.fixture(autouse=True)
 def _isolated_config(tmp_path_factory, monkeypatch):
-    """用户设置（最近项目、API 密钥）写到临时目录，不碰真实的用户目录。"""
+    """用户设置（最近项目、API 密钥）和排错日志写到临时目录，不碰真实的用户目录。"""
     monkeypatch.setenv("BIDBENCH_CONFIG_DIR", str(tmp_path_factory.mktemp("cfg")))
+    yield
+    debuglog.close()  # 命令行测试打开的日志文件用完就关，临时目录才删得掉
 
 
 @pytest.fixture(scope="session")

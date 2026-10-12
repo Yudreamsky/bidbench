@@ -170,6 +170,16 @@ li.recent .linkbtn { flex: 1; }
 .bar { height: 6px; background: var(--band); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
 .bar i { display: block; height: 100%; background: var(--accent); }
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
+.logrow { border-bottom: 1px solid var(--line); padding: 6px 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.logrow:last-child { border-bottom: 0; }
+.logrow .head { display: flex; gap: 8px; align-items: baseline; }
+.logrow .head .mono { color: var(--muted); flex: none; width: 40px; }
+.logrow > small, .logrow > details { margin-left: 48px; }
+.logrow .what { font-weight: 500; min-width: 0; overflow-wrap: anywhere; flex: 1; }
+.logrow small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.logrow .bad { color: var(--crit); }
+.logrow summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.logrow .joblog { margin-top: 4px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--surface); padding: 8px 16px; border-radius: 6px; font-size: 13px; }
 </style>
 </head>
@@ -774,7 +784,7 @@ function renderActions() {
   if (!APP || !APP.project) { box.replaceChildren(); return; }
   const b = (label, fn, primary) => el('button', { class: `btn${primary ? ' primary' : ''}`, type: 'button', onclick: fn }, label);
   box.replaceChildren(b('收图', renderReceive, true), b('识别', renderRecognize), b('导出', renderExport),
-    b('安全扫描', () => startJob('scan', { av: true })), b('设置', renderSettings), b('切换项目', closeProject));
+    b('安全扫描', () => startJob('scan', { av: true })), b('日志', renderLog), b('设置', renderSettings), b('切换项目', closeProject));
 }
 async function boot() {
   await refreshApp();
@@ -902,7 +912,52 @@ function renderSettings() {
     el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => save({}) }, '保存'),
       st.api_key_hint ? el('button', { class: 'btn', type: 'button', onclick: () => save({ api_key: '' }) }, '删除密钥') : null),
     section('关于', el('p', { class: 'meta' }, VER ? `bidbench ${VER.version}${VER.build ? '（构建 b' + VER.build + '）' : ''}${VER.commit ? ' · ' + VER.commit : ''}` : ''),
-      el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: async () => { await checkUpdate(true); renderUpdate(); } }, '检查更新'))));
+      el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: async () => { await checkUpdate(true); renderUpdate(); } }, '检查更新'))),
+    section('排错日志（给开发用）', el('p', { class: 'meta' }, '程序内部的运行记录和出错信息，保留最近 14 天。出了问题，把这个文件夹里的文件发给开发者。里面没有图纸内容、识别出的文字和密钥。'),
+      el('div', { class: 'opts', style: 'margin-top:6px' }, el('button', { class: 'btn', type: 'button', onclick: () => openFolder(APP.log_dir) }, '打开排错日志文件夹'))));
+}
+
+/* 操作日志：收图、识别、导出、人工决定、AI 助手提议，按天分组，最新的在最上面 */
+const pad2 = n => String(n).padStart(2, '0');
+const dayOf = t => `${t.getFullYear()}-${pad2(t.getMonth() + 1)}-${pad2(t.getDate())}`;
+const secsText = s => s < 60 ? `${Math.round(s)} 秒` : `${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
+async function renderLog() {
+  clearTimeout(jobTimer);
+  let data;
+  try {
+    const r = await fetch('/api/log?limit=300');
+    data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+  } catch (e) { toast('读不到操作日志'); return; }
+  const rows = data.entries;
+  const multi = new Set(rows.map(e => e.user).filter(Boolean)).size > 1;  // 几个人共用项目时才显示是谁
+  const BAD = { error: '出错', interrupted: '中断' };
+  const today = dayOf(new Date()), yesterday = dayOf(new Date(Date.now() - 864e5));
+  const parts = [el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, '操作日志'),
+      el('p', { class: 'meta' }, '收图、识别、导出、人工决定和 AI 助手的提议，最新的在最上面。日志存在项目的 logs 文件夹里，跟着项目走。')),
+    el('div', { class: 'opts' }, el('button', { class: 'btn', type: 'button', onclick: () => openFolder(data.folder) }, '打开日志文件夹'),
+      el('button', { class: 'btn', type: 'button', onclick: renderLog }, '刷新'))];
+  if (!rows.length) parts.push(el('p', { class: 'meta' }, '还没有操作记录。'));
+  let day = null, list = null;
+  for (const e of rows) {
+    const t = new Date(e.time);
+    const d = isNaN(t) ? '时间不详' : dayOf(t);
+    if (d !== day) {
+      day = d; list = el('div', {});
+      parts.push(el('section', {}, el('h3', {}, d === today ? `今天 ${d}` : d === yesterday ? `昨天 ${d}` : d), list));
+    }
+    const who = [e.source || e.actor, multi && e.user ? e.user : null, e.seconds >= 1 ? `用时 ${secsText(e.seconds)}` : null].filter(Boolean).join(' · ');
+    list.append(el('div', { class: 'logrow' },
+      el('div', { class: 'head' }, el('span', { class: 'mono' }, isNaN(t) ? '--:--' : `${pad2(t.getHours())}:${pad2(t.getMinutes())}`),
+        el('span', { class: 'what' }, e.title), BAD[e.status] ? el('span', { class: 'bad' }, BAD[e.status]) : null),
+      e.summary ? el('small', {}, e.summary) : null,
+      e.error ? el('small', { class: 'bad' }, e.error) : null,
+      who ? el('small', {}, who) : null,
+      e.lines && e.lines.length ? el('details', {}, el('summary', {}, `运行记录（${e.lines.length} 行）`),
+        el('pre', { class: 'joblog' }, e.lines.join('\n'))) : null));
+  }
+  panel.replaceChildren(...parts);
 }
 
 async function openFolder(path) {

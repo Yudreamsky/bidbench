@@ -7,15 +7,20 @@
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .debuglog import safe_command, tail
+
 TIMEOUT = 3600
+log = logging.getLogger(__name__)
 SHA_RE = re.compile(r"([0-9a-f]{64})")
 
 
@@ -55,8 +60,17 @@ def find_engine() -> Engine | None:
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
-    r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT)
-    return r.returncode, (r.stdout + r.stderr).decode("utf-8", errors="replace")
+    t = time.monotonic()
+    try:
+        r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("杀毒软件没能运行：%s：%s", safe_command(cmd), e)
+        raise
+    text = (r.stdout + r.stderr).decode("utf-8", errors="replace")
+    log.info("杀毒扫描：%s → 返回 %s，%.1f 秒", safe_command(cmd), r.returncode, time.monotonic() - t)
+    if r.returncode != 0:
+        log.info("杀毒软件的输出：%s", tail(text))
+    return r.returncode, text
 
 
 def _command(engine: Engine, target: Path) -> list[str]:

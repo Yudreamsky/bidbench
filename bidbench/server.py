@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -15,7 +16,6 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
 from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,11 +23,15 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import antivirus, appconfig, export, ops, recognition, release, state, updater
-from .store import Project, SchemaTooNew, add_decision
+from . import antivirus, appconfig, debuglog, export, oplog, ops, recognition, release, state, updater
+from .store import Project, SchemaTooNew, add_decision, now_iso
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk"}
 TOKEN_META = '<meta name="bidbench-token" content="">'
+PROJECT_JOBS = {"receive", "estimate", "recognize", "build", "export", "scan"}  # 记进项目操作日志的任务
+SOURCE = "工作台"
+
+log = logging.getLogger(__name__)
 
 
 def _updater():
@@ -38,23 +42,38 @@ def _updater():
 class Job:
     """后台任务：收图、识别、导出等。一次只跑一个，界面轮询进度。"""
 
-    def __init__(self, kind: str, title: str):
+    def __init__(self, kind: str, title: str, proj: Project | None = None):
         self.id = secrets.token_hex(4)
-        self.kind, self.title = kind, title
+        self.kind, self.title, self.proj = kind, title, proj
         self.status = "running"
-        self.lines: list[str] = []
+        self.lines: list[str] = []  # 全部输出；界面只取最后 400 行，操作日志里留头尾
         self.progress: tuple[int, int] | None = None
         self.result = None
         self.error: str | None = None
         self.started = datetime.now().isoformat(timespec="seconds")
+        self.started_at, self.t0 = now_iso(), time.monotonic()
         self.finished: str | None = None
+        self.logged = False
+        self.lock = threading.Lock()
 
     def log(self, msg: str) -> None:
-        self.lines.extend(str(msg).splitlines() or [""])
-        del self.lines[:-400]
+        with self.lock:
+            self.lines.extend(str(msg).splitlines() or [""])
+
+    def write_oplog(self, status: str) -> None:
+        """记进项目的操作日志，只记一次（关窗口时记“中断”，之后任务线程即使跑完也不再记）。"""
+        with self.lock:
+            if self.logged or self.proj is None or self.kind not in PROJECT_JOBS:
+                return
+            self.logged = True
+            lines = list(self.lines)
+        oplog.write(self.proj, self.kind, self.title, source=SOURCE, status=status, lines=lines, error=self.error,
+                    started=self.started_at, seconds=time.monotonic() - self.t0, result=self.result)
 
     def as_dict(self) -> dict:
-        return {"id": self.id, "kind": self.kind, "title": self.title, "status": self.status, "lines": self.lines,
+        with self.lock:
+            lines = self.lines[-400:]
+        return {"id": self.id, "kind": self.kind, "title": self.title, "status": self.status, "lines": lines,
                 "progress": self.progress, "result": self.result, "error": self.error,
                 "started": self.started, "finished": self.finished}
 
@@ -89,6 +108,7 @@ class _App:
 
     def quit(self, delay: float = 0.5) -> None:
         def go():
+            self.abandon_job()
             for fn in self.on_quit:
                 try:
                     fn()
@@ -102,6 +122,7 @@ class _App:
         with self.lock:
             self.proj = proj
             self.cache.clear()
+        log.info("打开项目：%s", proj.root if proj else "（无，回到项目选择）")
         if proj is not None:
             appconfig.add_recent(proj.root, proj.meta["name"])
 
@@ -122,14 +143,15 @@ class _App:
                 "recent": appconfig.recent(), "settings": appconfig.public_settings(),
                 "default_dir": str(appconfig.default_projects_dir()), "today": date.today().isoformat(),
                 "antivirus": eng.name if eng else None, "claude_ready": ops.has_claude_credentials(),
-                "job": self.job.as_dict() if self.job else None}
+                "log_dir": str(debuglog.folder()), "job": self.job.as_dict() if self.job else None}
 
     # ---- 后台任务 ----
     def start_job(self, kind: str, title: str, fn) -> Job:
         if self.job and self.job.status == "running":
             raise RuntimeError(f"「{self.job.title}」还在进行，等它完成后再操作。")
-        job = Job(kind, title)
+        job = Job(kind, title, self.proj)
         self.job = job
+        log.info("任务开始：%s（%s）", title, kind)
 
         def run():
             try:
@@ -138,17 +160,30 @@ class _App:
             except (ops.OpError, updater.UpdateError, ValueError, FileNotFoundError, FileExistsError, SchemaTooNew) as e:
                 job.error, job.status = str(e), "error"
                 job.log(f"错误：{e}")
-            except Exception as e:  # noqa: BLE001 - 意外错误也要告诉用户，并留下记录
-                job.error, job.status = f"出错了：{type(e).__name__}: {e}", "error"
+                log.info("任务出错：%s：%s", title, e)
+            except Exception as e:  # noqa: BLE001 - 意外错误也要告诉用户，并在排错日志里留下完整记录
+                job.error, job.status = (f"出错了：{type(e).__name__}: {e}。"
+                                         "详细信息已写进排错日志（设置 → 打开排错日志文件夹）"), "error"
                 job.log(job.error)
-                (appconfig.config_dir() / "error.log").open("a", encoding="utf-8").write(
-                    f"\n[{datetime.now():%F %T}] {kind}\n{traceback.format_exc()}")
+                log.exception("任务意外出错：%s（%s）", title, kind)
             finally:
                 job.finished = datetime.now().isoformat(timespec="seconds")
                 self.invalidate()
+                log.info("任务结束：%s，%s，用时 %.1f 秒", title, job.status, time.monotonic() - job.t0)
+                try:
+                    job.write_oplog(job.status)
+                except Exception:  # noqa: BLE001 - 记日志出错不能影响任务本身
+                    log.exception("写操作日志出错：%s", title)
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run, daemon=True, name=f"job-{kind}").start()
         return job
+
+    def abandon_job(self) -> None:
+        """退出时还有任务在跑（关窗口时用户确认了退出）：操作日志里记一笔“中断”。"""
+        job = self.job
+        if job and job.status == "running":
+            log.warning("退出时任务还没完成：%s", job.title)
+            job.write_oplog("interrupted")
 
 
 def _job_fn(app: _App, kind: str, body: dict):
@@ -183,8 +218,7 @@ def _job_fn(app: _App, kind: str, body: dict):
             job.progress = None
             ops.build(proj, log=job.log)
             return r
-        what = paths[0].name + ("（文件夹）" if paths[0].is_dir() else "") + (f" 等 {len(paths)} 个文件" if len(paths) > 1 else "")
-        return f"收图：{what}", fn
+        return oplog.receive_title(paths), fn
 
     if kind == "estimate":
         scope, tier = body.get("scope") or "new", body.get("tier") or "economy"
@@ -199,7 +233,7 @@ def _job_fn(app: _App, kind: str, body: dict):
                 return None
             job.log(ops.estimate_text(est))
             return {**est, "tier": tier, "scope": scope}
-        return "估算识别花费", fn
+        return oplog.TITLES["estimate"], fn
 
     if kind == "recognize":
         executor = body.get("executor")
@@ -208,7 +242,7 @@ def _job_fn(app: _App, kind: str, body: dict):
                 r = ops.recognize_simulated(need_proj(), log=job.log)
                 ops.build(proj, log=job.log)
                 return r
-            return "模拟识别", fn
+            return oplog.TITLES["simulated"], fn
         if executor != "claude":
             raise ValueError("未知的识别方式")
         task = Path(str(body.get("task") or ""))
@@ -225,20 +259,19 @@ def _job_fn(app: _App, kind: str, body: dict):
             r = ops.recognize_claude(proj, task, tier, log=job.log, progress=progress)
             ops.build(proj, log=job.log)
             return r
-        return "Claude 识别", fn
+        return f"{oplog.TITLES['claude']}（{'经济档' if tier == 'economy' else '强档'}）", fn
 
     if kind == "build":
-        return "重新计算报告", lambda job: ops.build(need_proj(), log=job.log)
+        return oplog.TITLES["build"], lambda job: ops.build(need_proj(), log=job.log)
 
     if kind == "export":
         what = body.get("what")
         if what not in ("current", "mirror"):
             raise ValueError("导出类型不对")
-        return ("导出现行图纸" if what == "current" else "导出数据镜像"), \
-            lambda job: {"path": str(ops.export_(need_proj(), what, log=job.log))}
+        return oplog.TITLES[what], lambda job: {"path": str(ops.export_(need_proj(), what, log=job.log))}
 
     if kind == "scan":
-        return "文件安全扫描", lambda job: ops.scan(need_proj(), av=bool(body.get("av", True)), log=job.log)
+        return oplog.TITLES["scan"], lambda job: ops.scan(need_proj(), av=bool(body.get("av", True)), log=job.log)
 
     if kind in ("update", "rollback"):
         if not release.is_installed():
@@ -312,6 +345,13 @@ def make_handler(app: _App):
                 return self._json(app.info())
             if u.path == "/api/job":
                 return self._json(app.job.as_dict() if app.job else None)
+            if u.path == "/api/log":
+                if not self._need_project():
+                    return None
+                q = parse_qs(u.query)
+                limit = int(q["limit"][0]) if q.get("limit", [""])[0].isdigit() else 200
+                return self._json({"entries": oplog.read(app.proj, min(limit, 2000)),
+                                   "folder": str(oplog.folder(app.proj)), "debug_folder": str(debuglog.folder())})
             if u.path == "/api/state":
                 if not self._need_project():
                     return None
@@ -347,6 +387,7 @@ def make_handler(app: _App):
             try:
                 return self._post(u.path, body)
             except (ValueError, FileNotFoundError, FileExistsError, SchemaTooNew, RuntimeError) as e:
+                log.info("请求没有完成：%s：%s", u.path, e)
                 return self._json({"error": str(e)}, 400)
 
         def _post(self, path: str, body: dict):
@@ -401,6 +442,8 @@ def make_handler(app: _App):
                 return self._json(app.start_job(str(body.get("kind")), title, fn).as_dict())
             if path == "/api/app/settings":
                 appconfig.update_settings(body.get("api_key"), body.get("download_prefix"))
+                changed = [k for k in ("api_key", "download_prefix") if body.get(k) is not None]
+                log.info("修改设置：%s", "、".join(changed) or "无")  # 只记改了哪几项，不记内容
                 return self._json(app.info())
             if path == "/api/app/open_folder":
                 p = Path(str(body.get("path") or ""))
@@ -425,7 +468,9 @@ def make_handler(app: _App):
                     raise ValueError("请填写项目名称")
                 if root.exists() and any(root.iterdir()):
                     raise ValueError("这个文件夹里已经有东西了，请选一个空文件夹或新文件夹")
-                app.set_project(Project.init(root, name))
+                proj = Project.init(root, name)
+                oplog.write(proj, "init", f"新建项目「{name}」", source=SOURCE)
+                app.set_project(proj)
                 return self._json(app.info())
             if path == "/api/app/close":
                 app.set_project(None)

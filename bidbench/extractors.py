@@ -13,14 +13,19 @@ Windows 上除了 PATH 和默认安装目录，还按注册表找装在别处的
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .debuglog import safe_command, tail
+
 TIMEOUT = 3600
+log = logging.getLogger(__name__)
 UNREADABLE_NAME = "unreadable filename"  # bsdtar：文件名里有本机字符集表示不了的字符（中文 Windows 上的 Ø 等）
 
 
@@ -42,8 +47,17 @@ def _env() -> dict:
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          env=_env(), timeout=TIMEOUT, stdin=subprocess.DEVNULL)
+    t = time.monotonic()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env=_env(), timeout=TIMEOUT, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("解压工具没能运行：%s：%s", safe_command(cmd), e)
+        raise
+    log.info("解压工具：%s → 返回 %s，%.1f 秒", safe_command(cmd), r.returncode, time.monotonic() - t)
+    if r.returncode != 0:
+        log.info("解压工具的输出：%s", tail(r.stderr + "\n" + r.stdout))
+    return r
 
 
 def _first(*candidates: str) -> str | None:

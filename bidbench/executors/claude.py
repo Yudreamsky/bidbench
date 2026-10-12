@@ -6,6 +6,7 @@
 
 执行器只读任务包、只写 results/，与外部 agent 遵守同一份格式约定。
 凭据按 Anthropic SDK 的默认顺序解析（ANTHROPIC_API_KEY 等），代码里不保存密钥。
+识别过程逐页记录：实时交给界面（log 回调），同时追加到任务包的 results/progress.log，续跑时接着写。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +26,8 @@ import jsonschema
 import pymupdf
 
 from ..recognition import load_schema, page_markdown
+
+log = logging.getLogger(__name__)
 
 EXECUTOR = "claude"
 INSTRUCTION_VERSION = "0.2"
@@ -209,6 +213,13 @@ class Usage:
             self.cache_read += getattr(u, "cache_read_input_tokens", 0) or 0
             self.cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
 
+    def merge(self, other: "Usage") -> None:
+        with self.lock:
+            self.input += other.input
+            self.output += other.output
+            self.cache_read += other.cache_read
+            self.cache_write += other.cache_write
+
     def cost(self, model: str) -> float | None:
         if model not in PRICES:
             return None
@@ -217,7 +228,11 @@ class Usage:
 
 
 class RecognitionError(Exception):
-    """单页失败：记下来，继续其他页面。"""
+    """单页失败：记下来，继续其他页面。reason 是不含页面内容的失败类别，写排错日志用。"""
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 class FatalError(Exception):
@@ -238,13 +253,19 @@ def _fatal(e: Exception) -> str | None:
 class _Mode:
     """结构化输出是首选；如果 API 拒绝这份 schema，整次运行退回“提示词附格式 + 本地校验”。"""
 
-    def __init__(self):
+    def __init__(self, note=None):
         self.structured = True
         self.lock = threading.Lock()
+        self.note = note
 
-    def downgrade(self) -> None:
+    def downgrade(self, e: Exception | None = None) -> None:
         with self.lock:
+            if not self.structured:
+                return
             self.structured = False
+        log.warning("API 不接受结构化输出格式，改为提示里附格式：%s", e)
+        if self.note:
+            self.note("  注意：API 不接受这份结构化输出格式，改为在提示里附上格式说明，结果照样经过本地校验。")
 
 
 def _schema_rejected(e: Exception) -> bool:
@@ -281,7 +302,7 @@ def _request(client, model: str, effort: str, messages: list, schema: dict, mode
                 return s.get_final_message()
         except Exception as e:  # noqa: BLE001
             if structured and _schema_rejected(e):
-                mode.downgrade()
+                mode.downgrade(e)
                 continue
             raise
 
@@ -303,24 +324,26 @@ def _text_of(msg) -> str:
 
 
 def recognize_page(client, task_dir: Path, item: dict, model: str, effort: str, tiles: int,
-                   usage: Usage, validator, schema: dict, mode: _Mode | None = None) -> dict:
+                   usage: Usage, validator, schema: dict, mode: _Mode | None = None, note=None) -> dict:
     messages = [{"role": "user", "content": build_content(task_dir, item, tiles)}]
     last_error = None
-    for _attempt in range(2):  # 第二次只在本地校验失败时，带着错误重来
+    for attempt in range(2):  # 第二次只在本地校验失败时，带着错误重来
+        if attempt and note:
+            note(f"  ↻ {page_label(item)}：输出没有通过格式校验，带着错误重试一次")
         msg = _request(client, model, effort, messages, schema, mode)
         usage.add(msg.usage)
         if msg.stop_reason == "refusal":
             cat = getattr(getattr(msg, "stop_details", None), "category", None)
-            raise RecognitionError(f"模型拒绝识别（{cat or '未说明原因'}）")
+            raise RecognitionError(f"模型拒绝识别（{cat or '未说明原因'}）", f"拒绝识别（{cat}）")
         if msg.stop_reason == "max_tokens":
-            raise RecognitionError("输出超过长度上限，页面内容过多")
+            raise RecognitionError("输出超过长度上限，页面内容过多", "输出超长")
         raw = _text_of(msg)
         try:
             body = _parse_json(raw)
             if not isinstance(body, dict):
                 raise json.JSONDecodeError("不是对象", raw, 0)
         except json.JSONDecodeError as e:
-            raise RecognitionError(f"模型输出不是合法 JSON：{e}") from e
+            raise RecognitionError(f"模型输出不是合法 JSON：{e}", "输出不是合法 JSON") from e
         body = _sanitize({k: body.get(k) for k in BODY_KEYS})
         record = {
             "schema_version": "0.1",
@@ -339,7 +362,38 @@ def recognize_page(client, task_dir: Path, item: dict, model: str, effort: str, 
             {"role": "assistant", "content": raw},
             {"role": "user", "content": f"上面的输出没有通过校验：{last_error}。请输出修正后的完整 JSON。"},
         ]
-    raise RecognitionError(f"两次输出都没有通过校验：{last_error}")
+    raise RecognitionError(f"两次输出都没有通过校验：{last_error}", "两次输出都没有通过格式校验")
+
+
+def page_label(item: dict) -> str:
+    src = item["source"]
+    return f"{src['file_path'].split(' / ')[-1]} 第 {src['page_index']}/{src['page_count']} 页"
+
+
+def _found(rec: dict) -> str:
+    """识别出来的是什么：图号和图名，没有图号时写页面类型。"""
+    tb = rec.get("title_block") or {}
+    no, title = ((tb.get(k) or {}).get("value") for k in ("drawing_no", "drawing_title"))
+    return " ".join(x for x in (no, title) if x) or rec.get("page_kind") or "?"
+
+
+class ProgressLog:
+    """识别过程日志：每页一行，交给界面（log 回调），同时追加到任务包的 results/progress.log（带时间）。"""
+
+    def __init__(self, task_dir: Path, log_fn=None):
+        self.path = Path(task_dir) / "results" / "progress.log"
+        self.log_fn = log_fn
+        self.lock = threading.Lock()
+
+    def __call__(self, msg: str, show: bool = True) -> None:
+        with self.lock:
+            try:
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg.strip()}\n")
+            except OSError:
+                pass
+            if show and self.log_fn:
+                self.log_fn(msg)
 
 
 @dataclass
@@ -354,7 +408,8 @@ class RunResult:
 
 
 def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
-        tiles: int | None = None, workers: int = 4, client=None, progress=None) -> RunResult:
+        tiles: int | None = None, workers: int = 4, client=None, progress=None, log_fn=None) -> RunResult:
+    """log_fn 收到逐页的识别过程（给人看的一行字）。"""
     cfg = TIERS[tier]
     model = model or cfg["model"]
     effort = effort or cfg["effort"]
@@ -369,7 +424,8 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
     validator = jsonschema.Draft202012Validator(load_schema())
     schema = body_schema()
     res = RunResult(model=model)
-    mode = _Mode()
+    note = ProgressLog(task_dir, log_fn)
+    mode = _Mode(note)
     t0 = time.monotonic()
     todo = []
     for item in manifest["pages"]:
@@ -382,25 +438,43 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
             except json.JSONDecodeError:
                 pass
         todo.append(item)
+    if todo:
+        note(f"开始识别 {len(todo)} 页" + (f"（已有结果的 {res.skipped} 页跳过）" if res.skipped else "")
+             + f"：模型 {model}，effort {effort}，" + (f"局部切片 {tiles}×{tiles}，" if tiles > 1 else "")
+             + f"同时识别 {max(1, workers)} 页。")
+    log.info("识别开始：%s 页，跳过 %s 页，模型 %s，effort %s，切片 %s，并发 %s", len(todo), res.skipped, model, effort,
+             tiles, workers)
 
     def one(item):
-        rec = recognize_page(client, task_dir, item, model, effort, tiles, res.usage, validator, schema, mode)
+        u, t = Usage(), time.monotonic()
+        try:
+            rec = recognize_page(client, task_dir, item, model, effort, tiles, u, validator, schema, mode, note)
+        finally:
+            res.usage.merge(u)
         (out / f"{item['page_id']}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
         (out / f"{item['page_id']}.md").write_text(page_markdown(rec), encoding="utf-8")
-        return item
+        return rec, u, time.monotonic() - t
 
     def settle(it, fn):
+        n = f"{res.done + len(res.failed) + 1}/{len(todo)}"
         try:
-            fn()
+            rec, u, secs = fn()
             res.done += 1
+            note(f"  ✓ {n} {page_label(it)} → {_found(rec)}（{secs:.0f} 秒，输入 {u.input} / 输出 {u.output} tokens）")
         except RecognitionError as e:
             res.failed.append({"page_id": it["page_id"], "file": it["source"]["file_path"], "error": str(e)})
+            note(f"  ✗ {n} {page_label(it)}：{e}")
+            log.warning("第 %s 页识别失败：%s", it["page_id"], e.reason)  # 校验错误里可能带着识别出的文字，不写进排错日志
         except Exception as e:  # noqa: BLE001 - API 错误等，记下后继续其他页面
             fatal = _fatal(e)
             if fatal:
+                note(f"停止：{fatal}")
+                log.error("识别停止：%s（%s: %s）", fatal, type(e).__name__, e)
                 raise FatalError(fatal) from e
             res.failed.append({"page_id": it["page_id"], "file": it["source"]["file_path"],
                                "error": f"{type(e).__name__}: {e}"})
+            note(f"  ✗ {n} {page_label(it)}：{type(e).__name__}: {e}")
+            log.warning("第 %s 页识别出错：%s: %s", it["page_id"], type(e).__name__, e)
         if progress:
             progress(res.done + len(res.failed), len(todo))
 
@@ -414,6 +488,10 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
     res.seconds = time.monotonic() - t0
     res.structured = mode.structured
     _write_log(task_dir, res, tier, effort, tiles)
+    if todo:
+        note(f"结束：识别 {res.done} 页，失败 {len(res.failed)} 页，用时 {res.seconds:.0f} 秒。", show=False)
+    log.info("识别结束：完成 %s 页，失败 %s 页，用时 %.0f 秒，输入 %s / 输出 %s tokens", res.done, len(res.failed),
+             res.seconds, res.usage.input, res.usage.output)
     return res
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -26,6 +27,8 @@ API = f"https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=30"
 TAG = re.compile(r"^b(\d+)$")
 TIMEOUT = 30
 INSTALLER_ARGS = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
+
+log = logging.getLogger(__name__)
 
 
 def is_installed() -> bool:
@@ -87,6 +90,7 @@ def check() -> dict:
     try:
         rels = releases()
     except UpdateError as e:
+        log.info("检查更新没有成功：%s（%s）", e, e.__cause__)
         return {**info, "status": "error", "message": str(e)}
     cur = current_build()
     newer = [r for r in rels if r["build"] > cur]
@@ -124,10 +128,13 @@ def download(rel: dict, dest: Path | None = None, progress=None) -> Path:
                 progress(done, total)
     if expected is None:
         target.unlink(missing_ok=True)
+        log.warning("发布 %s 缺少校验文件", rel["tag"])
         raise UpdateError("发布里缺少校验文件，为安全起见不安装。")
     if h.hexdigest() != expected:
         target.unlink(missing_ok=True)
+        log.warning("安装包校验不通过：%s，下载了 %s 字节", rel["tag"], done)
         raise UpdateError("下载的安装包校验不通过（可能下载不完整或被篡改），已删除，请重试。")
+    log.info("已下载并校验安装包 %s（%s 字节）", rel["tag"], done)
     return target
 
 
@@ -158,4 +165,5 @@ def launch_installer(path: str | Path) -> None:
     kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+    log.info("启动安装程序：%s", path)
     subprocess.Popen([str(path), *INSTALLER_ARGS], **kwargs)
