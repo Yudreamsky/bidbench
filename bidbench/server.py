@@ -85,6 +85,7 @@ class _App:
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.Lock()
         self.cache: dict[int | None, dict] = {}
+        self.db_version: str | None = None  # 缓存对应的数据库修改计数
         self.httpd = None
         self.update_cache: tuple[float, dict] | None = None
         self.job: Job | None = None
@@ -130,10 +131,25 @@ class _App:
         if proj is not None:
             appconfig.add_recent(proj.root, proj.meta["name"])
 
+    def db_version_now(self) -> str | None:
+        """数据库文件头里的修改计数（第 24~27 字节）。外部 AI 助手、命令行改了项目，这个数都会变。"""
+        if not self.proj:
+            return None
+        try:
+            with open(self.proj.db_path, "rb") as f:
+                f.seek(24)
+                return f.read(4).hex() or None
+        except OSError:
+            return None
+
     def state(self, as_of: int | None = None) -> dict:
         with self.lock:
+            v = self.db_version_now()
+            if v != self.db_version:  # 别的程序改过项目：缓存作废
+                self.cache.clear()
+                self.db_version = v
             if as_of not in self.cache:
-                self.cache[as_of] = state.build(self.proj, as_of)
+                self.cache[as_of] = {**state.build(self.proj, as_of), "db_version": v}
             return self.cache[as_of]
 
     def invalidate(self) -> None:
@@ -404,6 +420,9 @@ def make_handler(app: _App):
                 limit = int(q["limit"][0]) if q.get("limit", [""])[0].isdigit() else 200
                 return self._json({"entries": oplog.read(app.proj, min(limit, 2000)),
                                    "folder": str(oplog.folder(app.proj)), "debug_folder": str(debuglog.folder())})
+            if u.path == "/api/state/version":  # 界面定时看一眼，变了再取整个状态
+                job = app.job
+                return self._json({"version": app.db_version_now(), "busy": bool(job and job.status == "running")})
             if u.path == "/api/state":
                 if not self._need_project():
                     return None

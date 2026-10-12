@@ -108,6 +108,7 @@ def diff_report(state: dict) -> str:
     sec("新增图纸", [x + ("（已核销缺图清单）" if x in d.get("resolved_missing", []) else "") for x in d.get("added", [])])
     sec("新发现的缺图", d.get("new_missing"))
     sec("新出现的版本冲突", d.get("new_conflicts"))
+    sec("新出现的事实冲突", d.get("new_fact_conflicts"))
     sec("作废还是漏发，待确认", d.get("pending_void"))
     sec("新发现的楼层缺口", d.get("floor_gaps"))
     sec("事实变化", d.get("fact_changes"))
@@ -153,7 +154,8 @@ def missing_report(state: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-FLOOR_STATUS = {"ok": "完整", "missing": "有缺层", "accepted": "缺层已确认不需要", "unchecked": "无法检查"}
+FLOOR_STATUS = {"ok": "完整", "no_gap": "已出现楼层之间不缺", "missing": "有缺层", "accepted": "缺层已确认不需要",
+                "unchecked": "无法检查"}
 
 
 def floor_section(state: dict) -> list[str]:
@@ -162,8 +164,9 @@ def floor_section(state: dict) -> list[str]:
         return []
     out = ["", "## 楼层覆盖", "", "| 图类 | 结果 | 已覆盖 | 缺少 | 依据 |", "| --- | --- | --- | --- | --- |"]
     for r in rows:
-        have = "；".join(f"{c['floors']}（{c['sheets'][0]}）" for c in r["covered"]) or "—"
-        out.append(f"| {r['group']} | {FLOOR_STATUS[r['status']]} | {have} | {r['missing_text'] or '—'} | {r['basis'] or ''} |")
+        have = "；".join(f"{c['floors']}（{c['sheets'][0]}{'，待确认' if c.get('tentative') else ''}）" for c in r["covered"]) or "—"
+        basis = "；".join(x for x in [r["basis"], *r.get("remarks", [])] if x)
+        out.append(f"| {r['group']} | {FLOOR_STATUS[r['status']]} | {have} | {r['missing_text'] or '—'} | {basis} |")
     return out
 
 

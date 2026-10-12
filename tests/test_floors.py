@@ -49,10 +49,18 @@ def test_floor_coverage_on_sample(demo):
     assert arch["missing"] == ["B2", "B1", "3F"]           # 地下 2 层没有平面图；标准层只适用 4F~20F
     assert {c["floors"] for c in arch["covered"]} == {"1F", "2F", "4F~20F", "屋顶"}
     assert "冲突" in arch["basis"]                         # 地上层数 20 / 21 尚未确认
-    assert fc["结构梁配筋图"]["status"] == "ok"             # 3F 与 4F~20F 连续
+    beams = fc["结构梁配筋图"]
+    assert beams["status"] == "no_gap"                      # 3F 与 4F~20F 连续，但只查了这一段
+    assert beams["unchecked"] == "B2、B1、1F、2F、屋顶"
+    assert beams["remarks"][0].startswith("没查：B2、B1、1F、2F、屋顶")
+    roof = next(c for c in arch["covered"] if c["floors"] == "屋顶")
+    assert roof["tentative"] and arch["tentative"] == "屋顶"  # 建施-05 作废还是漏发待确认
+    assert "屋顶 只有待确认是否作废的 建施-05" in arch["remarks"][0]
     assert fc["电气平面图"]["status"] == "unchecked"
     issue = next(i for i in st["issues"] if i["id"] == "floor:建筑平面图")
     assert issue["kind"] == "楼层覆盖" and "B2、B1、3F" in issue["title"] and len(issue["options"]) == 2
+    assert "屋顶（建施-05，待确认是否作废）" in issue["detail"]
+    assert "已出现楼层之间不缺" in reports.missing_report(st)
     assert "楼层覆盖" in reports.missing_report(st)
     assert state.build(demo, 1)["diff"]["floor_gaps"] == ["建筑平面图缺 B2、B1、3F"]
     assert st["diff"]["floor_gaps"] == []                  # 第 4 批没有带来新的缺层

@@ -607,20 +607,22 @@ function renderOverview() {
     if (d.added?.length) lines.push('新增：' + d.added.join('、'));
     if (d.resolved_missing?.length) lines.push('核销缺图：' + d.resolved_missing.join('、'));
     if (d.new_missing?.length) lines.push('新发现缺图：' + d.new_missing.join('、'));
-    if (d.new_conflicts?.length) lines.push('新冲突：' + d.new_conflicts.join('、'));
+    if (d.new_conflicts?.length) lines.push('新的版本冲突：' + d.new_conflicts.join('、'));
+    if (d.new_fact_conflicts?.length) lines.push('新的事实冲突：' + d.new_fact_conflicts.join('；'));
     if (d.pending_void?.length) lines.push('待确认作废：' + d.pending_void.join('、'));
     if (d.floor_gaps?.length) lines.push('楼层缺口：' + d.floor_gaps.join('；'));
     if (d.fact_changes?.length) lines.push('事实变化：' + d.fact_changes.join('；'));
     parts.push(section(`本批差异（批次 #${b.seq}：${b.kinds.join('、')}）`,
       lines.length ? el('ul', { class: 'list' }, lines.map(t => el('li', {}, t))) : el('p', { class: 'meta' }, '与上一批相比没有变化。')));
   }
-  const FL = { ok: '完整', missing: '有缺层', accepted: '缺层已确认不需要', unchecked: '无法检查' };
+  const FL = { ok: '完整', no_gap: '已出现楼层之间不缺', missing: '有缺层', accepted: '缺层已确认不需要', unchecked: '无法检查' };
   const fc = S.floor_coverage || [];
   if (fc.length) parts.push(section('楼层覆盖', el('ul', { class: 'list' }, fc.map(r => el('li', {},
     el('button', { class: 'chip', type: 'button', onclick: () => goTarget({ floor_group: r.group }) }, r.group), ' ',
     el('span', { style: `color:var(${r.status === 'missing' ? '--warn' : '--muted'})` }, FL[r.status]),
     el('small', { style: 'display:block;color:var(--muted)' },
-      (r.covered.map(c => `${c.floors}（${c.sheets[0]}）`).join('；') || '无楼层信息') + (r.missing.length ? `；缺 ${r.missing_text}` : '')))))));
+      (r.covered.map(c => `${c.floors}（${c.sheets[0]}${c.tentative ? '，待确认' : ''}）`).join('；') || '无楼层信息') + (r.missing.length ? `；缺 ${r.missing_text}` : '')
+        + (r.remarks || []).map(x => `；${x}`).join('')))))));
   const RD = { safe: '已确认安全', dangerous: '已确认有风险' };
   const scanText = x => x.ok ? `${x.engine} 扫描${x.batch_seq ? '批次 #' + x.batch_seq : '全部文件'}的 ${x.files} 个文件，${x.threats ? '发现 ' + x.threats + ' 个有问题' : '未发现病毒'}`
     : `${x.engine} 扫描没有完成：${x.message}`;
@@ -643,6 +645,7 @@ function renderOverview() {
     latest() ? el('div', { class: 'form', style: 'margin-top:8px' }, input,
       el('button', { class: 'btn primary', type: 'button', onclick: async () => { if (input.value.trim() && await post('/api/baseline', { name: input.value.trim() })) toast('已锁定基线'); } }, '锁定当前图纸')) : null));
   panel.replaceChildren(...parts);
+  ui.statePanel = panel.firstChild;
 }
 
 function renderSheet(no) {
@@ -653,6 +656,10 @@ function renderSheet(no) {
   parts.push(el('div', { class: 'ptitle' }, el('span', { class: 'pnum' }, s.no), el('h2', {}, s.title || '（图名未知）'),
     el('span', { class: `pill st-${s.status}` }, STATUS[s.status])));
   issueFor({ sheet: no }).forEach(i => parts.push(el('div', { class: `note ${i.level === 'crit' ? 'crit' : 'warn'}` }, el('p', {}, i.detail), optionButtons(i))));
+  const related = S.issues.filter(i => i.target.sheet !== no && (i.sheets || []).includes(no));
+  if (related.length) parts.push(section(`牵涉这张图的问题（${related.length}）`, el('ul', { class: 'list' }, related.map(i => el('li', {},
+    el('button', { class: 'linkbtn', type: 'button', onclick: () => goTarget(i.target) },
+      el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : 'c-low'}` }), el('span', {}, `${i.kind}：${i.title}`)))))));
   if (s.status !== 'missing') {
     parts.push(el('dl', { class: 'kv' }, el('dt', {}, '专业'), el('dd', {}, s.discipline),
       el('dt', {}, '现行版次'), el('dd', {}, s.current_rev || '—'),
@@ -671,11 +678,16 @@ function renderSheet(no) {
       e.from === no ? e.label : `被引用：${e.label}`);
   }))));
   const fs = S.facts.groups.flatMap(g => g.facts).filter(f => f.sources.includes(no));
-  parts.push(section(`来自此图的事实（${fs.length}）`, fs.length ? el('ul', { class: 'list' }, fs.map(f => el('li', {},
-    el('button', { class: 'linkbtn', type: 'button', onclick: () => jumpFact(f.key) }, el('i', { class: `dot c-${f.conf}` }),
-      el('span', {}, `${f.name}：${f.value}`, el('small', {}, CONF[f.conf]))))))
+  parts.push(section(`来自此图的事实（${fs.length}）`, fs.length ? el('ul', { class: 'list' }, fs.map(f => {
+    // 有冲突或人工确认过的，显示本图自己写的原文：可能和全项目取值不同
+    const own = (f.conf === 'conflict' || f.conf === 'confirmed') && f.evidence.find(e => e.active && e.sheet === no);
+    return el('li', {}, el('button', { class: 'linkbtn', type: 'button', onclick: () => jumpFact(f.key) }, el('i', { class: `dot c-${f.conf}` }),
+      el('span', {}, own ? `${f.name}：本图写“${own.text || own.value}”` : `${f.name}：${f.value}`,
+        el('small', {}, CONF[f.conf] + (own ? `，全项目取 ${f.value}` : '')))));
+  }))
     : el('p', { class: 'meta' }, s.status === 'missing' ? '缺失图纸没有可抽取的内容。' : '暂未从此图抽取事实。')));
   panel.replaceChildren(...parts);
+  ui.statePanel = panel.firstChild;
 }
 
 function renderFact(key) {
@@ -697,7 +709,27 @@ function renderFact(key) {
       el('q', {}, e.text || e.value))))));
   parts.push(el('button', { class: 'btn', type: 'button', onclick: () => showSources(key, f.sources[0]) }, `在图谱中高亮全部 ${f.sources.length} 张出处图纸`));
   panel.replaceChildren(...parts);
+  ui.statePanel = panel.firstChild;
 }
+
+/* 别的程序（外部 AI 助手、命令行）改了项目时自动刷新：定时看一眼数据库修改计数，变了再取整个状态 */
+let freshTimer = null;
+async function checkFresh() {
+  clearTimeout(freshTimer);
+  freshTimer = setTimeout(checkFresh, 15000);
+  if (!S || document.hidden) return;
+  try {
+    const v = await (await fetch('/api/state/version', { cache: 'no-store' })).json();
+    if (v.busy || !v.version || v.version === S.db_version) return;  // 后台任务跑完会自己刷新
+    const r = await fetch('/api/state' + (latest() ? '' : `?as_of=${S.as_of}`), { cache: 'no-store' });
+    if (!r.ok) return;
+    const st = await r.json();
+    if (st.project?.name !== S.project?.name) return;  // 期间切换了项目
+    setState(st, panel.firstChild !== ui.statePanel);  // 正在看问题中心、图纸或事实就重画，其他面板（收图、设置、AI 助手等）不打断
+  } catch (e) { /* 服务重启中 */ }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkFresh(); });
+window.addEventListener('focus', () => checkFresh());
 
 /* ---------- 更新 ---------- */
 let UPD = null, VER = null;
@@ -1231,6 +1263,7 @@ document.getElementById('as-of').addEventListener('change', e => { const v = Num
 
 setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');
 checkUpdate(false);
+checkFresh();
 boot().catch(() => { panel.replaceChildren(el('div', { class: 'note crit' }, '连接本地服务失败。请重新打开工作台。')); });
 })();
 </script>

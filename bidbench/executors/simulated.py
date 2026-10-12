@@ -40,6 +40,7 @@ KV_RULES = [
     ("混凝土强度等级", re.compile(r"混凝土强度等级[\s:：为]*(C\d{2})"), None),
     ("总建筑面积", re.compile(r"总建筑面积[\s:：为]*([\d.,]+)\s*(?:m2|㎡|平方米)"), "m2"),
 ]
+QUALIFIER = re.compile(r"\s*[（(][^（）()]{1,30}[）)]")  # 数值后面紧跟的限定说明，如“（含屋顶机房层）”
 FLOOR_HEIGHT = re.compile(r"(\d+F(?:\s*[~～\-]\s*\d+F)?)\s*层高\s*([\d.]+)\s*m")
 BEAM = re.compile(r"(?<![A-Za-z])(KL\d+|L\d+|WKL\d+)\s*(?:\(\d+\))?\s*(?:截面)?\s*(\d{3,4}\s*[×xX*]\s*\d{3,4})")
 WALL = re.compile(r"(?<![A-Za-z])(Q\d+)\s*墙厚\s*(\d{3})")
@@ -159,7 +160,8 @@ def recognize_page(item: dict, lines: list[dict]) -> dict:
         for name, pat, unit in KV_RULES:
             m = pat.search(t)
             if m:
-                kv(name, m.group(1), unit, m.group(0), ln["bbox"])
+                q = QUALIFIER.match(t, m.end())  # 原文带上限定说明，统计口径才看得出来
+                kv(name, m.group(1), unit, m.group(0) + (q.group(0).strip() if q else ""), ln["bbox"])
         for m in FLOOR_HEIGHT.finditer(t):
             floor = re.sub(r"\s+", "", m.group(1)).replace("～", "~").replace("-", "~")
             kv(f"{floor} 层高", m.group(2), "m", m.group(0), ln["bbox"])
