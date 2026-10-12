@@ -1,4 +1,4 @@
-from bidbench import state
+from bidbench import oplog, reports, state
 from bidbench.store import add_decision
 
 
@@ -18,6 +18,7 @@ def test_norm_no_and_rev_key():
     assert state.rev_key("0") < state.rev_key("1")
     assert state.rev_key("第2版") == state.rev_key("2")
     assert state.rev_key("草图") is None
+    assert [state._rev_scheme(r) for r in ("B", "第2版", "A1", "草图")] == ["letter", "number", "mixed", None]
 
 
 def test_batch1_missing_drawings(demo):
@@ -61,6 +62,38 @@ def test_batch4_same_revision_different_content(demo):
     assert s["建施-08"]["status"] == "changed"  # 设计变更单-012 修改了它
     assert "电施-01" in st["diff"]["new_conflicts"]
     assert st["notices"][0]["affects"] == ["建施-08"]
+
+
+def test_catalog_revisions(demo_copy):
+    assert not [i for i in state.build(demo_copy, 1)["issues"] if i["kind"] == "目录版次"]  # 第 1 批目录和图纸一致
+    st = state.build(demo_copy, 2)
+    cat = {i["id"]: i for i in st["issues"] if i["kind"] == "目录版次"}
+    assert set(cat) == {"catalog_newer:建施-00:建施-06", "catalog_behind:结施-00"}
+    newer, behind = cat["catalog_newer:建施-00:建施-06"], cat["catalog_behind:结施-00"]
+    assert newer["level"] == "crit" and newer["title"] == "建施-06 目录写 B 版，手上只有 A 版"
+    assert newer["target"] == {"sheet": "建施-06"}
+    assert behind["level"] == "warn" and "结施-01 目录 A 版、收到 B 版" in behind["detail"]
+    qa = reports.qa_report(st)
+    assert "列出 建施-06 为 B 版，但收到的是 A 版" in qa
+    assert "提供更新后的图纸目录" not in qa  # 提醒类的，列入答疑后才进答疑清单
+    assert "建施-06 目录写 B 版，手上只有 A 版" in reports.missing_report(st)
+
+    # “知道了”只管当时那几张图；第 3 批结施-04 又升 C 版，重新提示
+    ok = behind["options"][1]
+    add_decision(demo_copy, ok["kind"], ok["key"], ok["value"])
+    assert "catalog_behind:结施-00" not in {i["id"] for i in state.build(demo_copy, 2)["issues"]}
+    b3 = next(i for i in state.build(demo_copy, 3)["issues"] if i["id"] == "catalog_behind:结施-00")
+    assert "结施-04 目录 A 版、收到 C 版" in b3["detail"]
+    add_decision(demo_copy, "catalog_rev", b3["options"][0]["key"], "ask")
+    st = state.build(demo_copy, 3)
+    assert next(i for i in st["issues"] if i["id"] == "catalog_behind:结施-00")["confirmed"]
+    assert "提供更新后的图纸目录" in reports.qa_report(st)
+
+    # 目录笔误：不再提示
+    add_decision(demo_copy, "catalog_rev", "建施-06|B", "ignore")
+    assert not any(i["id"].startswith("catalog_newer:") for i in state.build(demo_copy)["issues"])
+    assert oplog.decision_text("catalog_rev", "建施-06|B", "ignore") == "建施-06 目录写 B 版：以收到的版本为准"
+    assert oplog.decision_text("catalog_rev", b3["options"][0]["key"], "ask") == "结施-00 目录版次没跟上图纸：列入答疑"
 
 
 def test_facts(demo):

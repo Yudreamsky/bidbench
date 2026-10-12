@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 from . import antivirus, appconfig, chat, debuglog, export, oplog, ops, recognition, release, state, updater
 from .store import Project, SchemaTooNew, add_decision, now_iso
 
-DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk"}
+DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev"}
 TOKEN_META = '<meta name="bidbench-token" content="">'
 PROJECT_JOBS = {"receive", "estimate", "recognize", "build", "export", "scan"}  # 记进项目操作日志的任务
 SOURCE = "工作台"

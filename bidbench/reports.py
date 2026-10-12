@@ -138,6 +138,10 @@ def missing_report(state: dict) -> str:
         lines += [f"| {s['no']} | {s['title'] or ''} | {s.get('missing_level', '')} | {'；'.join(s['notes'])} |" for s in rows]
     else:
         lines.append("目前没有发现缺图号的图纸。")
+    newer = [i for i in state["issues"] if i["id"].startswith("catalog_newer:")]
+    if newer:
+        lines += ["", "## 目录写了更新的版次，但还没收到", "", "手上的版本可能已经过时，新版图可能还没发来：", ""]
+        lines += [f"- {i['title']}：{i['detail']}" for i in newer]
     lines += floor_section(state)
     ext = [i for i in state["issues"] if i["kind"] == "解包问题"]
     if ext:
@@ -164,7 +168,7 @@ def floor_section(state: dict) -> list[str]:
 
 
 def qa_report(state: dict) -> str:
-    """答疑问题清单：高可靠的缺图、已确认要图的缺图、版本冲突、真实的事实矛盾。"""
+    """答疑问题清单：高可靠的缺图、已确认要图的缺图、版本冲突、真实的事实矛盾、目录与收图版次不符。"""
     items = []
     for s in state["sheets"]:
         if s["status"] == "missing" and (s.get("missing_level") == "高" or s.get("confirmed")):
@@ -177,6 +181,8 @@ def qa_report(state: dict) -> str:
             items.append(f"{i['title']}：{i['detail']}请明确以哪一份为准。")
         if i["kind"] == "事实冲突":
             items.append(f"{i['title']}：{i['detail']}请澄清。")
+        if i["kind"] == "目录版次" and (i["level"] == "crit" or i["confirmed"]):
+            items.append(i["qa"])
     for f in (state.get("security") or {}).get("files", []):
         if f["decision"] == "dangerous":
             items.append(f"收到的文件 {f['name']}（{f['paths'][0] if f['paths'] else ''}）{'；'.join(f['findings'])}。"

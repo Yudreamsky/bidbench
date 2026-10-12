@@ -480,7 +480,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_build)
 
     s = sub.add_parser("decide", help="记录人工决定")
-    s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk"])
+    s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev"])
     s.add_argument("key")
     s.add_argument("value")
     s.add_argument("--note")

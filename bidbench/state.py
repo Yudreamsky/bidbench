@@ -485,6 +485,9 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                              level_word=m["level"], confirmed=bool(m.get("confirmed"))))
     missing = {t: m for t, m in missing.items() if m.get("status") == "missing"}
 
+    # ---- 目录版次 ----
+    _catalog_revisions(sheet_out, current_page, decisions, issues, live)
+
     # ---- 解包问题 ----
     for i in ext_issues:
         if i["kind"] == "blocked":
@@ -550,6 +553,67 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         "recognition": {"pages": len(pages), "recognized": sum(1 for p in pages if p.rec),
                         "borrowed": sum(1 for p in pages if p.rec_borrowed), "executors": dict(executors)},
     }
+
+
+def _rev_scheme(rev: str | None) -> str | None:
+    """版次的写法：字母（A、B）、数字（0、1、第2版）、字母加数字（A1）。写法不同的版次没法比新旧。"""
+    r = re.sub(r"[版第次\s]", "", rev or "").upper()
+    return "letter" if re.fullmatch(r"[A-Z]+", r) else "number" if re.fullmatch(r"\d+", r) else (
+        "mixed" if re.fullmatch(r"[A-Z]+\d+", r) else None)
+
+
+def _catalog_revisions(sheet_out, current_page, decisions, issues, live) -> None:
+    """现行目录上写的版次，和收到的现行版次对账。
+
+    目录写的版次更新：可能还缺新版图，手上的旧版不能放心用（严重，逐张提示）。
+    目录写的版次更旧：目录没跟着图纸更新（提醒，每份目录合成一条）。
+    """
+    for cat, p in sorted(current_page.items()):
+        if p.rec["page_kind"] != "图纸目录" or cat not in live:
+            continue
+        cat_rev = sheet_out[cat]["current_rev"]
+        behind = []
+        for e in p.rec["catalog_entries"]:
+            t = norm_no(e["drawing_no"])
+            if not t or t == cat or t not in live:
+                continue  # 没收到的图在“缺图”里提示
+            listed, cur = e["revision"], sheet_out[t]["current_rev"]
+            if not _rev_scheme(listed) or _rev_scheme(listed) != _rev_scheme(cur) or rev_key(listed) == rev_key(cur):
+                continue
+            if rev_key(listed) < rev_key(cur):
+                behind.append((t, listed, cur))
+                continue
+            key = f"{t}|{listed}"
+            d = decisions.get(("catalog_rev", key))
+            if d and d["value"] == "ignore":
+                continue
+            issue = _issue("crit", "目录版次", f"catalog_newer:{cat}:{t}", f"{t} 目录写 {listed} 版，手上只有 {cur} 版",
+                           f"目录 {cat}（{cat_rev} 版）列出 {t} 为 {listed} 版，但截至目前收到的最新是 {cur} 版。"
+                           f"可能还缺 {listed} 版图纸，手上的 {cur} 版可能已经过时。",
+                           {"sheet": t},
+                           [{"label": f"列入答疑，向招标方要 {listed} 版", "kind": "catalog_rev", "key": key, "value": "ask"},
+                            {"label": f"目录笔误，以 {cur} 版为准", "kind": "catalog_rev", "key": key, "value": "ignore"}],
+                           confirmed=bool(d and d["value"] == "ask"))
+            issue["qa"] = (f"图纸目录 {cat}（{cat_rev} 版）列出 {t} 为 {listed} 版，但收到的是 {cur} 版，"
+                           f"请补发 {listed} 版，或确认以 {cur} 版为准。")
+            issues.append(issue)
+        if not behind:
+            continue
+        key = f"{cat}|{cat_rev}|" + ",".join(f"{t}:{cur}" for t, _listed, cur in behind)  # 又有图升版时重新提示
+        d = decisions.get(("catalog_rev", key))
+        if d and d["value"] == "ignore":
+            continue
+        rows = "；".join(f"{t} 目录 {listed} 版、收到 {cur} 版" for t, listed, cur in behind)
+        issue = _issue("warn", "目录版次", f"catalog_behind:{cat}", f"{cat} 目录上的版次没跟上图纸",
+                       f"目录 {cat}（{cat_rev} 版）上有 {len(behind)} 张图的版次比收到的旧：{rows}。"
+                       "以收到的最新版为准即可；需要以目录为合同依据时，请发图方更新目录。",
+                       {"sheet": cat},
+                       [{"label": "列入答疑，请发图方更新目录", "kind": "catalog_rev", "key": key, "value": "ask"},
+                        {"label": "知道了，以收到的版本为准", "kind": "catalog_rev", "key": key, "value": "ignore"}],
+                       confirmed=bool(d and d["value"] == "ask"))
+        issue["qa"] = (f"图纸目录 {cat}（{cat_rev} 版）上 " + "、".join(t for t, *_ in behind)
+                       + f" 的版次比收到的旧（{rows}），请确认以收到的最新版为准，并提供更新后的图纸目录。")
+        issues.append(issue)
 
 
 def _fact_int(facts: dict, key: str) -> tuple[int | None, str | None]:
