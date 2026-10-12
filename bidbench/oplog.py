@@ -125,6 +125,10 @@ def decision_text(kind: str, key: str, value: str) -> str:
         return f"事实「{key}」采用 {value}"
     if kind == "risk":
         return f"风险文件 [{key}] {'确认安全（误报）' if value == 'safe' else '确认有风险，列入答疑'}"
+    if kind == "catalog_rev":
+        parts = key.split("|")
+        what = f"{parts[0]} 目录写 {parts[1]} 版" if len(parts) == 2 else f"{parts[0]} 目录版次没跟上图纸"
+        return f"{what}：{'列入答疑' if value == 'ask' else '以收到的版本为准'}"
     return f"{kind} {key} = {value}"
 
 

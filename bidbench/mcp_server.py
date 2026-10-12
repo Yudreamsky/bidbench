@@ -139,12 +139,12 @@ def build_server(kit: Toolkit):
 
     @tool()
     def list_issues(level: str | None = None, kind: str | None = None) -> dict:
-        """问题清单（缺图、版本冲突、事实冲突、作废还是漏发、楼层覆盖、基线过期、解包问题等），含问题编号和可选的处理方式。level：严重、提醒、信息。"""
+        """问题清单（缺图、版本冲突、事实冲突、目录版次、作废还是漏发、楼层覆盖、基线过期、解包问题等），含问题编号和可选的处理方式。level：严重、提醒、信息。"""
         return kit.list_issues(level, kind)
 
     @tool()
     def draft_qa() -> dict:
-        """生成答疑问题清单草稿（缺图、版本冲突、事实冲突），供用户核对后提交招标方。"""
+        """生成答疑问题清单草稿（缺图、版本冲突、事实冲突、目录版次），供用户核对后提交招标方。"""
         return kit.draft_qa()
 
     @tool()

@@ -71,6 +71,8 @@ def test_token_and_host_are_checked(running, demo_copy):
         urllib.request.urlopen(req)
     assert e.value.code == 403  # 防 DNS 重绑定
     assert c.post("/api/decision", {"kind": "sheet_void", "key": "建施-05", "value": "voided"})["as_of"] == 4
+    st = c.post("/api/decision", {"kind": "catalog_rev", "key": "建施-06|B", "value": "ask"})
+    assert next(i for i in st["issues"] if i["id"] == "catalog_newer:建施-00:建施-06")["confirmed"]
 
 
 def test_launcher_open_new_and_recent(running, demo_copy, tmp_path):
