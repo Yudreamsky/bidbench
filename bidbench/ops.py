@@ -1,9 +1,11 @@
-"""日常操作：收图、识别、计算报告、导出、安全扫描。命令行和桌面工作台共用，输出通过 log 回调给人看。"""
+"""日常操作：收图、识别、智能分类、计算报告、导出、安全扫描。命令行和桌面工作台共用，输出通过 log 回调给人看。"""
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 import time
 from pathlib import Path
 from collections.abc import Callable
@@ -12,6 +14,7 @@ from . import antivirus, export, ingest, recognition, reports, risk, state
 from .store import Project
 
 Log = Callable[[str], None]
+logger = logging.getLogger(__name__)
 
 
 class OpError(Exception):
@@ -246,6 +249,103 @@ def recognize_codex(proj: Project, task: Path, tier: str = "economy", model: str
         raise
     return _finish_recognition(proj, task, r, f"用量 输入 {r.usage.input} / 输出 {r.usage.output} tokens"
                                "（ChatGPT 账号的 Codex 额度，不另外计费）", log, live)
+
+
+# ---------------- 智能分类 ----------------
+
+CLASSIFY_BY = {"codex": "Codex", "claude": "Claude", "simulated": "演示"}
+
+
+def classify(proj: Project, executor: str = "codex", model: str | None = None, redo: bool = False, log: Log = print,
+             progress=None, runner=None, client=None) -> dict:
+    """智能分类：codex、claude 让 AI 分；simulated 按规则分（演示、测试用）。runner、client 只在测试里用。"""
+    from . import classify as cls
+    from .executors import claude, codex
+    usage = claude.Usage()
+    if executor == "codex":
+        if runner is None:
+            st = codex_status()
+            if not st["ready"]:
+                raise OpError(st["hint"] or "Codex 还不能用")
+        model = model or codex.DEFAULT_MODEL
+
+        def answer(kind, items, prompt):
+            return codex.ask_json(prompt, cls.SCHEMAS[kind], model, cls.EFFORT, runner=runner, usage=usage,
+                                  resume="再分一次，已分好的不用重分")
+    elif executor == "claude":
+        if client is None:
+            if not has_claude_credentials():
+                raise OpError("还没有设置 Claude API 密钥，请先到“设置”里填写")
+            import anthropic
+            client = anthropic.Anthropic(max_retries=4)
+        model = model or cls.CLAUDE_MODEL
+
+        def answer(kind, items, prompt):
+            return claude.ask_json(client, prompt, cls.SCHEMAS[kind], cls.SYSTEM, model, cls.EFFORT, usage=usage)
+    elif executor == "simulated":
+        model = None
+
+        def answer(kind, items, prompt):
+            return cls.rule_body(kind, items)
+    else:
+        raise OpError("未知的分类方式")
+    who = "按规则演示，不调用 AI" if executor == "simulated" else f"用 {CLASSIFY_BY[executor]}（{model}）"
+    log(f"智能分类：{who}，{'全部重新分' if redo else '只分还没分过的'}。")
+    try:
+        r = cls.run(proj, answer, executor, model, redo, log, progress)
+    except claude.FatalError as e:
+        raise OpError(f"智能分类停下了：{e}") from e
+    finally:
+        if usage.input or usage.output:
+            cost = usage.cost(model) if executor == "claude" else None
+            log(f"用量：输入 {usage.input} / 输出 {usage.output} tokens"
+                + (f"，约 ${cost:.4f}" if cost is not None else "（ChatGPT 账号的 Codex 额度，不另外计费）" if executor == "codex" else ""))
+    return r
+
+
+CLASSIFY_EVERY = 200  # 识别途中每导入这么多页，在后台给新出现的图纸和事实分一次类
+
+
+class ClassifyAlong:
+    """边识别边分类：当作 on_import 回调交给识别。途中每导入 CLASSIFY_EVERY 页，在后台给新出现的图纸和事实分一次类
+    （上一次分完才开始下一次）；识别完再分一次。只在用 Codex、Claude 识别时分；分不成不影响识别结果。"""
+
+    def __init__(self, proj: Project, executor: str, model: str | None = None, log: Log = print, progress=None):
+        self.proj, self.executor, self.log, self.progress = proj, executor, log, progress
+        self.model = model if executor == "codex" else None  # Claude 识别选的模型不一定适合分类，用分类的默认模型
+        self.on = executor in ("codex", "claude")
+        self.thread: threading.Thread | None = None
+        self.last = 0
+
+    def __call__(self, imported: int) -> None:
+        if not self.on or imported - self.last < CLASSIFY_EVERY or (self.thread and self.thread.is_alive()):
+            return
+        self.last = imported
+        self.thread = threading.Thread(target=self._quietly, daemon=True, name="classify-along")
+        self.thread.start()
+
+    def _quietly(self) -> None:
+        try:
+            r = classify(self.proj, self.executor, self.model, log=lambda s: None)
+        except Exception as e:  # noqa: BLE001 - 途中分不成没关系，识别完还会再分一次
+            logger.info("边识别边分类没有完成：%s", type(e).__name__)
+            return
+        if r["sheets"] or r["facts"]:
+            self.log(f"  · 边识别边分类：分好 {r['sheets']} 张图、{r['facts']} 类事实，左边跟着更新")
+
+    def wait(self) -> None:
+        if self.thread:
+            self.thread.join()
+
+    def finish(self) -> None:
+        """识别完：等后台那次分完，再把剩下的分完。"""
+        self.wait()
+        if not self.on:
+            return
+        try:
+            classify(self.proj, self.executor, self.model, log=self.log, progress=self.progress)
+        except OpError as e:
+            self.log(f"智能分类没有完成：{e}。稍后可以再点“智能分类”（命令行：bidbench classify）。")
 
 
 def codex_status(refresh: bool = False) -> dict:

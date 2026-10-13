@@ -308,7 +308,8 @@ def _schema_rejected(e: Exception) -> bool:
     return type(e).__name__ == "BadRequestError" and any(w in msg for w in ("schema", "output_config", "format"))
 
 
-def _request(client, model: str, effort: str, messages: list, schema: dict, mode: _Mode | None = None):
+def _request(client, model: str, effort: str, messages: list, schema: dict, mode: _Mode | None = None,
+             system: str = SYSTEM_PROMPT):
     mode = mode or _Mode()
     while True:
         structured = mode.structured
@@ -324,7 +325,7 @@ def _request(client, model: str, effort: str, messages: list, schema: dict, mode
         params = dict(
             model=model,
             max_tokens=MAX_TOKENS,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=msgs,
             output_config=output_config,
         )
@@ -356,6 +357,31 @@ def _parse_json(raw: str) -> dict:
 
 def _text_of(msg) -> str:
     return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+
+
+def ask_json(client, prompt: str, schema: dict, system: str, model: str, effort: str = "medium", usage=None) -> dict:
+    """不带图片问一次 Claude，按给定格式输出 JSON（智能分类用）。凭据、权限这类整次都会失败的错误抛 FatalError。"""
+    try:
+        msg = _request(client, model, effort, [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                       _api_compatible(schema), system=system)
+    except Exception as e:  # noqa: BLE001 - 凭据、权限问题整次停下，其余只算这一批失败
+        fatal = _fatal(e)
+        if fatal:
+            raise FatalError(fatal) from e
+        raise RecognitionError(f"Claude API 出错：{type(e).__name__}: {e}", type(e).__name__) from e
+    if usage is not None:
+        usage.add(msg.usage)
+    if msg.stop_reason == "refusal":
+        raise RecognitionError("模型拒绝回答", "拒绝")
+    if msg.stop_reason == "max_tokens":
+        raise RecognitionError("输出超过长度上限", "输出超长")
+    try:
+        body = _parse_json(_text_of(msg))
+    except json.JSONDecodeError as e:
+        raise RecognitionError(f"模型输出不是合法 JSON：{e}", "输出不是合法 JSON") from e
+    if not isinstance(body, dict):
+        raise RecognitionError("模型输出不是 JSON 对象", "输出不是合法 JSON")
+    return body
 
 
 def recognize_page(client, task_dir: Path, item: dict, model: str, effort: str, tiles: int,

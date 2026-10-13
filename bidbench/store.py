@@ -4,7 +4,7 @@
 
     <项目>/
       bidbench.json         项目信息
-      bidbench.sqlite       原始登记数据 + 人工决定（派生结果每次重新计算）
+      bidbench.sqlite       原始登记数据 + 人工决定 + AI 的识别结果和智能分类（派生结果每次重新计算）
       archives/             收到的压缩包原件（只读副本）
       blobs/                解出的全部文件，按 SHA-256 内容寻址存放，天然去重
       recognition/tasks/    识别任务包
@@ -133,6 +133,15 @@ CREATE TABLE IF NOT EXISTS baselines(
   as_of_batch INTEGER NOT NULL,
   snapshot TEXT NOT NULL,
   note TEXT
+);
+CREATE TABLE IF NOT EXISTS classifications(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  executor TEXT NOT NULL,
+  model TEXT,
+  created_at TEXT NOT NULL
 );
 """
 

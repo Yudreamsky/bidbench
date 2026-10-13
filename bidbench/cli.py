@@ -73,16 +73,29 @@ def cmd_recognize(args):
         print("只做了估算（--dry-run），没有开始识别。去掉 --dry-run 正式运行，或用 --task 指定这个任务包。")
         return est
     again = f"bidbench recognize --executor {args.executor} --task {task}"
+    along = ops.ClassifyAlong(proj, args.executor, args.model)  # 边识别边分类，识别完再分一次
     try:  # 每识别完一页输出一行（识别过程日志）
         if args.executor == "codex":
-            r = ops.recognize_codex(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers)
+            r = ops.recognize_codex(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers,
+                                    on_import=along)
         else:
-            r = ops.recognize_claude(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers or 4)
+            r = ops.recognize_claude(proj, task, args.tier, args.model, args.effort, args.tiles, args.workers or 4,
+                                     on_import=along)
     except ops.OpError as e:
+        along.wait()
         sys.exit(f"错误：{e}：{again}")
     if r["failed"]:
         print(f"失败的页面可以重跑：{again}")
+    along.finish()
     return r
+
+
+def cmd_classify(args):
+    proj = _proj(args)
+    try:
+        return ops.classify(proj, args.executor, args.model, args.all)
+    except ops.OpError as e:
+        sys.exit(f"错误：{e}")
 
 
 def cmd_import(args):
@@ -349,6 +362,8 @@ def _op(args) -> tuple[str, str, str] | None:
         if args.dry_run:
             return "estimate", f"{oplog.TITLES['estimate']}（{who} {tier}）", args.project
         return "recognize", f"{oplog.TITLES[args.executor]}（{tier}）", args.project
+    if c == "classify":
+        return "classify", f"{oplog.TITLES['classify']}（{ops.CLASSIFY_BY[args.executor]}{'，全部重新分' if args.all else ''}）", args.project
     if c == "build":
         return "build", oplog.TITLES["build"] + (f"（截至批次 #{args.as_of}）" if args.as_of else ""), args.project
     if c == "export":
@@ -470,6 +485,13 @@ def main(argv=None):
     s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
     s.add_argument("--dry-run", action="store_true", help="只生成任务包并估算花费，不调用 API")
     s.set_defaults(fn=cmd_recognize)
+
+    s = sub.add_parser("classify", help="智能分类：让 AI 给图纸分专业、分小类、起中文简称，给事实分多级目录")
+    s.add_argument("--executor", default="codex", choices=["codex", "claude", "simulated"],
+                   help="codex=本机的 Codex（ChatGPT 账号的额度）；claude=Anthropic API，按量付费；simulated=按规则分（演示）")
+    s.add_argument("--model", help="换模型（Claude 默认 claude-sonnet-5-5，Codex 默认 gpt-6.1-sol）")
+    s.add_argument("--all", action="store_true", help="全部重新分；默认只分还没分过的")
+    s.set_defaults(fn=cmd_classify)
 
     s = sub.add_parser("import", help="校验并导入识别结果")
     s.add_argument("results")
