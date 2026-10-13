@@ -55,6 +55,7 @@ TOOL_LABEL = {
     "list_baselines": "建模基线", "estimate_recognition": "识别估算", "list_notes": "项目笔记", "list_proposals": "提议清单",
     "propose_issue_resolution": "提议处理问题", "propose_fact_confirmation": "提议确认事实", "propose_baseline": "提议锁定基线",
     "propose_note": "提议记笔记", "propose_improvement": "提改进建议",
+    "numbering_overview": "图号汇总", "propose_numbering": "提议图号格式",
 }
 
 

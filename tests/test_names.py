@@ -34,6 +34,8 @@ def bare_pdf(*lines, pages=1):
     ("PRJ1-STR-ZZ-B1-DR-S-2001 Basement 01 Slab Layout Rev C02", "PRJ1-STR-ZZ-B1-DR-S-2001", "C02", None, "Basement 01 Slab Layout"),
     ("PRJ1-ARC-ZZ-B2-DR-A-1003 Level B2 GA Plan", "PRJ1-ARC-ZZ-B2-DR-A-1003", None, None, "Level B2 GA Plan"),  # B2 是楼层，不是版次
     ("PRJ1-ARC-ZZ-ZZ-DR-A-5001 Section A1", "PRJ1-ARC-ZZ-ZZ-DR-A-5001", None, None, "Section A1"),
+    # 图号和图名之间只用了“-”：GROUND 是图名的头一个词，不能丢
+    ("PRJ1-ORG-T1-ST-DWG-GF-2302-GROUND FLOOR GA PLAN", "PRJ1-ORG-T1-ST-DWG-GF-2302", None, None, "GROUND FLOOR GA PLAN"),
     ("建施-01 建筑设计总说明", "建施-01", None, None, "建筑设计总说明"),
     ("结施03 二层梁配筋图", "结施-03", None, None, "二层梁配筋图"),
     ("A-101 First Floor Plan Rev B", "A-101", "B", None, "First Floor Plan"),

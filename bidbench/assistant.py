@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from . import appconfig, recognition, reports, state
+from . import appconfig, classify, numbering, recognition, reports, state
 from .recognition import page_markdown
 from .state import CONF_LABEL, STATUS_LABEL
 from .store import Project, add_decision, now_iso
@@ -301,6 +301,19 @@ class Toolkit:
                 "note": f"按 priority_order 从上到下识别（先目录、说明、平面，详图大样放最后）；在工作台“识别”里估算后可以只勾前几档。"
                         f"识别会把图纸页面发送到 {where}；请让用户自己决定是否开始。"}
 
+    def numbering_overview(self) -> dict:
+        st = self._state()
+        items = state.numbering_items(self.proj)
+        nb = st.get("numbering") or {}
+        cur = {k: nb[k] for k in ("status", "source", "text", "format", "coverage") if nb.get(k) is not None}
+        return {**numbering.overview(items), "folders": numbering.folder_summary(items),
+                "catalog_pages": numbering.catalog_pages(items), "current": cur or "还没有图号格式",
+                "roles": numbering.ROLES, "disciplines": classify.DISCIPLINES, "type_kinds": numbering.TYPE_KINDS,
+                "how_to": "每组是段数相同的图号：position 是第几段，values 里是这一段出现过的代码、文件数、例图名、一个页面编号。"
+                          "看不懂的代码按这个顺序找：先看例图名；再用 get_page(page_id, include_text_layer=true) 看 catalog_pages "
+                          "里的目录页和这个代码的例图的文字；还不懂，把要看图识别的页面编号写进 look_pages（不要自己开始识别）；"
+                          "都找不到就写进 unsure。最后用 propose_numbering 提议，why 里写清每个代码是从哪看出来的。"}
+
     def list_notes(self) -> list[dict]:
         with self.proj.connect() as con:
             return [dict(r) for r in con.execute("SELECT id, topic, text, source, created_at FROM notes ORDER BY id")]
@@ -370,6 +383,19 @@ class Toolkit:
             raise ToolError("请写清楚遇到了什么问题（problem）。")
         return self._propose("improvement", {"title": title.strip(), "suggestion": suggestion.strip()}, problem)
 
+    def propose_numbering(self, format: dict, reason: str) -> dict:  # noqa: A002 - 参数名就是 AI 看到的名字
+        try:
+            fmt = numbering.validate(format)
+        except numbering.FormatError as e:
+            raise ToolError(str(e)) from None
+        nb = numbering.Numbering(fmt, "proposed")
+        cov = nb.coverage(state.numbering_items(self.proj))
+        if not cov["matched"]:
+            raise ToolError("这个格式一个文件的图号都套不上，请对照 numbering_overview 的分组再看看。")
+        return {**self._propose("numbering", {"format": fmt, "text": numbering.describe(fmt),
+                                              "coverage": {k: cov[k] for k in ("total", "matched", "unmatched")}}, reason),
+                "coverage": cov}
+
     def propose_note(self, topic: str, text: str, reason: str) -> dict:
         if not topic or not text:
             raise ToolError("笔记需要主题和内容。")
@@ -402,6 +428,10 @@ class Toolkit:
             elif r["kind"] == "improvement":
                 add_suggestion(p["title"], r["reason"], p["suggestion"])
                 outcome = f"已记入改进建议清单「{p['title']}」，开发时处理"
+            elif r["kind"] == "numbering":
+                value = numbering.decision_value(json.dumps(p["format"], ensure_ascii=False))
+                add_decision(self.proj, "numbering", "*", value, r["reason"], actor=CONFIRMED_ACTOR)
+                outcome = f"已确认图号格式：{p['text']}"
             elif r["kind"] == "note":
                 with self.proj.connect() as con:
                     con.execute("INSERT INTO notes(topic, text, source, created_at) VALUES (?,?,?,?)",
@@ -438,6 +468,9 @@ def _summary(kind: str, p: dict) -> str:
         return f"项目笔记「{p['topic']}」：{p['text']}"
     if kind == "improvement":
         return f"改进建议「{p['title']}」：{p['suggestion']}"
+    if kind == "numbering":
+        c = p.get("coverage") or {}
+        return f"图号格式：{p['text']}（套得上 {c.get('matched', '?')}/{c.get('total', '?')} 个文件）"
     return kind
 
 

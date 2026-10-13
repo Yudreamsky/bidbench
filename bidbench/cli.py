@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import debuglog, oplog, ops, recognition, state
+from . import debuglog, numbering, oplog, ops, recognition, state
 from .store import Project, add_decision, now_iso
 
 SOURCE = "命令行"
@@ -117,6 +117,12 @@ def cmd_build(args):
 
 def cmd_decide(args):
     proj = _proj(args)
+    if args.kind == "numbering":  # 值是 off（先不用）或一份图号格式的 JSON
+        try:
+            args.value = numbering.decision_value(args.value)
+        except numbering.FormatError as e:
+            print(f"图号格式不对：{e}")
+            return 1
     add_decision(proj, args.kind, args.key, args.value, args.note)
     print(f"已记录决定：{args.kind} {args.key} = {args.value}")
 
@@ -506,7 +512,7 @@ def main(argv=None):
 
     s = sub.add_parser("decide", help="记录人工决定")
     s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev",
-                                    "name_check", "file_tower", "tower_alias", "rev_check", "floor_base"])
+                                    "name_check", "file_tower", "tower_alias", "rev_check", "floor_base", "numbering"])
     s.add_argument("key")
     s.add_argument("value")
     s.add_argument("--note")
