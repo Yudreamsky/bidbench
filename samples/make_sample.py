@@ -14,7 +14,8 @@
 - 批次5 文件夹（build_folder）：补发建施-09、建施-12；文件夹里直接放的“电气.zip”（外层包，不算内层）
   里面再套一个压缩包（内层）；夹着系统缩略图缓存 Thumbs.db 和 Office 临时锁文件 ~$*.docx（不该收）
 
-另有单独的一批 build_towers：两栋塔楼各一套编号相同的图（测试“塔楼 + 图号”的图纸身份，不在演示流水线里）。
+另有单独的两批，不在演示流水线里：build_towers 两栋塔楼各一套编号相同的图（测试“塔楼 + 图号”的图纸身份）；
+build_numbering 英文图号写成“项目-单位-楼栋-专业-类型-楼层-流水号”、有的后面再跟版次的一批（测试图号格式）。
 
 用法：python samples/make_sample.py <输出目录>
 """
@@ -317,6 +318,51 @@ def build_towers(out: Path) -> tuple[Path, str]:
         "公共/建施-90 总平面图.pdf": pdf("建施-90", "总平面图"),
         "建施-02 二层平面图（补）.pdf": pdf("建施-02", "二层平面图", variant=2),
     }
+    for rel, data in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return root, "2026-09-01"
+
+
+NUMBERING_NAME = "英文编号首批"
+
+
+def build_numbering(out: Path) -> tuple[Path, str]:
+    """英文图号写成“项目-单位-楼栋-专业-类型-楼层-流水号”（PRJ1-ORG-T1-AR-DWG-GF-1001），有的文件名后面再跟版次（-00）。
+
+    用来检查图号格式（docs/图纸字段.md 9.5）：软件按文件名猜出各段（楼栋、专业、类型、楼层、可有可无的版次）；
+    确认之前只用来分组显示；确认之后按楼栋段分楼、专业段认专业（SE 要人说是安防）、楼层段换算楼层，
+    同一张图带不带“-00”的两份文件并成一张，前导零保留（0001 不变成 01）；分包单位另一种写法的图号套不上，单列出来。
+    文件都放在不说明专业的 Drawings 文件夹里，专业只能从图号看出来。"""
+    root = out / NUMBERING_NAME
+    h = [("00", "2026-09-01", "ISSUED FOR TENDER")]
+
+    def pdf(no, title, variant=0):
+        return sheet_pdf(no, title, "00", "2026-09-01", [], h, variant=variant)
+    files = {}
+    levels = (("GF", "GROUND FLOOR"), ("01", "LEVEL 01"), ("LR", "LOWER ROOF"))
+    disciplines = (("AR", "GA PLAN"), ("ST", "SLAB LAYOUT"), ("EL", "LIGHTING LAYOUT"), ("FP", "SPRINKLER LAYOUT"),
+                   ("SE", "SECURITY LAYOUT"))
+    for b in ("T1", "T2"):
+        for k, (d, what) in enumerate(disciplines):
+            for j, (lv, name) in enumerate(levels):
+                no = f"PRJ1-ORG-{b}-{d}-DWG-{lv}-{1001 + 100 * k + j:04d}"
+                rev = "-00" if (k + j) % 2 else ""  # 有的文件名在图号后面带版次
+                files[f"Drawings/{no}{rev} - {name} {what}.pdf"] = pdf(no, f"{name} {what}")
+    files.update({
+        # 同一张图的另一份文件：文件名带版次后缀，内容略有不同（另一个出图包）
+        "Drawings/IFC/PRJ1-ORG-T1-AR-DWG-GF-1001-00 - GROUND FLOOR GA PLAN.pdf":
+            pdf("PRJ1-ORG-T1-AR-DWG-GF-1001", "GROUND FLOOR GA PLAN", 1),
+        "Drawings/PRJ1-ORG-XX-AR-DWG-XX-0001 - DRAWING LIST.pdf": pdf("PRJ1-ORG-XX-AR-DWG-XX-0001", "DRAWING LIST"),
+        "Drawings/PRJ1-ORG-T2-EL-DWG-01-1901 - SMALL POWER LAYOUT.pdf": pdf("PRJ1-ORG-T2-EL-DWG-01-1901", "SMALL POWER LAYOUT"),
+        "Drawings/PRJ1-ORG-T1-AR-DET-XX-5001-00 - TYPICAL WALL DETAILS.pdf":
+            pdf("PRJ1-ORG-T1-AR-DET-XX-5001", "TYPICAL WALL DETAILS"),
+        "Drawings/PRJ1-ORG-T2-ST-SCH-XX-0002 - COLUMN SCHEDULE.pdf": pdf("PRJ1-ORG-T2-ST-SCH-XX-0002", "COLUMN SCHEDULE"),
+        "Drawings/PRJ1-ORG-XX-EL-SPEC-XX-0003 - ELECTRICAL SPECIFICATION.pdf":
+            pdf("PRJ1-ORG-XX-EL-SPEC-XX-0003", "ELECTRICAL SPECIFICATION"),
+        "Drawings/SUB-ZZ-GEN-XX-1009-01 - GENERAL PILING LAYOUT.pdf": pdf("SUB-ZZ-GEN-XX-1009-01", "GENERAL PILING LAYOUT"),
+    })
     for rel, data in files.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,7 @@
 - 图纸的各项（图号、图名、版次、日期、专业、楼层、内容……）在派生状态里统一放在每张图的 `fields`：每项 `{value, raw, src, conf, where}`，用 `state.fld()` 生成；把握只用 confirmed/high/mid/low，识别给的分数用 `state.conf_of()` 换算。
 - 图纸身份是“塔楼 + 图号”（`state.Keys`；塔楼在 `bidbench/towers.py` 里认）：一栋楼的项目就是图号，多栋楼的项目写成“T1 · 建施-01”（`state.SEP`）。按图号认专业、拆编号先用 `state.bare()` 去掉塔楼；引用、目录里的图号用 `keys.resolve()` 按所在的楼找；人工决定先按身份找、再按光图号找（`state._dec`），加塔楼以前的决定原样有效。
 - 现行版（`state.py` 的版本链，`_rev_newer`、`_page_date`）：先比版次，版次一样、写法不同或没写再比日期（修改记录里这一版的日期优先，同版次再比图签日期），收图先后不算；拿不准的生成“版本冲突”问题，定了的只提醒。规则改动先改 `docs/图纸字段.md` 9.2。
+- 图号格式（docs/图纸字段.md 9.5）：`bidbench/numbering.py` 汇总文件名里的图号、软件先猜、检查 AI 提议的格式；人工决定 numbering（键 *，值是格式 JSON 或 off）确认后，`state.py` 通过 `_NUMBERING` 按它定楼栋、去掉版次后缀、认专业楼层；没确认的只用来分组显示。旧写法的决定由 `state._legacy` 带过来。
 - 楼层：`floors.parse_floors` 换算第几层，`floors.floor_names` 留原叫法（`state._set_floors` 写成 floors_name，如“Level 05（6F）”）；英文楼层数法由 `state._floor_bases` 决定（软件猜 + 人工决定 floor_base，键是 * 或塔楼）。
 - 识别结果的格式以 `bidbench/spec/schema.json` 为准；改格式要同步改 `spec/任务说明.md`、模拟执行器和测试。
 - 拿不准的判断（版本、作废、冲突）不要自动拍板，生成问题并给出决定选项。

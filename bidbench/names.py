@@ -19,6 +19,9 @@ ROLE2 = {"AR": "建筑", "ST": "结构", "SE": "结构", "ME": "暖通", "MV": "
          "FA": "幕墙", "FC": "幕墙", "CW": "幕墙", "CE": "总图", "CV": "总图"}
 # 发起方代码、文件夹名里的专业词
 WORDS = [
+    (re.compile(r"消防|fire\s*(?:alarm|protection|fighting|suppression|sprinkler)", re.I), "消防"),
+    (re.compile(r"智能化|\bICT\b|\bELV\b|\bBMS\b|\bAV\b|audio\s*visual|security|cctv", re.I), "智能化"),
+    (re.compile(r"岩土|勘察|geotech", re.I), "岩土"),
     (re.compile(r"幕墙|facade|façade|curtain\s*wall|envelope|cladding", re.I), "幕墙"),
     (re.compile(r"景观|landscap", re.I), "景观"),
     (re.compile(r"室内|装修|interior", re.I), "室内"),
@@ -86,19 +89,22 @@ def parse_name(stem: str) -> dict:
     m = ISO_NO.search(s.upper())
     if m:
         parts = m.group(1).upper().split("-")
+        orig, words = s[m.start():m.end()].split("-"), []  # orig：原样的大小写
         while parts and not re.fullmatch(r"\d{2,6}[A-Z]?", parts[-1]):  # 后面连着写的版次、状态码：-P01-S4
             tail = parts.pop()
             if STATUS.match(tail):
                 out["status"] = out["status"] or tail
             elif REV.match(tail):
                 out["rev"] = out["rev"] or tail
+            else:  # 图号和图名之间只用了“-”：这是图名的头一个词（…-2302-GROUND FLOOR PLAN）
+                words.insert(0, orig[len(parts)])
         no = "-".join(parts)
         if iso_parts(no):
             out["no"], out["kind"] = no, "iso"
         elif len(parts) >= 4 and re.search(r"\d", parts[-1]):
             out["no"], out["kind"] = no, "code"
         if out["no"]:
-            title = s[:m.start()] + " " + s[m.end():]
+            title = s[:m.start()] + " " + " ".join(words) + " " + s[m.end():]
     if not out["no"]:
         m = CN_NO.match(s) or SIMPLE_NO.match(s.upper())
         if m:
@@ -187,7 +193,8 @@ KINDS = [
 ]
 PLAN_THINGS = {"建筑": "房间布置、轴网、门窗、尺寸", "结构": "构件布置、截面、标高", "暖通": "风管、风口、设备布置",
                "给排水": "管道、管径、设备布置", "电气": "灯具、插座、桥架布置", "机电": "管线和设备布置",
-               "景观": "铺装、绿化、标高", "室内": "装修布置、材料", "总图": "场地布置、道路、管线"}
+               "景观": "铺装、绿化、标高", "室内": "装修布置、材料", "总图": "场地布置、道路、管线",
+               "消防": "喷头、消火栓、报警设备布置", "智能化": "弱电点位、桥架、设备布置", "岩土": "地层、桩位、基坑支护"}
 
 
 def kind_of(title: str | None, discipline: str | None = None) -> tuple[str | None, str | None]:

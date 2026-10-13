@@ -196,6 +196,13 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
 .issue .go:hover { color: var(--accent); }
 .issue small { color: var(--muted); display: block; font-size: 12px; }
 .opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.nsegs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.nseg { display: flex; flex-direction: column; align-items: center; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; background: var(--surface); }
+.nseg b { font-family: var(--font-mono); font-weight: 400; font-size: 11.5px; color: var(--muted); }
+.nseg.opt { border-style: dashed; }
+.qmark { display: inline-block; margin-left: 2px; padding: 0 5px; border-radius: 4px; background: var(--warn-tint); color: var(--warn); font-size: 11px; }
+.nbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 4px 0 2px; }
+.nbar i { display: block; height: 100%; background: var(--accent); }
 .linkbtn { font: inherit; text-align: left; width: 100%; display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--band); color: var(--ink); cursor: pointer; }
 .linkbtn:hover { border-color: var(--accent); }
 .linkbtn .dot { margin-top: 6px; }
@@ -351,7 +358,7 @@ const STATUS = { current: '现行', new: '本批新增', updated: '本批升版'
 const CONFW = { confirmed: '已确认', high: '高', mid: '中', low: '低' };
 const NAMELESS = '文件：';  // 文件名里看不出图号的文件，先用文件名代替图号
 const CONF = { confirmed: '人工确认', high: '高置信', mid: '中置信', low: '低置信', conflict: '冲突' };
-const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '机电', '总图', '景观', '幕墙', '室内', '其他'];
+const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '消防', '智能化', '机电', '总图', '岩土', '景观', '幕墙', '室内', '其他'];
 
 let S = null, APP = null;
 const TOKEN = document.querySelector('meta[name="bidbench-token"]').content;
@@ -423,6 +430,7 @@ function proposalSummary(p) {
   if (p.kind === 'baseline') return `锁定基线「${d.name}」（${d.sheets ? d.sheets.join('、') : '全部现行图纸'}）`;
   if (p.kind === 'note') return `项目笔记「${d.topic}」：${d.text}`;
   if (p.kind === 'improvement') return `改进建议「${d.title}」：${d.suggestion}`;
+  if (p.kind === 'numbering') return `图号格式：${d.text}（套得上 ${(d.coverage || {}).matched ?? '?'}/${(d.coverage || {}).total ?? '?'} 个文件）`;
   return p.kind;
 }
 async function decide(opt) {
@@ -909,7 +917,8 @@ function paintGraph(keepEdges) {
 const netCanvas = document.getElementById('net');
 const net = { on: false, colorBy: 'type', nodes: [], byNo: {}, links: [], anchor: {}, groups: [], pos: {},
   k: 1, tx: 0, ty: 0, alpha: 0, raf: 0, hover: null, drag: null, userView: false };
-const TYPE_ORDER = ['目录说明', '平面图', '配筋图', '立面剖面', '详图大样', '系统图', '表格', '其他'];
+const TYPE_ORDER = ['目录说明', '平面图', '配筋图', '立面剖面', '详图大样', '系统图', '表格', '规格书', '计算书', '报告', '模型', '其他'];
+const DOC_KINDS = new Set(['规格书', '计算书', '报告', '模型']);  // 图号里的类型代码说是这些的，不是图纸
 const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948', '#b07aa1', '#9c755f', '#ff9da7', '#bab0ac'];
 function sheetType(s) {  // 图类：中文、英文图名都认
   const t = s.title || '';
@@ -922,7 +931,11 @@ function sheetType(s) {  // 图类：中文、英文图名都认
   if (/平面|布置|\bplans?\b|layout|\bga\b|general arrangement|setting out/i.test(t)) return '平面图';
   return '其他';
 }
-function sheetGroup(s) { return (s.cls && s.cls.group) || sheetType(s); }  // 小框：智能分类给的小类，没分类时按图名认图类
+function sheetGroup(s) {  // 小框：智能分类给的小类；没分类时按图名认图类，图号里的类型代码说是规格书、计算书的照它，图名认不出的也用它
+  if (s.cls && s.cls.group) return s.cls.group;
+  const t = sheetType(s);
+  return DOC_KINDS.has(s.type_kind) ? s.type_kind : t !== '其他' ? t : (s.type_kind || t);
+}
 function groupOrder(items) {  // 小框的先后：按图名认的图类按固定顺序；智能分类的按图号顺序里第一次出现的先后；“其他”放最后
   const first = new Map();
   items.forEach((s, i) => { const t = sheetGroup(s); if (!first.has(t)) first.set(t, i); });
@@ -1411,6 +1424,88 @@ function goTarget(t) {
   }
 }
 
+/* 图号格式（docs/图纸字段.md 9.5）：软件猜的、AI 助手提议的，请你确认；确认后按它分楼栋、认专业和楼层 */
+const ROLE_CN = { project: '项目', originator: '单位', building: '楼栋', zone: '区域', discipline: '专业', type: '类型',
+  level: '楼层', number: '流水号', rev: '版次', status: '状态码', other: '其他' };
+const CODE_CN = { building: '楼栋', discipline: '专业', type: '类型', level: '楼层' };
+const ASK_FMT = '请认一下这个项目的图号格式：每一段是什么、各个代码什么意思。看不懂的代码先看例图名，再看目录页和例图的文字；'
+  + '还不懂就列出要看图识别的页。最后用 propose_numbering 提议，并告诉我哪些代码拿不准。';
+function fmtSegs(fmt) {  // 每种写法一行：段的名称，上面是例子里这一段的值
+  return (fmt.formats || []).map(f => {
+    const ex = (f.example || '').split('-');
+    return el('div', { class: 'nsegs' }, f.segments.map((s, i) => {
+      const opt = s.endsWith('?');
+      return el('span', { class: 'nseg' + (opt ? ' opt' : '') }, el('b', {}, ex[i] || '…'), ROLE_CN[s.replace('?', '')] + (opt ? '（可无）' : ''));
+    }));
+  });
+}
+function fmtCodes(codes, fmt) {  // 码表：各类代码和意思；没写意思的打“？”，鼠标指着代码看依据
+  const why = (fmt && fmt.why) || {};
+  return el('dl', { class: 'kv', style: 'margin-top:6px' }, Object.keys(CODE_CN).filter(r => (codes[r] || []).length).flatMap(r => [
+    el('dt', {}, CODE_CN[r]),
+    el('dd', {}, codes[r].flatMap((c, i) => {
+      const w = why[`${r}.${c.code}`];
+      const mean = c.meaning == null ? el('span', { class: 'qmark' }, '？')
+        : r === 'building' && c.meaning === c.code ? null : ` ${c.meaning || '不算楼栋'}`;
+      return [i ? '　' : '', el('span', { class: 'mono', title: (w ? `依据：${w}；` : '') + `${c.files} 个文件` }, c.code), mean];
+    }))]));
+}
+function fmtCoverage(cov) {
+  const pct = cov.total ? Math.round(cov.matched / cov.total * 100) : 0;
+  return el('div', { style: 'margin-top:4px' },
+    el('p', { class: 'meta' }, `套得上 ${cov.matched} / ${cov.total} 个文件`),
+    el('div', { class: 'nbar' }, el('i', { style: `width:${pct}%` })),
+    cov.unmatched ? el('details', {}, el('summary', {}, `套不上的 ${cov.unmatched} 个`),
+      el('p', { class: 'meta mono' }, cov.unmatched_examples.join('、') + (cov.unmatched > cov.unmatched_examples.length ? '……' : ''))) : null);
+}
+async function askAssistant(q, send) {  // 打开 AI 助手面板，问题先填好；send：直接发出去，否则等你补充
+  chatDraft = q;
+  await renderAssistant();
+  const btn = document.getElementById('chat-send'), input = document.getElementById('chat-input');
+  if (send && btn && !btn.disabled && CHAT && CHAT.codex && CHAT.codex.ready) btn.click();
+  else if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+function numberingCard() {  // 还没确认的格式，或确认后 AI 助手又提议了一份
+  const nb = S.numbering;
+  if (!nb || !latest() || !nb.status || nb.status === 'off') return null;
+  const upd = nb.status === 'confirmed' && nb.proposal && nb.proposal.format ? nb.proposal : null;
+  if (nb.status === 'confirmed' && !upd) return null;  // 确认了的在下面“图号格式”一节
+  const view = upd || nb, fmt = view.format, pid = nb.proposal && nb.proposal.id;
+  const tag = upd ? `AI 助手提议更新（#${pid}）` : nb.status === 'proposed' ? `AI 助手提议（#${pid}）` : '软件按文件名猜的';
+  const look = fmt.look_pages || [];
+  const btn = (text, fn, primary) => el('button', { class: 'btn' + (primary ? ' primary' : ''), type: 'button', onclick: fn }, text);
+  const btns = nb.status === 'guess' ? [
+    btn('让 AI 助手认', () => askAssistant(ASK_FMT, true), true),
+    btn('按这个格式确认', () => decide({ kind: 'numbering', key: '*', value: JSON.stringify(fmt), label: '按软件猜的图号格式确认' }))]
+    : [btn('确认', () => actProposal(pid, 'confirm'), true), btn('驳回', () => actProposal(pid, 'reject')),
+      btn('在 AI 助手里修改', () => askAssistant(`图号格式提议 #${pid}：`, false)),
+      look.length ? btn(`看图识别这 ${look.length} 页`, () => renderRecognizePick(`认图号格式要看的 ${look.length} 页`, look)) : null];
+  if (!upd) btns.push(btn('先不用', () => decide({ kind: 'numbering', key: '*', value: 'off', label: '图号格式先不用' })));
+  return el('div', { class: 'note' + (upd ? '' : ' warn') },
+    el('div', {}, el('b', {}, '图号格式'), ' ', el('span', { class: 'pill' }, tag)),
+    el('p', { class: 'meta', style: 'margin-top:4px' }, upd ? '确认过的格式有图号套不上，AI 助手补充了一份：'
+      : `${nb.need} 个文件的图号不是 ISO 英国附录的写法。确认后用来分楼栋、认专业和楼层，带版次后缀的文件并到同一张图；确认之前只用来分组显示。`),
+    ...fmtSegs(fmt), fmtCoverage(view.coverage), fmtCodes(view.codes || {}, fmt),
+    (fmt.unsure || []).length ? el('ul', { class: 'list', style: 'margin-top:6px' }, fmt.unsure.map(q => el('li', {}, el('span', { class: 'qmark' }, '？'), ' ', q))) : null,
+    el('div', { class: 'opts', style: 'margin-top:8px' }, btns));
+}
+function numberingSection() {  // 确认了的（或先不用的）：一小节，能让 AI 助手补充、能改回不用
+  const nb = S.numbering;
+  if (!nb || !latest() || !['confirmed', 'off'].includes(nb.status)) return null;
+  const btn = (text, fn) => el('button', { class: 'btn', type: 'button', onclick: fn }, text);
+  if (nb.status === 'off') return section('图号格式', el('p', { class: 'meta' }, '先不用：按 ISO 英国附录的顺序读图号。'),
+    el('div', { class: 'opts', style: 'margin-top:6px' }, btn('让 AI 助手认', () => askAssistant(ASK_FMT, true))));
+  const cov = nb.coverage, unknown = Object.keys(cov.unknown_codes || {}).length;
+  return section('图号格式', el('p', {}, nb.text),
+    el('p', { class: 'meta' }, `已确认（${(nb.decided_at || '').slice(0, 10)}），套得上 ${cov.matched}/${cov.total} 个文件。`),
+    fmtCodes(nb.codes || {}, nb.format),
+    el('div', { class: 'opts', style: 'margin-top:6px' },
+      cov.unmatched || unknown ? btn('让 AI 助手补充', () => askAssistant(`已确认的图号格式有 ${cov.unmatched} 个文件套不上`
+        + (cov.unmatched ? `（如 ${cov.unmatched_examples.slice(0, 3).join('、')}）` : '') + (unknown ? '，还有没写意思的代码' : '')
+        + '。请用 numbering_overview 看看，补充后用 propose_numbering 提议完整的新格式。', true)) : null,
+      btn('不用了', () => decide({ kind: 'numbering', key: '*', value: 'off', label: '图号格式不用了' }))));
+}
+
 function renderOverview() {
   const count = k => S.issues.filter(i => i.kind === k).length;
   const crit = S.issues.filter(i => i.level === 'crit').length;
@@ -1437,6 +1532,8 @@ function renderOverview() {
       low.length && latest() ? el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn', type: 'button',
         onclick: () => renderRecognizePick(`把握低的 ${low.length} 张`, low.flatMap(x => x.pages)) }, `看图识别把握低的 ${low.length} 张`)) : null));
   }
+  const nbCard = numberingCard();
+  if (nbCard) parts.push(nbCard);
   const cls = S.classification, other = S.sheets.filter(x => x.discipline === '其他').length;
   if (latest() && cls && !cls.last && (other >= 5 || cls.facts > 40)) parts.push(el('div', { class: 'note' },
     other >= 5 ? `${other} 张图按图号认不出专业，都排在“其他”里。` : `已有 ${cls.facts} 条事实。`,
@@ -1446,7 +1543,7 @@ function renderOverview() {
     el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn primary', type: 'button', onclick: renderReceive }, '收图'))));
   const sec = S.security || { files: [], scans: [], pending: 0 };
   if (sec.pending) parts.push(el('div', { class: 'note crit' }, `有 ${sec.pending} 个风险文件待确认。处理之前不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。`));
-  const props = S.proposals || [];
+  const props = (S.proposals || []).filter(p => p.kind !== 'numbering');  // 图号格式的提议在上面的卡片里
   if (props.length) parts.push(section(`AI 助手提议（${props.length}）`, el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, props.map(p =>
     el('div', { class: 'issue' },
       el('div', { class: 'head' }, el('i', { class: 'dot c-mid' }),
@@ -1514,6 +1611,8 @@ function renderOverview() {
   const notes = S.notes || [];
   if (notes.length) parts.push(section('项目笔记', el('ul', { class: 'list' }, notes.map(n =>
     el('li', {}, el('b', {}, n.topic), `：${n.text}`, el('small', { style: 'display:block;color:var(--muted)' }, `${n.source}，${n.created_at.slice(0, 10)}`))))));
+  const nbSec = numberingSection();
+  if (nbSec) parts.push(nbSec);
   parts.push(section('收图批次', el('ul', { class: 'list' }, S.batches.map(x => el('li', {},
     el('b', { class: 'mono' }, `#${x.seq}`), ` ${x.received_at} ${x.archive}：${x.kinds.join('、')}（${x.sheets} 张图）`)))));
   const bl = S.baselines.map(x => el('li', {}, `${x.name}（${x.sheets} 张图，批次 #${x.as_of_batch}）`,

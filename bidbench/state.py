@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
-from . import classify, floors, names, pdfpages, risk, towers
+from . import classify, floors, names, numbering, pdfpages, risk, towers
 from .ingest import FOLDER_MARK
 from .recognition import HIGH_SCORE, LOW_SCORE, weak_reason
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
@@ -37,6 +38,8 @@ CONF_LABEL = {"confirmed": "人工确认", "high": "高置信", "mid": "中置�
 CONF_RANK = {"confirmed": 4, "high": 3, "mid": 2, "low": 1}
 REC_SRC = {"text_layer": "看图识别（PDF 文字层）", "vision": "看图识别", "both": "看图识别（图像和文字层一致）"}
 AI_SRC = "AI 推测（智能分类）"  # AI 看名字推的，一律算把握低
+# 这次计算用的图号格式（numbering.Numbering，docs/图纸字段.md 9.5）：确认了的才用来定楼栋、去掉版次后缀；没确认的只用来分组显示
+_NUMBERING: ContextVar = ContextVar("bidbench_numbering", default=None)
 
 DISCIPLINES = [("建", "建筑"), ("结", "结构"), ("水", "给排水"), ("暖", "暖通"), ("电", "电气"),
                ("A", "建筑"), ("S", "结构"), ("P", "给排水"), ("M", "暖通"), ("N", "暖通"), ("E", "电气"), ("D", "电气")]
@@ -50,10 +53,21 @@ FACT_GROUPS = [
 # ---------------- 规范化 ----------------
 
 def norm_no(s: str | None) -> str | None:
-    """图号规范化：去空格，统一连接符，数字补到两位。建施05 / 建施 -5 / 建施－05 → 建施-05。"""
+    """图号规范化：去空格，统一连接符，数字补到两位。建施05 / 建施 -5 / 建施－05 → 建施-05。
+    已确认图号格式的项目，套得上格式的图号各段照原样，去掉末尾的版次段（docs/图纸字段.md 9.5）。"""
     if not s:
         return None
     s = re.sub(r"\s+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
+    fmt = _NUMBERING.get()
+    if fmt is not None and fmt.confirmed:
+        m = fmt.match(s)
+        if m:
+            return m["base"]
+    return _old_norm(s)
+
+
+def _old_norm(s: str) -> str:
+    """没有（或套不上）图号格式时的规范化。"""
     if names.iso_parts(s):  # ISO 19650 编号各段照原样，编号的前导零也留着（PRJ1-STR-ZZ-00-DR-S-0001）
         return s
     m = re.match(r"^(.*?)-?(\d+)([A-Z]?)$", s)
@@ -69,11 +83,17 @@ def no_parts(no: str) -> tuple[str, int | None]:
 
 def discipline_of(no: str) -> str:
     no = bare(no)
+    fmt = _NUMBERING.get()
+    if fmt is not None and fmt.confirmed:  # 已确认的图号格式：专业段按码表
+        d = fmt.discipline(no)
+        if d:
+            return d
     role = names.role_discipline(no)  # ISO 19650 编号里的角色代码：A 建筑、S 结构、M 暖通、E 电气、P 给排水……
     if role:
         return role
+    short = no.count("-") <= 2  # 只凭英文首字母认专业只对 A-101 这类短图号；四段以上的图号，第一段是项目代码
     for prefix, name in DISCIPLINES:
-        if no.startswith(prefix):
+        if no.startswith(prefix) and (short or not prefix.isascii()):
             return name
     return "其他"
 
@@ -225,6 +245,9 @@ def _rec_field(p, key: str, value=None) -> dict | None:
 def _rule_disc_src(no: str) -> tuple[str, str]:
     """按图号认出专业时的来源和把握：ISO 角色代码、中文前缀算高；只凭英文首字母（A、S……）算中。"""
     no = bare(no)
+    fmt = _NUMBERING.get()
+    if fmt is not None and fmt.confirmed and fmt.discipline(no):
+        return "图号里的专业代码（已确认的图号格式）", "high"
     if names.role_discipline(no):
         return "图号里的角色代码", "high"
     return ("图号", "high") if re.match(r"[\u4e00-\u9fff]", no) else ("图号首字母", "mid")
@@ -242,13 +265,59 @@ def tower_part(key: str) -> str | None:
 
 
 def _dec(decisions: dict, kind: str, key: str, old: str | None = None):
-    """人工决定：先按现在的身份找；没有再按加塔楼以前的写法（光图号）找——以前做的决定原样带过来。"""
-    return decisions.get((kind, key)) or (decisions.get((kind, old)) if old and old != key else None)
+    """人工决定：先按现在的身份找；没有再按加塔楼以前的写法（光图号）找，再按确认图号格式以前的写法找
+    ——以前做的决定原样带过来。"""
+    for k in (key, old, *_legacy(key)):
+        if k and (kind, k) in decisions:
+            return decisions[(kind, k)]
+    return None
+
+
+def _legacy(key: str) -> list[str]:
+    """确认图号格式以前，这张图的身份是怎么写的：前导零去掉（-0002 → -02），多栋楼的项目前面带“塔楼 · ”。"""
+    fmt = _NUMBERING.get()
+    if fmt is None or not fmt.confirmed or not key:
+        return []
+    head, sep, tail = key.partition("|")
+    n = bare(head)
+    if not fmt.match(n):
+        return []
+    old, t = _old_norm(n), fmt.tower(n)
+    cands = [old] + ([f"{t}{SEP}{old}", f"{t}{SEP}{n}"] if t else [])
+    return [c + sep + tail for c in dict.fromkeys(cands) if c + sep + tail != key]
+
+
+def _owns_tower(n: str) -> bool:
+    """图号本身就说明了是哪栋（ISO 分区代码，或已确认图号格式里的楼栋段）：身份只写图号，不加塔楼。"""
+    if names.iso_parts(n):
+        return True
+    fmt = _NUMBERING.get()
+    m = fmt.match(n) if fmt is not None and fmt.confirmed else None
+    return bool(m and "building" in m["parts"])
+
+
+def _fmt_guess(g: dict | None) -> dict | None:
+    """已确认图号格式的项目：文件名图号末尾的版次段拿出来，记成这份文件的版次。"""
+    fmt = _NUMBERING.get()
+    if not g or fmt is None or not fmt.confirmed:
+        return g
+    m = fmt.match(g["no"]["value"])
+    if m and m["rev"]:
+        g["no"]["value"] = m["base"]
+        if not g.get("rev"):
+            g["rev"] = {"value": m["rev"], "conf": names.MID, "src": "文件名（图号末尾的版次段）"}
+    return g
+
+
+def _type_kind(no: str | None) -> str | None:
+    """图号里的类型代码说的图类（详图大样、表格、规格书……），图谱分小框用；确认前也用。"""
+    fmt = _NUMBERING.get()
+    return fmt.kind(bare(no)) if fmt is not None and no and not no.startswith(NAMELESS) else None
 
 
 class Keys:
     """图纸身份（docs/图纸字段.md 9.1）：一栋楼的项目就是图号；多栋楼的项目是“塔楼 · 图号”。
-    ISO 19650 图号里已经写明分区，仍然只用图号。"""
+    ISO 19650 图号里已经写明分区（或已确认的图号格式里有楼栋段），仍然只用图号。"""
 
     def __init__(self, pairs):
         self.towers: dict[str, set] = defaultdict(set)  # 图号 → 出现过的塔楼（None：看不出是哪栋）
@@ -270,7 +339,7 @@ class Keys:
         return t
 
     def key(self, t, n: str) -> str:
-        if not self.multi or names.iso_parts(n):
+        if not self.multi or _owns_tower(n):
             return n
         t = self.eff(t, n)
         if t is None:
@@ -282,7 +351,7 @@ class Keys:
         只有别的楼才有，返回 None（这栋楼缺）；几栋都有又分不清是哪栋引用的，返回空串。"""
         if n not in self.towers:
             return None
-        if not self.multi or names.iso_parts(n):
+        if not self.multi or _owns_tower(n):
             return n
         ts = self.towers[n]
         if from_t and from_t != towers.COMMON:
@@ -300,7 +369,7 @@ class Keys:
         return [k] if k else []
 
     def missing_key(self, n: str, from_t) -> str:
-        if not self.multi or names.iso_parts(n) or not from_t or from_t == towers.COMMON:
+        if not self.multi or _owns_tower(n) or not from_t or from_t == towers.COMMON:
             return n
         return f"{from_t}{SEP}{n}"
 
@@ -313,6 +382,11 @@ def _tower_of(paths, text, number, title, sha12, decisions, alias) -> tuple:
 
     def a(t):
         return alias.get(t, t)
+    fmt = _NUMBERING.get()
+    if fmt is not None and fmt.confirmed and number and fmt.match(number):
+        t = fmt.tower(number)
+        if t:
+            return a(t), "图号里的楼栋代码（已确认的图号格式）", "high"
     t = towers.from_iso(number)
     if t:
         return a(t), "图号里的分区代码", "high"
@@ -506,7 +580,8 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
                              " (SELECT sha256 FROM risk_findings) ORDER BY o.batch_seq, o.id", (as_of,)):
             risk_paths[r["sha256"]].append(r["path"])
 
-    state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels, dict(cad))
+    state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels, dict(cad),
+                     assistant["proposals"])
     state["classification"] = classify.summary(labels, state)
     state["security"] = _security(risk_rows, scans, risk_paths, decisions, state["issues"])
     state["issues"].sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
@@ -519,7 +594,113 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
     return state
 
 
-def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels=None, cad=None):
+def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels=None, cad=None,
+             proposals=()):
+    """先定这次按哪份图号格式拆图号（docs/图纸字段.md 9.5），整个计算都按它。"""
+    fmt, info = _numbering(pages, cad or {}, decisions, proposals)
+    token = _NUMBERING.set(fmt)
+    try:
+        st = _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels, cad)
+    finally:
+        _NUMBERING.reset(token)
+    st["numbering"] = info
+    st["issues"] += _numbering_issues(info)
+    st["issues"].sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
+    return st
+
+
+FMT_SOURCE = {"confirmed": "已确认的图号格式", "proposed": "AI 助手提议的图号格式", "guess": "软件猜的图号格式"}
+
+
+def _numbering(pages, cad: dict, decisions: dict, proposals) -> tuple:
+    """这次用哪份图号格式：人工确认的 > AI 助手待确认的提议 > 软件按文件名猜的（图号不是 ISO 英国附录写法的才猜）。
+    返回 (numbering.Numbering 或 None, 给界面看的说明)。选了“先不用”的照旧按 ISO 英国附录的顺序读。"""
+    first: dict[str, tuple] = {}  # 每个文件一条：第一页的出处
+    for p in pages:
+        if p.file_sha not in first or p.page_index < first[p.file_sha][2]:
+            first[p.file_sha] = (p.paths[0], p.page_id, p.page_index)
+    for sha, cpaths in cad.items():
+        first.setdefault(sha, (cpaths[0], None, 0))
+    items = numbering.items_from([(path, pid) for path, pid, _i in first.values()])
+    need = numbering.need_count(items)
+    info: dict = {"status": None, "files": len(items), "need": need}
+    d = decisions.get(("numbering", "*"))
+    prop = next((x for x in reversed(list(proposals)) if x["kind"] == "numbering"), None)
+    if prop:
+        info["proposal"] = {"id": prop["id"], "reason": prop["reason"], "created_at": prop["created_at"]}
+    fmt = None
+    if d and d["value"] == "off":
+        info.update(status="off", decided_at=d["created_at"])
+        return None, info
+    if d:
+        try:
+            fmt = numbering.Numbering(numbering.validate(json.loads(d["value"])), "confirmed", FMT_SOURCE["confirmed"])
+            info["decided_at"] = d["created_at"]
+        except (ValueError, TypeError):
+            fmt = None
+    if fmt is None and prop:
+        try:
+            fmt = numbering.Numbering(numbering.validate(prop["payload"]["format"]), "proposed", FMT_SOURCE["proposed"])
+        except (ValueError, TypeError, KeyError):
+            fmt = None
+    if fmt is None and need >= numbering.MIN_ASK:
+        g = numbering.guess(items)
+        fmt = numbering.Numbering(numbering.validate(g), "guess", FMT_SOURCE["guess"]) if g else None
+    if fmt is None:
+        return None, info
+    info.update(status=fmt.status, source=fmt.source, format=fmt.fmt, text=numbering.describe(fmt.fmt),
+                coverage=fmt.coverage(items), codes=fmt.codes_seen(items))
+    if prop and fmt.status == "confirmed":  # 确认过以后 AI 助手又提议了一份（补充新代码）
+        try:
+            new = numbering.Numbering(numbering.validate(prop["payload"]["format"]), "proposed")
+            info["proposal"].update(format=new.fmt, text=numbering.describe(new.fmt), coverage=new.coverage(items),
+                                    codes=new.codes_seen(items))
+        except (ValueError, TypeError, KeyError):
+            pass
+    return fmt, info
+
+
+def numbering_items(proj: Project) -> list[dict]:
+    """文件名里带候选图号的文件（每个文件一条），给 AI 助手的图号汇总用（docs/图纸字段.md 9.5）。"""
+    with proj.connect() as con:
+        rows = con.execute("SELECT o.sha256, o.path, (SELECT p.page_id FROM pages p WHERE p.file_sha256 = o.sha256"
+                           " ORDER BY p.page_index LIMIT 1) AS page_id FROM occurrences o JOIN files f ON f.sha256 = o.sha256"
+                           " WHERE f.kind IN ('pdf', 'cad', 'image') ORDER BY o.batch_seq, o.id").fetchall()
+    first: dict[str, tuple] = {}
+    for r in rows:
+        first.setdefault(r["sha256"], (r["path"], r["page_id"]))
+    return numbering.items_from(first.values())
+
+
+def _numbering_issues(info: dict) -> list[dict]:
+    """问题中心里的“图号格式”：还没确认时请人确认；确认后有不少图号套不上、或有没写意思的代码时提醒。"""
+    if info.get("status") in ("guess", "proposed") and info["need"] >= numbering.MIN_ASK:
+        cov = info["coverage"]
+        who = "AI 助手提议" if info["status"] == "proposed" else "软件按文件名猜"
+        opts = [] if info["status"] == "proposed" else [
+            {"label": "按这个格式确认", "kind": "numbering", "key": "*",
+             "value": json.dumps(info["format"], ensure_ascii=False, sort_keys=True)}]
+        opts.append({"label": "先不用", "kind": "numbering", "key": "*", "value": "off"})
+        return [_issue("warn", "图号格式", "numbering", "图号格式待确认",
+                       f"{info['need']} 个文件的图号不是 ISO 英国附录的写法。{who}的格式是“{info['text']}”，"
+                       f"套得上 {cov['matched']}/{cov['total']} 个文件。确认后用来分楼栋、认专业和楼层，"
+                       "带版次后缀的文件并到同一张图；确认之前只用来分组显示。"
+                       + ("可以让 AI 助手认一遍：看不懂的代码它会先看图名、目录页和图签文字。" if info["status"] == "guess" else
+                          "在上方“图号格式”里确认或驳回。"), {}, opts)]
+    if info.get("status") == "confirmed":
+        cov = info["coverage"]
+        unknown = {r: v for r, v in cov["unknown_codes"].items() if r in ("discipline", "type")}
+        if cov["unmatched"] >= 5 or unknown:
+            what = (f"{cov['unmatched']} 个文件的图号套不上（如 {'、'.join(cov['unmatched_examples'][:3])}）"
+                    if cov["unmatched"] >= 5 else "")
+            codes = "；".join(f"{numbering.ROLES[r]}代码 {'、'.join(v[:6])} 没写意思" for r, v in unknown.items())
+            title = "有图号套不上已确认的图号格式" if cov["unmatched"] >= 5 else "图号格式里有代码没写意思"
+            return [_issue("info", "图号格式", "numbering_new", title,
+                           "；".join(x for x in (what, codes) if x) + "。可以让 AI 助手补充，补完再确认一次。", {}, [])]
+    return []
+
+
+def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels=None, cad=None):
     labels = labels or {"sheet": {}, "fact": {}, "last": None}
 
     def lab(no: str):  # 智能分类按身份记；加塔楼以前按光图号记的照样用
@@ -533,6 +714,10 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         rule = discipline_of(no)
         if rule != "其他":
             return (rule, *_rule_disc_src(no))
+        fmt = _NUMBERING.get()
+        fd = fmt.discipline(bare(no)) if fmt is not None and not fmt.confirmed else None
+        if fd:  # 还没确认的图号格式：只在认不出专业时用，把握低
+            return fd, f"图号里的专业代码（{fmt.source}，待确认）", "low"
         ai = classify.sheet_discipline(lab(no), rule)
         if ai != "其他":
             return ai, AI_SRC, "low"
@@ -567,7 +752,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             pairs.append((ptower[p.page_id][0], n))
     path_tower: dict[str, tuple] = {}  # CAD 文件第一个出处 → (塔楼, 来源, 把握)
     for sha, cpaths in (cad or {}).items():
-        g = names.guess(cpaths, "")
+        g = _fmt_guess(names.guess(cpaths, ""))
         n = norm_no(g["no"]["value"]) if g else None
         path_tower[cpaths[0]] = _tower_of(cpaths, "", n, None, sha[:12], decisions, alias)
         if n:
@@ -744,7 +929,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             "paths": cp.paths, "inner": all(_in_nested_archive(x) for x in cp.paths),
             "notes": notes, "borrowed": cp.rec_borrowed, "own_values": [],
             "rec_notes": [{"type": x["type"], "text": x["description"]} for x in cp.rec["issues"]],
-            "cls": cls, "fields": fields,
+            "cls": cls, "fields": fields, "type_kind": _type_kind(no),
         }
 
     # ---- 变更单 ----
@@ -842,12 +1027,16 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     for no, s in sheet_out.items():
         b, sure = base_for(sheet_tower.get(no))
         fl, how, src_text = _sheet_floors(s["title"], current_page[no], b)
-        _set_floors(s, fl, how, floors.floor_names(src_text))
+        raw = floors.floor_names(src_text)
         conf = (s["fields"]["title"] or {}).get("conf", "mid") if how == "图名" else "mid"
+        if not fl:  # 图名、说明里看不出：用图号里的楼层代码
+            fl, how, raw, conf = _code_floors(bare(no), b, sure)
+        _set_floors(s, fl, how, raw)
         english = how == "图名" and floors.LEVEL_WORD.search(s["title"] or "")
         if english and not sure:
             conf = lower_conf(conf, "mid")  # Level 01 是 1F 还是 2F，是猜的
-        src = f"{how}（看图识别）" + (f"，{BASE_SHORT[b]}（{'已确认' if sure else '猜的'}）" if english else "")
+        src = (how if how.startswith("图号") else f"{how}（看图识别）") \
+            + (f"，{BASE_SHORT[b]}（{'已确认' if sure else '猜的'}）" if english else "")
         s["fields"]["floors"] = fld(s["floors_name"], src, conf, where=_where(current_page[no])) if fl else None
     for no, s in prov.items():
         b, sure = base_for(s["tower"])
@@ -855,13 +1044,12 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         english = fl and floors.LEVEL_WORD.search(s["title"] or "")
         how, raw = ("图名（按文件名）" + (f"，{BASE_SHORT[b]}（{'已确认' if sure else '猜的'}）" if english else ""),
                     floors.floor_names(s["title"] or "")) if fl else ("", [])
+        cconf = names.LOW
         if not fl:
-            code = (names.iso_parts(no) or {}).get("level")
-            fl = _level_floors(code, b)
-            how, raw = ("图号里的楼层代码", [f"楼层代码 {code}"]) if fl else ("", [])
+            fl, how, raw, cconf = _code_floors(bare(no), b, sure)
         _set_floors(s, fl, how, raw)
         where = {"page_id": s["current_page"], "path": s["paths"][0]}
-        s["fields"]["floors"] = fld(s["floors_name"], how, names.LOW if how.startswith("图名") else names.MID, where=where) if fl else None
+        s["fields"]["floors"] = fld(s["floors_name"], how, cconf, where=where) if fl else None
         if (s["cls"] or {}).get("content"):  # 智能分类看名字推测的内容优先
             s["fields"]["content"] = fld(s["cls"]["content"], AI_SRC, names.LOW)
             continue
@@ -1068,7 +1256,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                "current_rev": None, "current_page": None, "versions": [], "paths": [],
                "inner": False, "notes": m["evidence"], "missing_level": m["level"],
                "confirmed": bool(m.get("confirmed")), "borrowed": False, "own_values": [], "rec_notes": [],
-               "cls": classify.sheet_view(lab(t), discipline_of(t)), "fields": {}}
+               "cls": classify.sheet_view(lab(t), discipline_of(t)), "fields": {}, "type_kind": _type_kind(t)}
         fl = floors.parse_floors(m["title"] or "", base_for(tower_part(t))[0])
         _set_floors(out, fl, "图名" if fl else "", floors.floor_names(m["title"] or ""))
         sheets_list.append(out)
@@ -1194,7 +1382,7 @@ def _base_guess(sheets: list) -> tuple[int, str]:
         m = floors.EN_GROUND.search(x["title"] or "")
         if m:
             return 1, f"图纸里有“{m.group(0)}”（{x['no']}）"
-        lv = (names.iso_parts(bare(x["no"])) or {}).get("level")
+        lv = _level_code(bare(x["no"]))
         if lv in ("00", "GF"):
             return 1, f"图号里有楼层代码 {lv}（{x['no']}）"
     return 0, "图纸里没有 Ground Floor、Level 00"
@@ -1203,7 +1391,7 @@ def _base_guess(sheets: list) -> tuple[int, str]:
 def _needs_base(sheets: list) -> bool:
     """有没有要看数法才知道第几层的写法：Level 01、1st Floor，或图号里 01、02 这样的楼层代码。"""
     return any(floors.LEVEL_WORD.search(x["title"] or "")
-               or re.fullmatch(r"0[1-9]|[1-9]\d", (names.iso_parts(bare(x["no"])) or {}).get("level") or "") for x in sheets)
+               or re.fullmatch(r"0[1-9]|[1-9]\d", _level_code(bare(x["no"])) or "") for x in sheets)
 
 
 def _floor_bases(sheets: list, sheet_tower: dict, decisions: dict, multi: bool, issues: list) -> dict:
@@ -1232,6 +1420,39 @@ def _floor_bases(sheets: list, sheet_tower: dict, decisions: dict, multi: bool, 
                              "同层图纸、楼层覆盖都按这个数。", {},
                              [{"label": BASE_LABEL[v], "kind": "floor_base", "key": k, "value": str(v)} for v in (guess, 1 - guess)]))
     return out
+
+
+def _level_code(n: str) -> str | None:
+    """图号里的楼层代码：ISO 英国附录写法的第四段，或按图号格式（确认前也用）。"""
+    lv = (names.iso_parts(n) or {}).get("level")
+    if lv:
+        return lv
+    fmt = _NUMBERING.get()
+    got = fmt.level(n) if fmt is not None and n and not n.startswith(NAMELESS) else None
+    return got[0] if got else None
+
+
+def _code_floors(n: str, base: int, sure: bool = True) -> tuple[set[int], str, list, str]:
+    """图号里的楼层代码换算成楼层：(楼层, 来源, 原叫法, 把握)。按图号格式的码表（确认前把握低）；
+    要看楼层数法的（01 这类）没确认数法时最多算中。"""
+    fmt = _NUMBERING.get()
+    ip = names.iso_parts(n)
+    if ip and ip.get("level"):
+        code, meaning, conf, how = ip["level"], None, names.MID, "图号里的楼层代码"
+    elif fmt is not None and n and not n.startswith(NAMELESS) and fmt.level(n):
+        code, meaning = fmt.level(n)
+        conf = names.HIGH if fmt.confirmed else names.LOW
+        how = "图号里的楼层代码" + ("（已确认的图号格式）" if fmt.confirmed else f"（{fmt.source}，待确认）")
+    else:
+        return set(), "", [], names.LOW
+    if meaning == numbering.NO_LEVEL:
+        return set(), "", [], names.LOW
+    fl = (floors.parse_floors(meaning, base) if meaning else set()) or _level_floors(code, base)
+    if not fl:
+        return set(), "", [], names.LOW
+    if not sure and (re.fullmatch(r"0[1-9]|[1-9]\d", code) or floors.LEVEL_WORD.search(meaning or "")):
+        conf = lower_conf(conf, names.MID)
+    return fl, how, [f"楼层代码 {code}"], conf
 
 
 def _level_floors(code: str | None, base: int) -> set[int]:
@@ -1316,7 +1537,7 @@ def _first_guess(unrecognized, cad: dict, sheet_out: dict, labels: dict, disc_ho
         if not rest:
             items[_nameless_key(left[0].paths)].append((None, left, None))
     for paths in cad.values():
-        g = names.guess(paths, "")
+        g = _fmt_guess(names.guess(paths, ""))
         key = keys.key(path_tower.get(paths[0], (None,))[0], norm_no(g["no"]["value"])) if g else _nameless_key(paths)
         if g or key in items:  # 看不出图号的 CAD 只并到同名的 PDF 上，不单独出图（外部参照之类）
             items[key].append((g, [], paths))
@@ -1344,7 +1565,7 @@ def _first_guess(unrecognized, cad: dict, sheet_out: dict, labels: dict, disc_ho
 
 def _page_guess(p) -> dict | None:
     """一页的一级识别；看图识别读出了图名（只是没读出图号）就用读出的图名。"""
-    g = names.guess(p.paths, p.text)
+    g = _fmt_guess(names.guess(p.paths, p.text))
     title = _val(p.rec, "drawing_title") if p.rec else None
     if g and title:
         g["title"] = {"value": title, "conf": names.MID, "src": "看图识别读出的图名"}
@@ -1359,7 +1580,8 @@ def _guess_sheet(key: str, group: list, labels: dict, disc_how, keys: Keys | Non
     """一张“按文件名暂定”的图：各项推测带来源和把握（高、中、低），图谱里画虚线框。"""
     def rk(item):
         g = item[0] or {}
-        return (bool(item[1]), rev_key(g["rev"]["value"]) if g.get("rev") else (0, 0) or (0, 0), -min((x.first_batch for x in item[1]), default=0))
+        rev = g["rev"]["value"] if g.get("rev") else None
+        return (bool(item[1]), rev_key(rev) or (0, 0), bool(rev), -min((x.first_batch for x in item[1]), default=0))  # 00 版也比没写版次的强
     best = max(group, key=rk)
     g, plist, cpaths = best
     g = g or {}
@@ -1410,7 +1632,7 @@ def _guess_sheet(key: str, group: list, labels: dict, disc_how, keys: Keys | Non
         "notes": [], "borrowed": False, "own_values": [], "rec_notes": [],
         "cls": classify.sheet_view(labels["sheet"].get(key) or labels["sheet"].get(bare(key)), discipline_of(key)),
         "fields": fields, "conf": conf, "pages": pages, "seen": bool(seen),
-        "cad": [x for _g, _pl, cp in group if cp for x in cp],
+        "cad": [x for _g, _pl, cp in group if cp for x in cp], "type_kind": _type_kind(key),
     }
 
 
@@ -1419,7 +1641,7 @@ def _name_checks(sheet_out, current_page, decisions, issues, live) -> None:
     for no, cp in sorted(current_page.items()):
         if no not in live or cp.rec["page_kind"] == "图纸目录":
             continue
-        g = names.guess(cp.paths, "")
+        g = _fmt_guess(names.guess(cp.paths, ""))
         if not g or not g["no"]["src"].startswith("文件名"):
             continue
         gno, diffs, num = norm_no(g["no"]["value"]), [], bare(no)

@@ -23,11 +23,11 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import antivirus, appconfig, chat, debuglog, export, oplog, ops, recognition, release, state, updater
+from . import antivirus, appconfig, chat, debuglog, export, numbering, oplog, ops, recognition, release, state, updater
 from .store import Project, SchemaTooNew, add_decision, now_iso
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev", "name_check",
-                  "file_tower", "tower_alias", "rev_check", "floor_base"}
+                  "file_tower", "tower_alias", "rev_check", "floor_base", "numbering"}
 PAGE_ID = re.compile(r"[0-9a-f]{12}-p\d{3}")
 TOKEN_META = '<meta name="bidbench-token" content="">'
 PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan"}  # 记进项目操作日志的任务
@@ -542,6 +542,11 @@ def make_handler(app: _App):
                 kind, key, value = body.get("kind"), body.get("key"), body.get("value")
                 if kind not in DECISION_KINDS or not isinstance(key, str) or not isinstance(value, str):
                     return self._json({"error": "决定的格式不对"}, 400)
+                if kind == "numbering":
+                    try:
+                        value = numbering.decision_value(value)
+                    except numbering.FormatError as e:
+                        return self._json({"error": f"图号格式不对：{e}"}, 400)
                 add_decision(app.proj, kind, key, value, body.get("note"))
                 app.invalidate()
                 return self._json(app.state())

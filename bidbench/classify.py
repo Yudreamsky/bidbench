@@ -19,7 +19,7 @@ from .store import Project, now_iso
 
 logger = logging.getLogger(__name__)
 
-DISCIPLINES = ["建筑", "结构", "给排水", "暖通", "电气", "机电", "总图", "景观", "幕墙", "室内", "其他"]
+DISCIPLINES = ["建筑", "结构", "给排水", "暖通", "电气", "消防", "智能化", "机电", "总图", "岩土", "景观", "幕墙", "室内", "其他"]
 FACT_TOPS = ["工程概况", "楼层", "轴网", "结构构件", "材料", "建筑", "机电", "执行规范", "其他"]
 STANDARD_TOP = "执行规范"
 SHEET_BATCH = 120     # 一次问多少张图
