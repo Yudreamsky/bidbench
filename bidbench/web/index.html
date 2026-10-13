@@ -87,6 +87,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .boxhead:focus:not(:focus-visible) { outline: none; }
 .node.dragging { transition: none; cursor: grabbing; opacity: .85; }
 .band-label { fill: var(--muted); font-size: 12px; letter-spacing: .08em; }
+.tower-label { fill: var(--ink); font-size: 13px; font-weight: 600; letter-spacing: .04em; }
+.boxhead:hover .tower-label, .boxhead:focus-visible .tower-label { fill: var(--accent); }
+.tower-rule { stroke: var(--line); stroke-width: 1; }
 .edge { stroke: var(--edge); stroke-width: 1.25; fill: none; }
 .edge.cross { stroke-dasharray: 6 4; }
 .edge.catalog { stroke-dasharray: 2 4; stroke-width: 1.6; }
@@ -326,7 +329,7 @@ li.recent .linkbtn { flex: 1; }
         </div>
         <div class="canvas"><svg id="graph" role="group" aria-label="图纸知识图谱"></svg>
           <canvas id="net" hidden aria-label="图纸关系网：圆点是图纸，线是引用关系"></canvas></div>
-        <p class="hint" id="graph-hint">点框的标题收起或展开；按住方块拖动排版，松手吸附到格子。鼠标指向图纸看源文件和说明，点击看详情；红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。</p>
+        <p class="hint" id="graph-hint">点楼栋、框的标题收起或展开；按住方块拖动排版，松手吸附到格子。鼠标指向图纸看源文件和说明，点击看详情；红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。</p>
       </section>
       <section class="view" id="view-facts" role="tabpanel" aria-labelledby="tab-facts" hidden>
         <div class="toolbar">
@@ -611,12 +614,23 @@ function saveLayoutPrefs() {
 function updateResetBtn() {
   document.getElementById('g-reset').hidden = net.on || (!ui.collapsedBoxes.size && !Object.keys(ui.gridPos).length);
 }
-function boxCells(items, cols, key) {
-  // 格子位置：按图号顺序排、百位段换行；拖过的放到拖到的格子，占着那格的图换到它原来的位置
+function seriesBlocks(items, cols) {
+  // 百位段另起一行（建施-101~112、201~205 分得清），但最多比连着排多出一行才这样排；
+  // 四位流水号、按楼层代码排的图号常常一张一段，按段换行只会排成一行两三张的细长条
+  let rows = 1, c = 0, ser = null;
+  items.forEach(s => {
+    const k = series(s.no);
+    if (c > 0 && (c >= cols || k !== ser)) { rows++; c = 0; }
+    c++; ser = k;
+  });
+  return rows <= Math.ceil(items.length / cols) + 1;
+}
+function boxCells(items, cols, key, bySeries) {
+  // 格子位置：按图号顺序排满一行再换行（bySeries：百位段另起一行）；拖过的放到拖到的格子，占着那格的图换到它原来的位置
   const cell = new Map();
   let c = 0, r = 0, ser = null;
   items.forEach(s => {
-    const k = series(s.no);
+    const k = bySeries ? series(s.no) : '';
     if (c > 0 && (c >= cols || k !== ser)) { c = 0; r++; }
     cell.set(s.no, [c, r]); c++; ser = k;
   });
@@ -640,77 +654,115 @@ function layout() {
   const towerRank = t => { const i = ((S.towers || {}).list || []).findIndex(x => x.name === t); return i < 0 ? 999 : i; };
   const bandRank = k => { const [t, d] = k.includes('｜') ? k.split('｜') : ['', k]; return [towerRank(t), DISC_ORDER.indexOf(d)]; };
   const discs = Object.keys(groups).sort((a, b) => { const x = bandRank(a), y = bandRank(b); return x[0] - y[0] || x[1] - y[1]; });
-  const MAXW = laidOutAt, GAPX = 16, GAPY = 16, PAD = 12, GAP = GRID_GAP, ROWH = GRID_ROWH, HEAD = 34, SUBHEAD = 26, SUBPAD = 8;
-  let x = 12, y = 12, rowH = 0, maxX = 0;
-  const bands = [], subs = [], drops = [], pos = {}, boxOf = {};
-  const place = (bw, bh) => {  // 大框从左往右排，放不下换行
-    if (x + bw > MAXW && x > 12) { x = 12; y += rowH + GAPY; rowH = 0; }
-    const at = [x, y];
-    x += bw + GAPX; rowH = Math.max(rowH, bh); maxX = Math.max(maxX, x);
+  const MAXW = laidOutAt, GAPX = 16, GAPY = 16, PAD = 12, GAP = GRID_GAP, ROWH = GRID_ROWH, HEAD = 34, SUBHEAD = 26, SUBPAD = 8, THEAD = 30;
+  const LEFT = 12, FULL = MAXW - LEFT * 2, BODY = FULL - PAD * 2;  // 占满一层的大框多宽、框里能排多宽
+  const multi = multiTower();
+  const bands = [], subs = [], heads = [], drops = [], pos = {}, boxOf = {};
+  let shelf = { x: LEFT, y: LEFT, h: 0 }, maxX = 0;
+  // 大框一层一层排：方块要排好几行的大框占满一层；方块一行就排得下的小框并排放，同一层差不多高，不留大块空白
+  const newShelf = () => { if (shelf.x > LEFT) shelf = { x: LEFT, y: shelf.y + shelf.h + GAPY, h: 0 }; };
+  const place = (w, h, full) => {
+    if (shelf.x > LEFT && (full || shelf.x + w > LEFT + FULL)) newShelf();
+    const at = [shelf.x, shelf.y];
+    shelf.x = full ? LEFT + FULL + GAPX : shelf.x + w + GAPX;
+    shelf.h = Math.max(shelf.h, h); maxX = Math.max(maxX, at[0] + w);
     return at;
   };
+  const nRows = cell => { const u = [...cell.values()]; return u.length ? Math.max(...u.map(c => c[1])) + 1 : 0; };
+  const nCols = cell => { const u = [...cell.values()]; return u.length ? Math.max(...u.map(c => c[0])) + 1 : 0; };
+  let tower = null;
   discs.forEach(d => {
+    const [t, disc] = multi && d.includes('｜') ? d.split('｜') : [null, d];
+    if (multi && t !== tower) {  // 多栋楼：每栋一个区块，标题占一整行，点一下收起这一栋
+      tower = t;
+      newShelf();
+      const key = `tower:${t}`, n = discs.filter(k => k.startsWith(`${t}｜`)).reduce((a, k) => a + groups[k].length, 0);
+      heads.push({ key, label: `${t}（${n} 张）`, x: LEFT, y: shelf.y, w: FULL, h: THEAD, collapsed: ui.collapsedBoxes.has(key) });
+      shelf = { x: LEFT, y: shelf.y + THEAD + 8, h: 0 };
+      maxX = Math.max(maxX, LEFT + FULL);
+    }
+    if (multi && ui.collapsedBoxes.has(`tower:${t}`)) return;
     const items = groups[d];
-    const label = `${d.replace('｜', ' ')}（${items.length}）`;
-    const minW = Math.max(150, Math.ceil(textW(label, 12, 400)) + 48);
+    const label = `${disc}（${items.length}）`;
+    const minW = Math.max(120, Math.ceil(textW(label, 12, 400)) + 48);
     if (ui.collapsedBoxes.has(d)) {  // 收起的大框只留标题
-      const [bx, by] = place(minW, HEAD);
+      const [bx, by] = place(minW, HEAD, false);
       bands.push({ key: d, label, x: bx, y: by, w: minW, h: HEAD, collapsed: true });
       return;
     }
     const cw = Math.max(60, ...items.map(s => Math.ceil(textW(ALIAS[s.no], 12.5, 600)) + 22));  // 同一专业的方块一样宽，排得整齐
+    const fitIn = w => Math.max(1, Math.floor((w + GAP) / (cw + GAP)));  // 这么宽能排几列
     const types = {};
     items.forEach(s => (types[sheetGroup(s)] ||= []).push(s));
     const tkeys = Object.keys(types).sort(groupOrder(items));
     const split = items.length >= SUB_MIN && tkeys.length > 1;
-    const parts = split ? tkeys.map(t => ({ key: `${d}|${t}`, label: `${t}（${types[t].length}）`, items: types[t] }))
-      : [{ key: d, label: null, items }];
-    const inner = split ? SUBPAD : 0, head = split ? SUBHEAD : 0;
-    const fit = Math.max(1, Math.floor((MAXW - 24 - PAD * 2 - inner * 2 + GAP) / (cw + GAP)));
-    const cols = Math.min(fit, Math.max(1, Math.ceil(Math.sqrt(Math.max(...parts.map(q => q.items.length)) * 2.2))));  // 少时接近方形，多时铺满一行
-    const rowMax = MAXW - 24 - PAD * 2;  // 小框在大框里从左往右排，放不下换行
-    let fx = 0, top = HEAD, rowH = 0, bw = minW;
-    const placed = parts.map(q => {
-      const collapsed = split && ui.collapsedBoxes.has(q.key);
-      const cell = collapsed ? new Map() : boxCells(q.items, cols, q.key);
-      const used = [...cell.values()];
-      const ncol = used.length ? Math.max(...used.map(c => c[0])) + 1 : 0;
-      const nrow = used.length ? Math.max(...used.map(c => c[1])) + 1 : 0;
-      const cellsW = ncol ? ncol * (cw + GAP) - GAP : 0;
-      const w = split ? Math.max(Math.ceil(textW(q.label, 12, 400)) + 40, cellsW + inner * 2) : cellsW;
-      const h = head + (nrow ? nrow * ROWH - GAP + inner : 0);
-      if (fx > 0 && fx + w > rowMax) { fx = 0; top += rowH + GAP; rowH = 0; }
-      const r = { ...q, collapsed, cell, nrow, w, h, top, left: fx };
-      fx += w + GAP; rowH = Math.max(rowH, h);
-      bw = Math.max(bw, r.left + w + PAD * 2);
-      return r;
+    if (!split) {
+      const one = items.length <= fitIn(BODY);  // 一行排得下
+      const cols = one ? items.length : fitIn(BODY);
+      const cell = boxCells(items, cols, d, !one && seriesBlocks(items, cols));
+      const nrow = nRows(cell);
+      const bw = one && nrow <= 1 ? Math.max(minW, nCols(cell) * (cw + GAP) - GAP + PAD * 2) : FULL;
+      const bh = HEAD + nrow * ROWH - GAP + PAD;
+      const [bx, by] = place(bw, bh, bw === FULL);
+      bands.push({ key: d, label, x: bx, y: by, w: bw, h: bh, collapsed: false });
+      const cx0 = bx + PAD, cy0 = by + HEAD;
+      drops.push({ key: d, x: cx0, y: cy0, w: bw - PAD * 2, h: nrow * ROWH - GAP, cx0, cy0, cols, rows: nrow, cw });
+      cell.forEach(([c, r], no) => {
+        pos[no] = { x: cx0 + c * (cw + GAP), y: cy0 + r * ROWH, w: cw, h: NH };
+        boxOf[no] = d;
+      });
+      return;
+    }
+    // 按图类分小框：方块一行排得下的小框先并排放在上面；排不下的各占大框的一层，放在下面
+    const qfit = fitIn(BODY - SUBPAD * 2);
+    const parts = tkeys.map(tt => {
+      const its = types[tt], key = `${d}|${tt}`, qlabel = `${tt}（${its.length}）`;
+      const collapsed = ui.collapsedBoxes.has(key);
+      const one = its.length <= qfit;
+      const cols = one ? its.length : qfit;
+      const cell = collapsed ? new Map() : boxCells(its, cols, key, !one && seriesBlocks(its, cols));
+      const nrow = nRows(cell);
+      const full = !collapsed && !(one && nrow <= 1);
+      const minQ = Math.ceil(textW(qlabel, 12, 400)) + 40;
+      const w = full ? BODY : collapsed ? minQ : Math.max(minQ, nCols(cell) * (cw + GAP) - GAP + SUBPAD * 2);
+      return { key, label: qlabel, collapsed, cell, cols, nrow, full, w, h: SUBHEAD + (nrow ? nrow * ROWH - GAP + SUBPAD : 0) };
     });
-    const bh = top + rowH + PAD;
-    const [bx, by] = place(bw, bh);
+    const placed = [...parts.filter(q => !q.full), ...parts.filter(q => q.full)];
+    let sx = 0, sy = HEAD, sh = 0;
+    placed.forEach(q => {
+      if (sx > 0 && (q.full || sx + q.w > BODY)) { sy += sh + GAP; sx = 0; sh = 0; }
+      q.left = sx; q.top = sy;
+      sx = q.full ? BODY + GAP : sx + q.w + GAP; sh = Math.max(sh, q.h);
+    });
+    const natural = placed.reduce((a, q) => a + q.w + GAP, 0);
+    const bw = !parts.some(q => q.full) && sy === HEAD ? Math.max(minW, natural - GAP + PAD * 2) : FULL;  // 小框一层就放下：大框不用占满一层
+    const bh = sy + sh + PAD;
+    const [bx, by] = place(bw, bh, bw === FULL);
     bands.push({ key: d, label, x: bx, y: by, w: bw, h: bh, collapsed: false });
     placed.forEach(q => {
-      const qx = bx + PAD + q.left, qy = by + q.top, cx0 = qx + inner, cy0 = qy + head;
-      if (split) subs.push({ key: q.key, label: q.label, x: qx, y: qy, w: q.w, h: q.h, collapsed: q.collapsed });
+      const qx = bx + PAD + q.left, qy = by + q.top, cx0 = qx + SUBPAD, cy0 = qy + SUBHEAD;
+      subs.push({ key: q.key, label: q.label, x: qx, y: qy, w: q.w, h: q.h, collapsed: q.collapsed });
       if (q.collapsed) return;
-      drops.push({ key: q.key, x: qx, y: qy, w: split ? q.w : bw - PAD * 2, h: q.h, cx0, cy0, cols, rows: q.nrow, cw });
+      drops.push({ key: q.key, x: qx, y: qy, w: q.w, h: q.h, cx0, cy0, cols: q.cols, rows: q.nrow, cw });
       q.cell.forEach(([c, r], no) => {
         pos[no] = { x: cx0 + c * (cw + GAP), y: cy0 + r * ROWH, w: cw, h: NH };
         boxOf[no] = q.key;
       });
     });
   });
-  return { bands, subs, drops, pos, boxOf, w: Math.max(maxX, 400), h: y + rowH + 12 };
+  return { bands, subs, heads, drops, pos, boxOf, w: Math.max(maxX + LEFT, 400), h: shelf.y + shelf.h + LEFT };
 }
-function boxHead(key, label, x, y, w, h, collapsed, guess) {  // 框的标题：点一下收起或展开；guess：框里按文件名暂定的图
+function boxHead(key, label, x, y, w, h, collapsed, guess, cls = 'band-label') {  // 框的标题：点一下收起或展开；guess：框里按文件名暂定的图
   const g = sv('g', { class: 'boxhead', tabindex: 0, role: 'button', 'aria-expanded': String(!collapsed),
     'aria-label': `${label}，${collapsed ? '点击展开' : '点击收起'}` });
   g.append(sv('rect', { class: 'hit', x, y, width: w, height: h }));
-  g.append(sv('text', { class: 'band-label', x: x + 6, y: y + h / 2 + 4 }, `${collapsed ? '▸' : '▾'} ${label}`));
+  g.append(sv('text', { class: cls, x: x + 6, y: y + h / 2 + 4 }, `${collapsed ? '▸' : '▾'} ${label}`));
   const pages = (guess || []).flatMap(x => x.pages || []);
   if (pages.length && latest() && w - textW(`▸ ${label}`, 12) > 110) {
     const a = sv('text', { class: 'act', x: x + w - 6, y: y + h / 2 + 4, 'text-anchor': 'end', tabindex: 0, role: 'button',
       'aria-label': `看图识别这一框里按文件名暂定的 ${guess.length} 张图` }, `看图识别 ${guess.length} 张`);
-    const go = ev => { ev.stopPropagation(); renderRecognizePick(`${label.replace(/（\d+）$/, '')}：按文件名暂定的 ${guess.length} 张`, pages); };
+    const where = key.replace('｜', ' ').replace('|', ' ');  // 多栋楼的框标题不写楼栋，这里写全
+    const go = ev => { ev.stopPropagation(); renderRecognizePick(`${where}：按文件名暂定的 ${guess.length} 张`, pages); };
     a.addEventListener('click', go);
     a.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(ev); } });
     g.append(a);
@@ -726,7 +778,8 @@ function boxHead(key, label, x, y, w, h, collapsed, guess) {  // 框的标题：
 function revealSheet(no) {  // 图在收起的框里：把它所在的框展开
   const s = sheetBy[no];
   if (!s || nodeBox[no] || net.on) return;
-  const keys = [bandKey(s), `${bandKey(s)}|${sheetGroup(s)}`].filter(k => ui.collapsedBoxes.has(k));
+  const bk = bandKey(s);
+  const keys = [bk.includes('｜') ? `tower:${bk.split('｜')[0]}` : null, bk, `${bk}|${sheetGroup(s)}`].filter(k => k && ui.collapsedBoxes.has(k));
   if (!keys.length) return;
   keys.forEach(k => ui.collapsedBoxes.delete(k));
   saveLayoutPrefs(); buildGraph();
@@ -850,6 +903,10 @@ function buildGraph() {
   gsvg.append(defs);
   const guessIn = key => S.sheets.filter(s => s.status === 'guess' && (s.pages || []).length
     && (key === bandKey(s) || key === `${bandKey(s)}|${sheetGroup(s)}`));
+  L.heads.forEach(t => {  // 多栋楼：每栋的标题，点一下收起或展开这一栋
+    gsvg.append(sv('line', { class: 'tower-rule', x1: t.x, y1: t.y + t.h, x2: t.x + t.w, y2: t.y + t.h }));
+    gsvg.append(boxHead(t.key, t.label, t.x, t.y, t.w, t.h, t.collapsed, null, 'tower-label'));
+  });
   L.bands.forEach(b => {
     gsvg.append(sv('rect', { class: 'band', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10 }));
     gsvg.append(boxHead(b.key, b.label, b.x + 6, b.y + 4, b.w - 12, 26, b.collapsed, guessIn(b.key)));
@@ -1158,7 +1215,7 @@ function setGraphMode(m) {
   updateResetBtn();
   document.getElementById('graph-hint').textContent = net.on
     ? '滚轮缩放，拖动空白处平移，拖动圆点调整位置，双击空白处看全图；鼠标指向圆点看源文件和说明，点击打开图纸卡片。'
-    : '点框的标题收起或展开；按住方块拖动排版，松手吸附到格子。鼠标指向图纸看源文件和说明，点击看详情；红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。';
+    : '点楼栋、框的标题收起或展开；按住方块拖动排版，松手吸附到格子。鼠标指向图纸看源文件和说明，点击看详情；红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。';
   try { localStorage.setItem('bidbench.graphMode', m); } catch (e) { /* 忽略 */ }
   hideTip();
   if (!S) return;
