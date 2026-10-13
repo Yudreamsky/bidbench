@@ -142,6 +142,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .mm-fact.dim { opacity: .35; }
 .cd-confirmed { fill: var(--ink); } .cd-high { fill: var(--ok); } .cd-mid { fill: var(--accent); } .cd-low { fill: var(--warn); } .cd-conflict { fill: var(--crit); }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.panel > * { flex-shrink: 0; }  /* 内容比右栏高时整栏滚动，不把带滚动条的运行记录框压扁 */
 .panel h2 { margin: 0; font-size: 16px; }
 .panel h3 { margin: 0 0 6px; font-size: 12px; font-weight: 500; letter-spacing: .08em; color: var(--muted); }
 .panel p { margin: 0; }
@@ -1769,7 +1770,9 @@ function renderJob(j) {
   if (j.kind === 'recognize' && j.imported && j.status === 'running') parts.push(el('p', { class: 'meta' },
     `已导入 ${j.imported} 页：左边的图谱和问题中心跟着更新，可以先点开已识别的图纸看。中途停下，已识别的也都在。`));
   if (j.error) parts.push(el('div', { class: 'note crit' }, j.error));
-  parts.push(el('pre', { class: 'joblog', 'aria-label': '运行记录' }, j.lines.join('\n') || '…'));
+  const logBox = el('pre', { class: 'joblog', 'aria-label': '运行记录' }, j.lines.join('\n') || '…');
+  // 估算完成后，运行记录和下面的分档列表重复：收起来，分档和“开始识别”直接排在标题下面
+  parts.push(j.kind === 'estimate' && j.status === 'done' && j.result ? el('details', {}, el('summary', {}, '运行记录'), logBox) : logBox);
   const res = j.result;
   if (j.status === 'done' && j.kind === 'estimate') {
     if (!res) parts.push(el('div', { class: 'note' }, '没有需要识别的页面。'));
