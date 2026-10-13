@@ -506,7 +506,7 @@ def main(argv=None):
 
     s = sub.add_parser("decide", help="记录人工决定")
     s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev",
-                                    "name_check", "file_tower", "tower_alias"])
+                                    "name_check", "file_tower", "tower_alias", "rev_check"])
     s.add_argument("key")
     s.add_argument("value")
     s.add_argument("--note")

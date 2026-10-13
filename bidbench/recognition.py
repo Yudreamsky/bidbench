@@ -34,7 +34,7 @@ SCOPES = {
     "unrecognized": "尚未识别的页面",
     "new": "尚未识别的页面，以及只有模拟执行器结果的页面",
     "weak": "识别不完整的页面：模拟执行器结果、字迹不清或图签缺失等问题、缺图号、图签把握低于 0.6",
-    "conflict": "涉及版本冲突、版次倒退或事实冲突的页面",
+    "conflict": "涉及版本冲突、改图未升版、后收到旧版或事实冲突的页面",
     "all": "全部页面",
 }
 
@@ -136,7 +136,7 @@ def _conflict_pages(proj: Project) -> set[str]:
     facts = {f["key"]: f for g in st["facts"]["groups"] for f in g["facts"]}
     out: set[str] = set()
     for i in st["issues"]:
-        if i["kind"] == "版本冲突" and i["target"].get("sheet") in sheets:
+        if i["kind"] in ("版本冲突", "改图未升版", "版本提醒") and i["target"].get("sheet") in sheets:
             out |= {v["page_id"] for v in sheets[i["target"]["sheet"]]["versions"]}
         if i["kind"] == "事实冲突" and i["target"].get("fact") in facts:
             out |= {e["page_id"] for e in facts[i["target"]["fact"]]["evidence"] if e["active"]}

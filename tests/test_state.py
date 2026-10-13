@@ -68,9 +68,13 @@ def test_batch3_nested_archive_resolves_missing(demo):
 def test_batch4_same_revision_different_content(demo):
     st = state.build(demo, 4)
     s = sheets(st)
-    assert s["电施-01"]["status"] == "conflict"
+    # 同为 B 版、内容不同：日期晚的（批次 4、2026-10-08）为现行，提醒“改了图没升版”，不算冲突
+    assert s["电施-01"]["status"] == "updated"
+    assert next(v for v in s["电施-01"]["versions"] if v["state"] == "现行")["batch"] == 4
+    iss = next(i for i in st["issues"] if i["id"] == "rev_same:电施-01")
+    assert iss["level"] == "warn" and iss["kind"] == "改图未升版" and "2026-10-08" in iss["detail"]
     assert s["建施-08"]["status"] == "changed"  # 设计变更单-012 修改了它
-    assert "电施-01" in st["diff"]["new_conflicts"]
+    assert "电施-01" not in st["diff"]["new_conflicts"]
     assert st["notices"][0]["affects"] == ["建施-08"]
 
 
@@ -130,13 +134,14 @@ def test_decisions(demo_copy):
     assert facts["地上层数"]["conf"] == "confirmed" and facts["地上层数"]["value"] == "20 层"
     assert s["建施-05"]["status"] == "voided"
     assert "建施-12" not in missing(st)
-    # 选定电施-01 采用哪一份后，冲突解除
-    issue = next(i for i in st["issues"] if i["id"] == "rev_dup:电施-01")
-    opt = issue["options"][1]
+    # 电施-01 改用另一份后，提醒消失，现行的就是选的那份
+    issue = next(i for i in st["issues"] if i["id"] == "rev_same:电施-01")
+    opt = next(o for o in issue["options"] if o["kind"] == "sheet_pick")
     add_decision(p, opt["kind"], opt["key"], opt["value"])
     st = state.build(p)
     assert sheets(st)["电施-01"]["status"] == "current"
     assert sheets(st)["电施-01"]["current_page"] == opt["value"]
+    assert not [i for i in st["issues"] if i["id"] == "rev_same:电施-01"]
 
 
 def test_number_gaps_only_within_a_series(sheets_project):

@@ -96,6 +96,86 @@ def rev_key(rev: str | None) -> tuple | None:
     return (letters, int(m.group(2) or 0))
 
 
+def _rev_norm(rev: str | None) -> str:
+    """版次的统一写法：去掉“第”“版”和空格、转大写；没写版次是“?”。B 和 B版 算同一版。"""
+    return re.sub(r"[版第次\s]", "", rev or "").upper() or "?"
+
+
+def _rev_family(rev: str | None) -> str | None:
+    """版次的写法：ISO（P01、C02）、字母（A、B）、数字（0、1、第2版）、字母加数字（A1）。写法不同的版次没法比新旧。"""
+    r = _rev_norm(rev)
+    if re.fullmatch(r"[PTC]\d{2,3}(?:\.\d{1,2})?", r):
+        return "iso"
+    return "letter" if re.fullmatch(r"[A-Z]+", r) else "number" if re.fullmatch(r"\d+", r) else (
+        "mixed" if re.fullmatch(r"[A-Z]+\d+", r) else None)
+
+
+MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+
+
+def _date_iso(s: str | None) -> str | None:
+    """日期整理成 YYYY-MM-DD，比先后用：2026-09-01、2026/9/1、2026年9月1日、12 Sep 2026、12/09/2026（日、月分得清才认）。看不懂返回 None。"""
+    t = (s or "").strip()
+    m = re.search(r"(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})", t) or re.fullmatch(r"(\d{4})(\d{2})(\d{2})", t)
+    if m:
+        y, mo, d = map(int, m.groups())
+    else:
+        m = re.search(r"(?<!\d)(\d{1,2})[\s\-/.]*([A-Za-z]{3,9})\.?[\s\-/.,]*(\d{2,4})(?!\d)", t)
+        if m and m.group(2)[:3].lower() in MONTHS:
+            d, mo, y = int(m.group(1)), MONTHS[m.group(2)[:3].lower()], int(m.group(3))
+        else:
+            m = re.search(r"(?<!\d)(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})(?!\d)", t)
+            if not m:
+                return None
+            a, b, y = map(int, m.groups())
+            if a > 12 >= b:
+                d, mo = a, b
+            elif b > 12 >= a:
+                d, mo = b, a
+            else:
+                return None  # 12/09 是 9 月 12 日还是 12 月 9 日分不清
+    y += 2000 if y < 100 else 0
+    return f"{y:04d}-{mo:02d}-{d:02d}" if 1 <= mo <= 12 and 1 <= d <= 31 and 1900 < y < 2200 else None
+
+
+def _page_date(p, norm: str) -> dict:
+    """这一版的日期：修改记录里这一版那一行的日期优先；没有才用图签上的日期（不少图签上是第一次出图的日期，升版不改）。
+    issue 另记图签日期：同一版次几份内容不同、修改记录又没跟着改时，靠它分先后。"""
+    tb = p.rec["title_block"]
+    f = tb.get("issue_date") or {}
+    issue = {"issue": _date_iso(f.get("value")), "issue_conf": conf_of(f.get("confidence")) or "mid",
+             "issue_raw": f.get("raw_text") or f.get("value")}
+    if norm != "?":
+        for row in tb.get("revision_history") or []:
+            d = _date_iso(row.get("date"))
+            if d and _rev_norm(row.get("revision")) == norm:
+                return {"date": d, "src": "修改记录里这一版", "conf": conf_of(row.get("confidence")) or "mid", "raw": row.get("date"),
+                        **issue}
+    if not issue["issue"]:
+        return {"date": None, **issue}
+    return {"date": issue["issue"], "src": "图签日期", "conf": issue["issue_conf"], "raw": issue["issue_raw"], **issue}
+
+
+def _rev_newer(a: dict, b: dict) -> int:
+    """a 比 b 新返回 1，旧返回 -1，比不出返回 0：同一种写法比版次；版次写法不同或没写，比日期。"""
+    if a["family"] and a["family"] == b["family"] and a["key"] is not None and b["key"] is not None and a["key"] != b["key"]:
+        return 1 if a["key"] > b["key"] else -1
+    if a["date"] and b["date"] and a["date"] != b["date"]:
+        return 1 if a["date"] > b["date"] else -1
+    return 0
+
+
+def _rev_name(r: dict) -> str:
+    return "没写版次的那份" if r["norm"] == "?" else f" {r['rev']} 版"
+
+
+def _why_unclear(a: dict, b: dict) -> str:
+    """两版比不出新旧的原因。"""
+    names_ = "、".join(x.strip() for x in (_rev_name(a), _rev_name(b)))
+    dates = "日期也一样" if a["date"] and a["date"] == b["date"] else "日期也比不出（没写或看不懂）"
+    return f"{names_}的版次写法不同或没写，{dates}"
+
+
 def norm_value(v) -> str:
     s = re.sub(r"\s+", "", str(v)).replace("－", "-").replace("—", "-")
     try:
@@ -519,79 +599,140 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     current_page: dict[str, PageRec] = {}
     sheet_out: dict[str, dict] = {}
 
-    # ---- 版本链与现行版 ----
+    # ---- 版本链与现行版（docs/图纸字段.md 9.2）：先比版次；版次一样、写法不同或没写，再比日期；收图先后不算 ----
     for no, s in sorted(sheets.items()):
         by_rev: dict[str, list[PageRec]] = defaultdict(list)
+        raw_rev: dict[str, str] = {}
         for rev, p in s.pages:
-            by_rev[rev or "?"].append(p)
+            n = _rev_norm(rev)
+            by_rev[n].append(p)
+            raw_rev.setdefault(n, rev or "?")
         revisions = []
-        for rev, plist in by_rev.items():
-            groups: list[list[PageRec]] = []
+        for n, plist in by_rev.items():
+            groups: list[dict] = []  # 同一版次里内容相同的文件算一份
             for p in sorted(plist, key=lambda x: x.first_batch):
-                for g in groups:
-                    if _same_content(g[0], p):
-                        g.append(p)
-                        break
+                g = next((g for g in groups if _same_content(g["pages"][0], p)), None)
+                if g is None:
+                    groups.append({"pages": [p], **_page_date(p, n)})
                 else:
-                    groups.append([p])
-            first_batch = min(p.first_batch for p in plist)
-            date = next((_val(p.rec, "issue_date") for p in plist if _val(p.rec, "issue_date")), None)
-            revisions.append({"rev": rev, "key": rev_key(rev), "date": date, "first_batch": first_batch,
-                              "groups": groups})
-        revisions.sort(key=lambda r: (r["key"] is None, r["key"] or (0, 0), r["date"] or "", r["first_batch"]))
+                    g["pages"].append(p)
+                    if not g.get("date"):
+                        g.update(_page_date(p, n))
+            revisions.append({"rev": raw_rev[n], "norm": n, "key": rev_key(n) if n != "?" else None,
+                              "family": _rev_family(n), "date": max((g["date"] for g in groups if g.get("date")), default=None),
+                              "first_batch": min(p.first_batch for p in plist), "groups": groups})
+        # 没写版次的排前面：比不出新旧时，默认用写了版次的那份
+        revisions.sort(key=lambda r: (r["key"] is not None, r["key"] or (0, 0), r["date"] or "", r["first_batch"]))
+        best = revisions[0]
+        for r in revisions[1:]:
+            if _rev_newer(r, best) >= 0:
+                best = r
+        unclear = [r for r in revisions if r is not best and _rev_newer(best, r) <= 0]  # 比不出新旧
         override = dec("sheet_current", no)
-        cur = revisions[-1]
-        if override:
-            cur = next((r for r in revisions if r["rev"] == override["value"]), cur)
+        chosen_rev = override and next((r for r in revisions if r["norm"] == _rev_norm(override["value"])), None)
+        cur = chosen_rev or best
         status, notes = "current", []
 
-        # 同图号同版次但内容不同
+        # 同一版次几份内容不同：日期晚的为现行，提醒“改了图没升版”；日期也分不出先后，问人
+        groups = cur["groups"]
         pick = dec("sheet_pick", no, f"|{cur['rev']}")
-        conflict_groups = len(cur["groups"]) > 1
-        chosen_group = cur["groups"][-1]
-        hit = pick and next((g for g in cur["groups"] if any(p.page_id == pick["value"] for p in g)), None)
-        if conflict_groups and hit:
-            chosen_group, conflict_groups = hit, False
-            notes.append(f"{cur['rev']} 版存在内容不同的多个文件，已按人工决定采用其中一份。")
-        cp = chosen_group[0]
+        hit = pick and next((g for g in groups if any(p.page_id == pick["value"] for p in g["pages"])), None)
+        same_unclear = False
+        if hit:
+            chosen = hit
+            if len(groups) > 1:
+                notes.append(f"{cur['rev']} 版存在内容不同的多个文件，已按人工决定采用其中一份。")
+        elif len(groups) > 1:
+            gkey = lambda g: (g.get("date") or "", g.get("issue") or "")  # noqa: E731  修改记录日期一样时再比图签日期
+            latest = max(groups, key=gkey)
+            if any(gkey(latest)) and sum(1 for g in groups if gkey(g) == gkey(latest)) == 1:
+                chosen = latest
+            else:
+                chosen, same_unclear = groups[-1], True  # 先按最后收到的那份
+        else:
+            chosen = groups[0]
+        cp = chosen["pages"][0]
         current_page[no] = cp
         title = _val(cp.rec, "drawing_title")
         s.title = title
         d, dsrc, dconf = disc_how(no, cp.paths)
         s.discipline = d
-        if conflict_groups:
+        batches_desc = "、".join(f"批次#{g['pages'][0].first_batch}" for g in groups)
+        if same_unclear:
             status = "conflict"
-            batches_desc = "、".join(f"批次#{g[0].first_batch}" for g in cur["groups"])
             issues.append(_issue("crit", "版本冲突", f"rev_dup:{no}", f"{no} {title or ''}".strip(),
-                                 f"{batches_desc} 的 {no} 都标为 {cur['rev']} 版，但内容不同，可能改图未升版。",
+                                 f"{batches_desc} 的 {no} 都是{_rev_name(cur)}，但内容不同，日期也分不出先后，可能改图未升版。",
                                  {"sheet": no},
-                                 [{"label": f"采用批次#{g[0].first_batch} 的文件", "kind": "sheet_pick",
-                                   "key": f"{no}|{cur['rev']}", "value": g[0].page_id} for g in cur["groups"]]))
-        # 版次倒退：更晚的批次带来更低的版次
-        for r in revisions:
-            if r is not cur and r["key"] and cur["key"] and r["key"] < cur["key"] and r["first_batch"] > cur["first_batch"]:
+                                 [{"label": f"采用批次#{g['pages'][0].first_batch} 的文件", "kind": "sheet_pick",
+                                   "key": f"{no}|{cur['rev']}", "value": g["pages"][0].page_id} for g in groups]))
+        elif len(groups) > 1 and not hit and cur["norm"] != "?":
+            ck = f"{no}|{cur['norm']}"
+            dd = dec("rev_check", no, f"|{cur['norm']}")
+            if not (dd and dd["value"] == "ignore"):
+                when = (chosen["date"] if all(g.get("date") != chosen["date"] for g in groups if g is not chosen)
+                        else f"图签日期 {chosen['issue']}")
+                iss = _issue("warn", "改图未升版", f"rev_same:{no}", f"{no} 改了图没升版",
+                             f"{batches_desc} 的 {no} 都是 {cur['rev']} 版，但内容不同。按日期以 {when} 的那份"
+                             f"（批次#{cp.first_batch}）为现行；投标时可以列入答疑，请发图方确认。", {"sheet": no},
+                             [{"label": f"改用批次#{g['pages'][0].first_batch}（{g.get('issue') or g.get('date') or '没写日期'}）的文件",
+                               "kind": "sheet_pick", "key": f"{no}|{cur['rev']}", "value": g["pages"][0].page_id}
+                              for g in groups if g is not chosen]
+                             + [{"label": "列入答疑", "kind": "rev_check", "key": ck, "value": "ask"},
+                                {"label": "知道了，以日期晚的为准", "kind": "rev_check", "key": ck, "value": "ignore"}],
+                             confirmed=bool(dd and dd["value"] == "ask"))
+                iss["qa"] = (f"{no} {title or ''} 有几份都标为 {cur['rev']} 版、内容却不同的文件（{batches_desc}），"
+                             "请确认以哪一份为准，或升版后重发。")
+                issues.append(iss)
+        if not chosen_rev:  # 人工定过现行版的，不再问
+            if unclear:
                 status = "conflict"
-                issues.append(_issue("crit", "版本冲突", f"rev_regress:{no}", f"{no} 版次倒退",
-                                     f"批次#{r['first_batch']} 带来 {r['rev']} 版，比批次#{cur['first_batch']} 的 {cur['rev']} 版更低。",
+                issues.append(_issue("crit", "版本冲突", f"rev_unclear:{no}", f"{no} 哪一版是现行版拿不准",
+                                     "；".join(_why_unclear(best, r) for r in unclear) + f"。先暂按{_rev_name(best)}算，请指定现行版。",
                                      {"sheet": no},
-                                     [{"label": f"以 {x['rev']} 版为现行", "kind": "sheet_current", "key": no, "value": x["rev"]}
-                                      for x in (cur, r)]))
+                                     [{"label": f"以{_rev_name(x)}为现行", "kind": "sheet_current", "key": no, "value": x["rev"]}
+                                      for x in [best, *unclear]]))
+            for b in revisions:  # 版次高的日期反而早
+                if (b is not cur and cur["family"] and cur["family"] == b["family"] and cur["key"] is not None
+                        and b["key"] is not None and cur["key"] > b["key"] and cur["date"] and b["date"] and cur["date"] < b["date"]):
+                    status = "conflict"
+                    issues.append(_issue("crit", "版本冲突", f"rev_date:{no}:{b['norm']}", f"{no} 版次和日期对不上",
+                                         f"{cur['rev']} 版的日期 {cur['date']} 比 {b['rev']} 版的 {b['date']} 还早。先按版次以 {cur['rev']} 版为现行；"
+                                         f"也可能是日期写错了，或者 {cur['rev']} 版已经作废。", {"sheet": no},
+                                         [{"label": f"以 {x['rev']} 版为现行", "kind": "sheet_current", "key": no, "value": x["rev"]}
+                                          for x in (cur, b)]))
+            for r in revisions:  # 后收到的反而是旧版：按版次定，只提醒核实
+                if r is not cur and r["first_batch"] > cur["first_batch"] and _rev_newer(cur, r) > 0:
+                    issues.append(_issue("warn", "版本提醒", f"rev_older:{no}:{r['norm']}", f"{no} 后收到的反而是旧版",
+                                         f"批次#{r['first_batch']} 收到的是{_rev_name(r)}，比现行的{_rev_name(cur)}旧。"
+                                         f"按版次以{_rev_name(cur)}为现行；请核实是不是{_rev_name(cur)}作废了、退回了旧版。", {"sheet": no},
+                                         [{"label": f"确认以{_rev_name(x)}为现行", "kind": "sheet_current", "key": no, "value": x["rev"]}
+                                          for x in (cur, r)]))
         if status == "current":
-            if len(revisions) > 1 and cur["first_batch"] == as_of:
+            cb = min(p.first_batch for p in chosen["pages"])
+            if cb == as_of and (len(revisions) > 1 or len(groups) > 1):
                 status = "updated"
-            elif cur["first_batch"] == as_of and as_of > 1 and min(r["first_batch"] for r in revisions) == as_of:
+            elif cb == as_of and as_of > 1 and min(r["first_batch"] for r in revisions) == as_of:
                 status = "new"
         vlist = []
         for r in revisions:
+            tie = len({g.get("date") for g in r["groups"]}) < len(r["groups"])  # 同版次几份的修改记录日期一样
             for g in r["groups"]:
-                state_txt = "现行" if (r is cur and g is chosen_group) else ("内容不同，待确认" if r is cur and conflict_groups else "已替代")
-                vlist.append({"rev": r["rev"], "date": r["date"], "batch": g[0].first_batch, "state": state_txt,
-                              "page_id": g[0].page_id, "paths": sorted({x for p in g for x in p.paths})})
+                if r is cur:
+                    state_txt = "现行" if g is chosen else "内容不同，待确认" if same_unclear else "同版次另一份，未采用"
+                else:
+                    state_txt = "待确认" if not chosen_rev and r in unclear else "已替代"
+                vlist.append({"rev": r["rev"], "date": (g.get("issue") or g.get("date")) if tie else g.get("date"),
+                              "batch": g["pages"][0].first_batch, "state": state_txt,
+                              "page_id": g["pages"][0].page_id, "paths": sorted({x for p in g["pages"] for x in p.paths})})
         cls = classify.sheet_view(lab(no), discipline_of(no))
         tw, tower_f = _tower_field(no, ptower[cp.page_id], keys)
         sheet_tower[no] = tw
         fields = {"no": _rec_field(cp, "drawing_no", bare(no)), "tower": tower_f, "title": _rec_field(cp, "drawing_title"),
-                  "rev": _rec_field(cp, "revision"), "date": _rec_field(cp, "issue_date"),
+                  "rev": _rec_field(cp, "revision"),
+                  "date": fld(chosen["issue"], "看图识别（图签日期）", chosen["issue_conf"], chosen.get("issue_raw"), _where(cp))
+                  if len({g.get("date") for g in groups}) < len(groups) and chosen.get("issue")
+                  else fld(chosen["date"], f"看图识别（{chosen['src']}）", chosen["conf"], chosen.get("raw"), _where(cp))
+                  if chosen.get("date") else _rec_field(cp, "issue_date"),
                   "discipline": fld(d, dsrc, dconf, where=None if dsrc == AI_SRC else _where(cp)),
                   "content": fld(cp.rec["content"]["summary"], "看图识别", "mid", where=_where(cp))
                   or fld((cls or {}).get("content"), AI_SRC, "low")}
