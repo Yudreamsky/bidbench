@@ -47,9 +47,20 @@ def test_export_current(demo, tmp_path):
     files = {p.name for p in out.rglob("*.pdf")}
     assert "建施-07 1-1剖面图 A版.pdf" in files  # 从合订本里单独抽出
     assert not any("建施-09" in f for f in files)  # 缺失的图不会出现
-    assert any(f.startswith("【冲突】电施-01") for f in files)
+    assert "电施-01 照明平面图 B版.pdf" in files  # 同为 B 版、内容不同：按日期定了现行，只是提醒改图没升版，不标冲突
     doc = pymupdf.open(next(out.rglob("建施-07*.pdf")))
     assert doc.page_count == 1
+
+
+def test_export_flags_unsettled_conflict(sheets_project, tmp_path):
+    """同版次、同日期、内容不同，拿不准现行的是哪份：导出时文件名标【冲突】。"""
+    import make_sample
+    h = [("A", "2026-01-01", "出图")]
+    proj = sheets_project({"建施-02 一层平面图.pdf": make_sample.sheet_pdf("建施-02", "一层平面图", "A", "2026-01-01", [], h),
+                           "建施-02 一层平面图（2）.pdf": make_sample.sheet_pdf("建施-02", "一层平面图", "A", "2026-01-01", [], h,
+                                                                       variant=1)})
+    out = export.export_current(proj, state.build(proj, with_diff=False), tmp_path / "cur")
+    assert any(p.name.startswith("【冲突】建施-02") for p in out.rglob("*.pdf"))
 
 
 def test_export_mirror(demo, tmp_path):
