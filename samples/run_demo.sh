@@ -6,7 +6,10 @@ SAMPLES=samples/out
 PY=python3
 python3 -c "" >/dev/null 2>&1 || PY=python  # Windows 的虚拟环境里没有 python3
 "$PY" samples/make_sample.py "$SAMPLES" >/dev/null
-rm -rf "$OUT"
+# 演示只用合成数据和模拟执行器：用单独的设置目录，不读本机设置里记的识别方式。
+# 否则收图后会用本机的 Codex、Claude 自动做智能分类（占额度），还会把演示项目加进本机的“最近项目”。
+export BIDBENCH_CONFIG_DIR="${OUT%/}.config"
+rm -rf "$OUT" "$BIDBENCH_CONFIG_DIR"
 bidbench init "$OUT" --name "示例综合体项目"
 dates=(2026-07-02 2026-08-02 2026-09-15 2026-10-08 2026-10-20)
 files=("示例综合体投标图纸.zip" "示例综合体投标图纸0802.zip" "0915修改.zip" "1008补充.zip" "1020补充")  # 最后一批是文件夹

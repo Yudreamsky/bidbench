@@ -27,6 +27,9 @@ bidbench -p demo-project serve          # 浏览器打开 http://127.0.0.1:8765/
 bidbench -p demo-project desktop        # 或者开独立窗口（需要 pip install -e ".[desktop]"）
 ```
 
+演示只用合成数据和模拟执行器，不联网、不调用 Codex 和 Claude：设置放在项目旁边的 `demo-project.config` 里，
+不动本机的设置和“最近项目”。
+
 图多时的效果可以用 `python samples/make_big_sample.py <目录> 90` 生成一个约 950 张图的超高层合成项目来看（用模拟执行器识别）。
 
 演示数据覆盖：目录列出但缺失的图、引用不存在的图、合订本、整套重发中消失的图、内层压缩包补来的图、加密压缩包、
