@@ -44,8 +44,8 @@ def export_current(proj: Project, state: dict, target: Path | None = None) -> Pa
     rows = ["# 现行图纸清单", "", f"截至批次 #{state['as_of']}。只含现行版；冲突、待确认的图已标出。", "",
             "| 专业 | 图号 | 图名 | 版次 | 状态 | 文件 |", "| --- | --- | --- | --- | --- | --- |"]
     for s in state["sheets"]:
-        if s["status"] in ("missing", "voided") or not s["current_page"]:
-            continue
+        if s["status"] in ("missing", "voided", "guess") or not s["current_page"]:
+            continue  # 按文件名暂定的图还没看图识别，不算现行图纸
         flag = "" if s["status"] in ("current", "updated", "new") else f"【{STATUS_LABEL[s['status']]}】"
         name = _safe(f"{flag}{s['no']} {s['title'] or ''} {s['current_rev']}版") + ".pdf"
         d = target / s["discipline"]
@@ -56,6 +56,10 @@ def export_current(proj: Project, state: dict, target: Path | None = None) -> Pa
     missing = [s for s in state["sheets"] if s["status"] == "missing"]
     if missing:
         rows += ["", "## 缺失图纸", ""] + [f"- {s['no']} {s['title'] or ''}：{'；'.join(s['notes'])}" for s in missing]
+    guessed = [s for s in state["sheets"] if s["status"] == "guess"]
+    if guessed:
+        rows += ["", f"## 按文件名暂定、还没看图识别的图（{len(guessed)} 张，没有导出）", ""]
+        rows += [f"- {s['no']} {s['title'] or ''} {s['current_rev'] or ''}".rstrip() for s in guessed]
     (target / "现行图纸清单.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
     return target
 

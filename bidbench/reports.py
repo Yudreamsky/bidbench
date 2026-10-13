@@ -186,6 +186,8 @@ def qa_report(state: dict) -> str:
             items.append(f"{i['title']}：{i['detail']}请澄清。")
         if i["kind"] == "目录版次" and (i["level"] == "crit" or i["confirmed"]):
             items.append(i["qa"])
+        if i["kind"] == "文件名不符" and i["confirmed"]:
+            items.append(i["qa"])
     for f in (state.get("security") or {}).get("files", []):
         if f["decision"] == "dangerous":
             items.append(f"收到的文件 {f['name']}（{f['paths'][0] if f['paths'] else ''}）{'；'.join(f['findings'])}。"

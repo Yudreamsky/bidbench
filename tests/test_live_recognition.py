@@ -97,7 +97,9 @@ def test_unrecognized_sheets_are_not_missing(sheets_project):
     assert missing == {"建施-09"}  # 真的没有的照样报缺图
     pend = next(i for i in st["issues"] if i["id"] == "pending_refs")
     assert pend["level"] == "info" and "建施-07 墙身大样.pdf" in pend["detail"]
-    assert "建施-07" not in {s["no"] for s in st["sheets"]}
+    by = {s["no"]: s for s in st["sheets"]}
+    assert by["建施-07"]["status"] == "guess" and by["建施-07"]["guess"]["no"]["conf"] == "high"  # 按文件名暂定，PDF 文字里也有这个图号
+    assert by["建施-09"]["status"] == "missing"
 
 
 def test_state_version_tells_which_job(demo_copy):

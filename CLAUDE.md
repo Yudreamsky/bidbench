@@ -10,6 +10,7 @@
 - `bidbench/web/index.html` 是本地工具，不加载任何外部资源（字体、CDN），图纸不出电脑。
 - 新的到图情况先在 `samples/make_sample.py` 里加一个合成案例，再写对应测试。
 - 智能分类在 `bidbench/classify.py`：只发图号、图名、所在文件夹和事实的名称、示例数值，不发页面；AI 的回答存 `classifications` 表，`state.py` 套用。专业只在按图号认不出（“其他”）时用 AI 的，台账、缺图、冲突的判断不能依赖分类结果。测试用 FakeCodex 或假的 Claude 客户端（`tests/conftest.py` 不许测试调用真的 Codex、Claude）。
+- 一级识别（只看文件名、文件夹、PDF 文字）在 `bidbench/names.py`，`state._first_guess` 把还没看图识别、或没读出图号的页面暂定成图纸（status `guess`），每项带来源和把握；暂定的图不参与缺图、版本判断，不导出。
 - 识别执行器只读任务包、只写 `results/`；新执行器放在 `bidbench/executors/`，逐页流程用 `claude.run_pages`，测试用假的 API 客户端或假的 Codex（`tests/test_codex_executor.py` 的 FakeCodex），不联网。
 - 调用外部命令行程序（解压工具、杀毒软件、Codex）都加 `**proc.NO_WINDOW`，桌面版才不会弹出黑色命令行窗口。
 - Claude 执行器的提示词在 `bidbench/executors/claude.py` 的 `SYSTEM_PROMPT`，改识别要求时与 `spec/任务说明.md` 保持一致。

@@ -26,7 +26,8 @@ from urllib.parse import parse_qs, urlparse
 from . import antivirus, appconfig, chat, debuglog, export, oplog, ops, recognition, release, state, updater
 from .store import Project, SchemaTooNew, add_decision, now_iso
 
-DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev"}
+DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev", "name_check"}
+PAGE_ID = re.compile(r"[0-9a-f]{12}-p\d{3}")
 TOKEN_META = '<meta name="bidbench-token" content="">'
 PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan"}  # 记进项目操作日志的任务
 SOURCE = "工作台"
@@ -247,6 +248,8 @@ def _job_fn(app: _App, kind: str, body: dict):
                             av=bool(body.get("av", True)), log=job.log, progress=progress)
             job.progress = None
             ops.build(proj, log=job.log)
+            job.stage = "智能分类"
+            ops.classify_if_ready(proj, log=job.log)  # 用过 Codex、Claude 识别的：新图纸先按名字分一下类
             return r
         return oplog.receive_title(paths), fn
 
@@ -289,6 +292,10 @@ def _job_fn(app: _App, kind: str, body: dict):
         if priorities is not None and (not isinstance(priorities, list) or not priorities
                                        or any(k not in recognition.PRIORITY_RANK for k in priorities)):
             raise ValueError("请至少选一档要识别的图纸")
+        pages = body.get("pages")  # 按需识别：图谱里点的那张图、那一框
+        if pages is not None and (not isinstance(pages, list) or not pages
+                                  or any(not isinstance(x, str) or not PAGE_ID.fullmatch(x) for x in pages)):
+            raise ValueError("要识别的页面不对")
         tier = body.get("tier") if body.get("tier") in ("economy", "strong") else "economy"
         model = _model(body)
         if executor == "claude" and not ops.has_claude_credentials():
@@ -310,7 +317,7 @@ def _job_fn(app: _App, kind: str, body: dict):
             if t is None:  # 按选中的几档准备页面图片：先目录、说明、平面，详图大样放最后
                 job.stage = "准备页面图片"
                 job.log("正在准备页面图片……")
-                t = recognition.make_task(need_proj(), scope=scope, priorities=priorities, progress=progress)
+                t = recognition.make_task(need_proj(), scope=scope, priorities=priorities, progress=progress, pages=pages)
                 if t is None:
                     job.log("没有需要识别的页面。")
                     return None

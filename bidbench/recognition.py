@@ -112,11 +112,12 @@ def priority_plan(rows) -> list[dict]:
     return out
 
 
-def pick_pages(proj: Project, scope: str = "new", priorities: list[str] | None = None) -> list:
-    """按范围挑要识别的页面，按优先级排好；priorities 给了就只要这几档。"""
+def pick_pages(proj: Project, scope: str = "new", priorities: list[str] | None = None,
+               pages: list[str] | None = None) -> list:
+    """按范围挑要识别的页面，按优先级排好；priorities 给了就只要这几档；pages 给了就只识别这几页（按需识别）。"""
     if scope not in SCOPES:
         raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(SCOPES)}")
-    only = _conflict_pages(proj) if scope == "conflict" else None
+    only = set(pages) if pages is not None else _conflict_pages(proj) if scope == "conflict" else None
     with proj.connect() as con:
         rows = pages_to_recognize(con, scope=scope, only=only)
     if priorities is not None:
@@ -183,11 +184,11 @@ def pages_to_recognize(con, include_done: bool = False, scope: str = "new", only
 
 
 def make_task(proj: Project, include_done: bool = False, render: bool = True, scope: str = "new",
-              priorities: list[str] | None = None, progress=None) -> Path | None:
-    """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档。
+              priorities: list[str] | None = None, progress=None, pages: list[str] | None = None) -> Path | None:
+    """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档，pages 给了就只放这几页。
 
     渲染页面图片较慢，progress(已完成, 总数) 用来报进度。"""
-    rows = pick_pages(proj, "all" if include_done else scope, priorities)
+    rows = pick_pages(proj, "all" if include_done else scope, priorities, pages)
     if not rows:
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

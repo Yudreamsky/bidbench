@@ -68,6 +68,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .sw.s-changed, .sw.s-pending_void { border: 2px solid var(--warn); }
 .sw.s-conflict { border: 2px solid var(--crit); }
 .sw.s-missing { border: 1.5px dashed var(--muted); background: none; }
+.sw.s-guess { border: 1.5px dashed var(--accent); background: var(--surface); }
 .ln { width: 22px; height: 0; border-top: 1.5px solid var(--edge); }
 .ln.cross { border-top-style: dashed; }
 .ln.catalog { border-top-style: dotted; border-top-width: 2px; }
@@ -124,6 +125,11 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .node.st-changed .box, .node.st-pending_void .box { stroke: var(--warn); stroke-width: 2; }
 .node.st-conflict .box { stroke: var(--crit); stroke-width: 2; }
 .node.st-missing .box, .node.st-voided .box { fill: var(--band); stroke: var(--muted); stroke-dasharray: 5 4; }
+.node.st-guess .box { fill: var(--surface); stroke: var(--accent); stroke-dasharray: 4 3; stroke-width: 1.25; }
+.node.st-guess.conf-low .box { stroke: var(--muted); stroke-dasharray: 2 3; }
+.node.st-guess.conf-low .lbl { fill: var(--muted); font-style: italic; }
+.boxhead .act { fill: var(--accent); font-size: 11.5px; cursor: pointer; }
+.boxhead .act:hover, .boxhead .act:focus-visible { text-decoration: underline; outline: none; }
 .node .num { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; fill: var(--ink); }
 .node .ttl { font-size: 12px; fill: var(--muted); }
 .node.st-missing .num, .node.st-voided .num, .node.st-missing .ttl, .node.st-voided .ttl { fill: var(--muted); }
@@ -167,6 +173,8 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .pill.st-conflict, .pill.st-missing, .pill.conf-conflict { color: var(--crit); border-color: var(--crit); }
 .pill.conf-high { color: var(--ok); border-color: var(--ok); }
 .pill.conf-confirmed { color: var(--ink); border-color: var(--ink); }
+.pill.st-guess { color: var(--accent); border-color: var(--accent); border-style: dashed; }
+dl.kv dd .pill { margin-left: 6px; font-size: 11px; padding: 0 6px; }
 dl.kv { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; font-size: 13px; }
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; overflow-wrap: anywhere; }
@@ -295,12 +303,13 @@ li.recent .linkbtn { flex: 1; }
             <option value="type">按图类着色</option><option value="disc">按专业着色</option>
           </select>
           <input type="search" class="gsearch" id="g-search" placeholder="搜图号、图名" aria-label="搜图号、图名">
+          <button class="btn" id="g-recog-hits" type="button" hidden></button>
           <label for="f-graph-issues"><input type="checkbox" id="f-graph-issues"> 只看有问题的图纸</label>
           <div class="legend" id="net-legend" hidden></div>
           <div class="legend" id="grid-legend">
             <span><i class="sw"></i>现行</span><span><i class="sw s-updated"></i>本批升版/新增</span>
             <span><i class="sw s-changed"></i>有变更/待确认</span><span><i class="sw s-conflict"></i>冲突</span>
-            <span><i class="sw s-missing"></i>缺失/作废</span><span><i class="ln"></i>索引引用</span>
+            <span><i class="sw s-missing"></i>缺失/作废</span><span><i class="sw s-guess"></i>按文件名暂定</span><span><i class="ln"></i>索引引用</span>
             <span><i class="ln cross"></i>跨专业</span><span><i class="ln catalog"></i>目录列出</span>
           </div>
           <span class="spacer"></span>
@@ -338,7 +347,9 @@ const NS = 'http://www.w3.org/2000/svg';
 const NH = 28;            // 图谱里图号方块的高度
 const EDGE_ALL_MAX = 150; // 图纸不超过这么多时画出全部连线；更多时只画选中、指向的那张图的连线
 const STATUS = { current: '现行', new: '本批新增', updated: '本批升版', changed: '有变更单', conflict: '冲突',
-  pending_void: '作废还是漏发', voided: '已作废', missing: '缺失' };
+  pending_void: '作废还是漏发', voided: '已作废', missing: '缺失', guess: '按文件名暂定' };
+const CONFW = { high: '高', mid: '中', low: '低' };
+const NAMELESS = '文件：';  // 文件名里看不出图号的文件，先用文件名代替图号
 const CONF = { confirmed: '人工确认', high: '高置信', mid: '中置信', low: '低置信', conflict: '冲突' };
 const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '机电', '总图', '景观', '幕墙', '室内', '其他'];
 
@@ -429,6 +440,7 @@ function setState(st, keepPanel) {
   if (ui.selF && !factBy[ui.selF]) ui.selF = null;
   renderHeader();
   buildGraph();
+  updateRecogHits();
   renderMind();
   if (keepPanel) return;  // AI 助手面板里更新数据时留在面板上
   if (ui.selD) renderSheet(ui.selD); else if (ui.selF) renderFact(ui.selF); else renderOverview();
@@ -440,7 +452,8 @@ function renderHeader() {
   const rec = S.recognition;
   const ex = Object.entries(rec.executors).map(([k, v]) => `${({ simulated: '模拟执行器', claude: 'Claude', codex: 'Codex' })[k] || k} ${v} 页`).join('、') || '尚未识别';
   const meta = document.getElementById('proj-meta');
-  meta.replaceChildren(`${S.batches.length} 个收图批次 · ${S.sheets.length} 个图号 · `,
+  const ng = S.sheets.filter(x => x.status === 'guess').length;
+  meta.replaceChildren(`${S.batches.length} 个收图批次 · ${S.sheets.length} 张图${ng ? `（${ng} 张按文件名暂定）` : ''} · `,
     b ? `截至 ${b.received_at} · ` : '', `已识别 ${rec.recognized}/${rec.pages} 页（${ex}）`,
     rec.executors.simulated ? el('span', {}, ' · ', el('span', { class: 'tag-sim' }, '识别结果为模拟数据')) : '',
     VER ? el('span', {}, ' · ', el('button', { class: 'chip', type: 'button', onclick: renderUpdate, title: '软件更新' },
@@ -493,8 +506,31 @@ const SHEET_WORDS = [[/目录/, '目录'], [/总说明|设计说明|施工说明
   [/弱电|智能/, '弱电'], [/详图|大样/, '详图'], [/表/, '表'], [/平面|布置/, '平面']];
 const SHORTER = { 核心筒: '核心', 卫生间: '卫生', 女儿墙: '女儿', 门窗表: '门窗', 剪力墙: '剪墙', 屋面节: '屋面', 梁柱节: '节点' };
 const units = t => (t.match(/[\u4e00-\u9fff]/g) || []).length + (t.match(/[0-9A-Za-z~\-]+/g) || []).length;
+const EN_KIND = [[/cover/i, '封面'], [/drawing\s*(?:register|list|index)|document\s*register/i, '目录'], [/\bnotes?\b|specification|legend/i, '说明'],
+  [/site\s*(?:plan|layout)|location\s*plan|key\s*plan/i, '总图'], [/riser|schematic|single\s*line|diagram/i, '系统'],
+  [/door\s*schedule/i, '门表'], [/window\s*schedule/i, '窗表'], [/finish\w*\s*schedule/i, '装修表'], [/schedule|table/i, '表'],
+  [/stair/i, '楼梯'], [/\blift\b|elevator/i, '电梯'], [/toilet|washroom|\bwc\b/i, '卫生间'], [/wall\s*section/i, '墙身'],
+  [/facade|façade|curtain/i, '幕墙'], [/section/i, '剖面'], [/elevation/i, '立面'], [/detail/i, '详图'], [/foundation|footing/i, '基础'],
+  [/\bpile/i, '桩'], [/ceiling|\brcp\b/i, '吊顶'], [/duct/i, '风管'], [/lighting/i, '照明'], [/sprinkler/i, '喷淋'], [/drainage/i, '排水'],
+  [/plumbing|water/i, '给水'], [/slab/i, '板'], [/beam/i, '梁'], [/column/i, '柱'], [/plan|layout|\bga\b|arrangement/i, '平面']];
+function enShort(t) {  // 英文图名：楼层 + 图类，如 Ground Floor GA Plan → GF平面，Level 05 Ductwork Layout → L5风管
+  let fl = '', m;
+  if (/\bground\b|\bG\/?F\b/i.test(t)) fl = 'GF';
+  else if ((m = t.match(/\bbasement\s*0*(\d{1,2})\b|\b(?:level\s*)?B0*(\d)\b/i))) fl = 'B' + (m[1] || m[2]);
+  else if ((m = t.match(/\b(?:level|lvl|L)\s*0*(\d{1,3})\b/i))) fl = 'L' + m[1];
+  const k = EN_KIND.find(([re]) => re.test(t));
+  let w = k ? k[1] : '';
+  if (/\broof\b/i.test(t) && (!w || w === '平面')) return fl ? fl + '屋面' : '屋顶';
+  const dir = (t.match(/\b(north|south|east|west)\b/i) || [])[1];
+  if (dir && w === '立面') w = { north: '北', south: '南', east: '东', west: '西' }[dir.toLowerCase()] + '立面';
+  const sec = w === '剖面' && (t.match(/\bsection\s+([A-Z0-9]{1,2}\s*-\s*[A-Z0-9]{1,2})/i) || [])[1];
+  if (sec) w += sec.replace(/\s/g, '');
+  const num = !sec && (t.match(/\b(?:stair|lift|core|sheet|type|no\.?)\s*0*(\d{1,2})\b/i) || [])[1];
+  return (fl + w + (num || '')) || null;
+}
 function shortName(s) {
   if (s.cls && s.cls.short) return s.cls.short;  // 智能分类起的中文简称
+  if (s.title && !/[\u4e00-\u9fff]/.test(s.title)) { const e = enShort(s.title); if (e) return e; }
   const t = (s.title || '').replace(/\s+/g, '');
   if (!t) return ((s.discipline || '其')[0]) + ((s.no.match(/(\d+)\D*$/) || [, ''])[1]);  // 没有图名：专业加编号，如 建10
   let m = t.match(/([0-9A-Z]{1,2})[-—]\1剖面/);
@@ -651,11 +687,20 @@ function layout() {
   });
   return { bands, subs, drops, pos, boxOf, w: Math.max(maxX, 400), h: y + rowH + 12 };
 }
-function boxHead(key, label, x, y, w, h, collapsed) {  // 框的标题：点一下收起或展开
+function boxHead(key, label, x, y, w, h, collapsed, guess) {  // 框的标题：点一下收起或展开；guess：框里按文件名暂定的图
   const g = sv('g', { class: 'boxhead', tabindex: 0, role: 'button', 'aria-expanded': String(!collapsed),
     'aria-label': `${label}，${collapsed ? '点击展开' : '点击收起'}` });
   g.append(sv('rect', { class: 'hit', x, y, width: w, height: h }));
   g.append(sv('text', { class: 'band-label', x: x + 6, y: y + h / 2 + 4 }, `${collapsed ? '▸' : '▾'} ${label}`));
+  const pages = (guess || []).flatMap(x => x.pages || []);
+  if (pages.length && latest() && w - textW(`▸ ${label}`, 12) > 110) {
+    const a = sv('text', { class: 'act', x: x + w - 6, y: y + h / 2 + 4, 'text-anchor': 'end', tabindex: 0, role: 'button',
+      'aria-label': `看图识别这一框里按文件名暂定的 ${guess.length} 张图` }, `看图识别 ${guess.length} 张`);
+    const go = ev => { ev.stopPropagation(); renderRecognizePick(`${label.replace(/（\d+）$/, '')}：按文件名暂定的 ${guess.length} 张`, pages); };
+    a.addEventListener('click', go);
+    a.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(ev); } });
+    g.append(a);
+  }
   const toggle = () => {
     if (ui.collapsedBoxes.has(key)) ui.collapsedBoxes.delete(key); else ui.collapsedBoxes.add(key);
     saveLayoutPrefs(); buildGraph();
@@ -750,6 +795,8 @@ function showTip(s, r) {  // r：图纸在屏幕上的位置（getBoundingClient
     el('div', { class: 'tt' }, el('b', {}, s.no), el('span', { class: `pill st-${s.status}` }, STATUS[s.status])),
     el('div', {}, (s.title || '（图名未知）') + (s.current_rev ? `，${s.current_rev} 版` : '')),
     el('div', { class: 'file' }, src ? `源文件：${src.split(' / ').pop()}` : (s.notes || []).join('；') || '没有收到'),
+    ...(s.status === 'guess' ? [el('div', { class: 'file' }, `${s.seen ? '看图没读出图号' : '还没看图识别'}，按文件名暂定，把握${CONFW[s.conf] || '低'}`),
+      guessContent(s) ? el('div', { class: 'file' }, `可能的内容：${guessContent(s).value}`) : null].filter(Boolean) : []),
     ...((s.versions || []).length > 1 ? [el('ul', { class: 'vers' }, s.versions.map(v =>
       el('li', { class: v.state === '现行' ? 'cur' : '' }, `${v.rev || '?'} 版　${v.date || '日期不详'}　批次#${v.batch}　${v.state}`)))] : []),
     ...((s.paths || []).length > 1 ? [el('div', { class: 'file' }, `另有 ${s.paths.length - 1} 处出处`)] : []));
@@ -787,20 +834,22 @@ function buildGraph() {
     defs.append(sv('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' },
       sv('path', { d: 'M0 0L10 5L0 10z', class: cls }))));
   gsvg.append(defs);
+  const guessIn = key => S.sheets.filter(s => s.status === 'guess' && (s.pages || []).length
+    && (key === s.discipline || key === `${s.discipline}|${sheetGroup(s)}`));
   L.bands.forEach(b => {
     gsvg.append(sv('rect', { class: 'band', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10 }));
-    gsvg.append(boxHead(b.key, b.label, b.x + 6, b.y + 4, b.w - 12, 26, b.collapsed));
+    gsvg.append(boxHead(b.key, b.label, b.x + 6, b.y + 4, b.w - 12, 26, b.collapsed, guessIn(b.key)));
   });
   L.subs.forEach(q => {
     gsvg.append(sv('rect', { class: 'subbox', x: q.x, y: q.y, width: q.w, height: q.h, rx: 8 }));
-    gsvg.append(boxHead(q.key, q.label, q.x + 2, q.y + 2, q.w - 4, 22, q.collapsed));
+    gsvg.append(boxHead(q.key, q.label, q.x + 2, q.y + 2, q.w - 4, 22, q.collapsed, guessIn(q.key)));
   });
   edgeLayer = sv('g');
   gsvg.append(edgeLayer);
   S.sheets.forEach(s => {
     const p = L.pos[s.no];
     if (!p) return;  // 在收起的框里
-    const g = sv('g', { class: `node st-${s.status}`, tabindex: 0, role: 'button',
+    const g = sv('g', { class: `node st-${s.status}${s.status === 'guess' ? ' conf-' + s.conf : ''}`, tabindex: 0, role: 'button',
       'aria-label': `${s.no} ${s.title || ''}，${STATUS[s.status]}${(s.versions || []).length > 1 ? `，${s.versions.length} 个版本` : ''}` });
     g.append(sv('rect', { class: 'ring', x: p.x - 3, y: p.y - 3, width: p.w + 6, height: p.h + 6, rx: 9 }));
     const nv = (s.versions || []).length;
@@ -808,7 +857,7 @@ function buildGraph() {
       g.append(sv('rect', { class: 'ghost', x: p.x + 3.5 * k, y: p.y - 3.5 * k, width: p.w, height: p.h, rx: 7 }));
     g.append(sv('rect', { class: 'box', x: p.x, y: p.y, width: p.w, height: p.h, rx: 7 }));
     g.append(sv('text', { class: 'lbl', x: p.x + p.w / 2, y: p.y + 18.5, 'text-anchor': 'middle' }, ALIAS[s.no]));
-    const flag = s.status !== 'current' ? s.status : s.inner ? 'inner' : null;  // 右上角小圆点：升版、变更、冲突、缺失……
+    const flag = s.status === 'guess' ? null : s.status !== 'current' ? s.status : s.inner ? 'inner' : null;  // 右上角小圆点：升版、变更、冲突、缺失……
     if (flag) g.append(sv('circle', { class: `flag f-${flag}`, cx: p.x + p.w - 5, cy: p.y + 5, r: 3.5 }));
     const open = () => { ui.focusSet = null; ui.backTo = null; hideTip(); selectSheet(s.no); };
     g.addEventListener('click', () => { if (!justDragged) open(); });
@@ -823,7 +872,7 @@ function buildGraph() {
   });
   paintGraph();
 }
-const hasIssue = s => s.status !== 'current' || s.inner;
+const hasIssue = s => (s.status !== 'current' && s.status !== 'guess') || s.inner;
 function neighbors(no) {
   const n = new Set([no]);
   S.edges.forEach(e => { if (e.from === no) n.add(e.to); if (e.to === no) n.add(e.from); });
@@ -985,6 +1034,9 @@ function netDraw() {
     ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
     if (['missing', 'voided'].includes(n.s.status)) {
       ctx.setLineDash([2 / k, 2 / k]); ctx.lineWidth = 1.5 / k; ctx.strokeStyle = color; ctx.stroke(); ctx.setLineDash([]);
+    } else if (n.s.status === 'guess') {  // 按文件名暂定：淡色加虚线圈
+      ctx.globalAlpha = a * 0.45; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = a;
+      ctx.setLineDash([2 / k, 2 / k]); ctx.lineWidth = 1.2 / k; ctx.strokeStyle = color; ctx.stroke(); ctx.setLineDash([]);
     } else { ctx.fillStyle = color; ctx.fill(); }
     const ring = RING[n.s.status];
     if (ring) { ctx.lineWidth = 2 / k; ctx.strokeStyle = ring; ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 2.5 / k, 0, Math.PI * 2); ctx.stroke(); }
@@ -1368,6 +1420,15 @@ function renderOverview() {
   const recognizing = ui.job && ui.job.status === 'running' && ui.job.kind === 'recognize';
   if (left > 0 && (recognizing || S.recognition.recognized)) parts.push(el('div', { class: 'note warn' },
     `还有 ${left} 页没识别${recognizing ? '（正在识别，左边会跟着更新）' : ''}：缺图、楼层覆盖、编号断号这些结论要等识别完才准。`));
+  const G = S.guess;
+  if (G && (G.sheets || G.nameless)) {
+    const low = S.sheets.filter(x => x.status === 'guess' && x.conf === 'low' && (x.pages || []).length);
+    parts.push(el('div', { class: 'note' }, `${G.sheets} 张图按文件名暂定${G.nameless ? `，${G.nameless} 个文件看不出图号（先用文件名代替）` : ''}，`
+      + '图谱里是虚线框，点开能看到推测的图号、版次、专业、楼层和可能的内容（都标了把握）。'
+      + '这些推测不拿来判断缺图和版本；要用哪张，点开它或在框标题旁点“看图识别”。',
+      low.length && latest() ? el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn', type: 'button',
+        onclick: () => renderRecognizePick(`把握低的 ${low.length} 张`, low.flatMap(x => x.pages)) }, `看图识别把握低的 ${low.length} 张`)) : null));
+  }
   const cls = S.classification, other = S.sheets.filter(x => x.discipline === '其他').length;
   if (latest() && cls && !cls.last && (other >= 5 || cls.facts > 40)) parts.push(el('div', { class: 'note' },
     other >= 5 ? `${other} 张图按图号认不出专业，都排在“其他”里。` : `已有 ${cls.facts} 条事实。`,
@@ -1462,21 +1523,29 @@ function renderSheet(no) {
   const parts = [];
   if (ui.backTo && factBy[ui.backTo]) parts.push(el('button', { class: 'btn', type: 'button', onclick: () => jumpFact(ui.backTo) }, `← 返回事实：${factBy[ui.backTo].name}`));
   else parts.push(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'));
-  parts.push(el('div', { class: 'ptitle' }, el('span', { class: 'pnum' }, s.no), el('h2', {}, s.title || '（图名未知）'),
-    el('span', { class: `pill st-${s.status}` }, STATUS[s.status])));
+  parts.push(el('div', { class: 'ptitle' }, el('span', { class: 'pnum' }, s.no.startsWith(NAMELESS) ? '（文件名里看不出图号）' : s.no),
+    el('h2', {}, s.title || '（图名未知）'), el('span', { class: `pill st-${s.status}` }, STATUS[s.status])));
+  if (s.status === 'guess') parts.push(...guessCard(s));
   issueFor({ sheet: no }).forEach(i => parts.push(el('div', { class: `note ${i.level === 'crit' ? 'crit' : 'warn'}` }, el('p', {}, i.detail), optionButtons(i))));
   const related = S.issues.filter(i => i.target.sheet !== no && (i.sheets || []).includes(no));
   if (related.length) parts.push(section(`牵涉这张图的问题（${related.length}）`, el('ul', { class: 'list' }, related.map(i => el('li', {},
     el('button', { class: 'linkbtn', type: 'button', onclick: () => goTarget(i.target) },
       el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : 'c-low'}` }), el('span', {}, `${i.kind}：${i.title}`)))))));
-  if (s.status !== 'missing') {
+  if (s.status !== 'missing' && s.status !== 'guess') {
     parts.push(el('dl', { class: 'kv' }, el('dt', {}, '专业'), el('dd', {}, s.discipline + (s.cls && s.cls.discipline ? '（智能分类）' : '')),
       s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group)] : null,
       el('dt', {}, '现行版次'), el('dd', {}, s.current_rev || '—'),
       el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n'))));
     if (s.current_page) parts.push(el('a', { class: 'btn', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, '打开现行版原图'));
     if (s.borrowed) parts.push(el('p', { class: 'meta' }, '这一页与已识别过的页面像素完全相同，直接复用了识别结果。'));
+    if ((s.cad || []).length) parts.push(el('p', { class: 'meta' }, `另有 CAD 文件：${s.cad.map(x => x.split(' / ').pop()).join('、')}`));
   }
+  const pf = s.pending_files || [];  // 同图号、还没看图识别的文件（比如刚收到的新版）
+  if (pf.length) parts.push(section(`还没看图识别的同图号文件（${pf.length}）`,
+    el('ul', { class: 'list' }, pf.map(f => el('li', {}, el('span', { class: 'mono' }, f.path.split(' / ').pop()),
+      f.rev ? el('small', {}, ` 文件名 ${f.rev} 版${f.newer ? '，比现行版新' : ''}`) : null))),
+    latest() ? el('div', { class: 'opts' }, el('button', { class: `btn${pf.some(f => f.newer) ? ' primary' : ''}`, type: 'button',
+      onclick: () => renderRecognizePick(`${s.no} 还没识别的同图号文件`, pf.map(f => f.page_id)) }, `看图识别这 ${pf.length} 页`)) : null));
   const myNotices = (S.notices || []).filter(n => n.affects.includes(no));
   s.notes.filter(t => !myNotices.some(n => t.startsWith(n.id + '（'))).forEach(n => parts.push(el('div', { class: 'note' }, n)));
   myNotices.forEach(n => {  // 改了这张图的变更单：能打开原件，看得到它还改了哪些图
@@ -1485,7 +1554,7 @@ function renderSheet(no) {
       el('div', { class: 'row' }, el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.kind === '变更单' ? '变更单' : '答疑'}原图`),
         others.length ? el('span', { class: 'meta' }, '它还改了') : null, others.map(sheetChip))));
   });
-  if (s.versions.length) parts.push(section('版本链', el('ul', { class: 'list versions' }, s.versions.map(v =>
+  if (s.versions.length && s.status !== 'guess') parts.push(section('版本链', el('ul', { class: 'list versions' }, s.versions.map(v =>
     el('li', { class: v.state === '现行' ? '' : 'old' }, el('b', { class: 'mono' }, v.rev), el('span', { class: 'mono' }, v.date || '—'),
       el('span', {}, `批次#${v.batch} ${v.state}`), el('a', { href: `/api/page/${v.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '原图'))))));
   const rel = S.edges.filter(e => e.from === no || e.to === no);
@@ -1509,7 +1578,7 @@ function renderSheet(no) {
         el('span', {}, own ? `${f.name}：本图写“${own.text || own.value}”` : `${f.name}：${f.value}`,
           el('small', {}, CONF[f.conf] + (own ? `，全项目取 ${f.value}` : '') + ((f.notices || []).length ? '；可能已被变更单修改' : '')))));
     }))
-    : el('p', { class: 'meta' }, s.status === 'missing' ? '缺失图纸没有可抽取的内容。' : '暂未从此图抽取事实。')));
+    : el('p', { class: 'meta' }, s.status === 'missing' ? '缺失图纸没有可抽取的内容。' : s.status === 'guess' ? '看图识别后才有。' : '暂未从此图抽取事实。')));
   const rn = s.rec_notes || [];  // 识别时记下的问题：字迹不清等要注意；“没写单位”之类的备注收起来
   rn.filter(x => x.type !== '其他').forEach(x => parts.push(el('div', { class: 'note warn' }, `识别提示（${x.type}）：${x.text}`)));
   const minor = rn.filter(x => x.type === '其他');
@@ -1517,6 +1586,66 @@ function renderSheet(no) {
     el('ul', { class: 'list' }, minor.map(x => el('li', { class: 'meta' }, x.text)))));
   panel.replaceChildren(...parts);
   ui.statePanel = panel.firstChild;
+}
+
+function guessContent(s) {  // 可能的内容：智能分类给的优先，没有就按图名推测
+  if (s.cls && s.cls.content) return { value: s.cls.content, conf: 'low', src: 'AI 看名字推测' };
+  return (s.guess || {}).content || null;
+}
+function guessCard(s) {  // 按文件名暂定的图：每项推测带把握，按需看图识别
+  const g = s.guess || {};
+  const conf = c => el('span', { class: `pill conf-${c}` }, `把握${CONFW[c] || '低'}`);
+  const row = (label, item, fallback) => item && (item.value || fallback)
+    ? [el('dt', {}, label), el('dd', {}, String(item.value || fallback), conf(item.conf), item.src ? el('small', { class: 'meta' }, ` ${item.src}`) : null)] : null;
+  const out = [el('div', { class: 'note' },
+    s.seen ? '看图识别过这张，但没读出图号。下面是按文件名、文件夹推测的，' : '这张还没看图识别。下面是按文件名、文件夹和 PDF 自带的文字推测的，',
+    '把握低的也先列出来供参考；看图识别后以图签为准，判断缺图、版本不用这些推测。'),
+    el('dl', { class: 'kv' }, row('图号', g.no, '看不出'), row('图名', g.title), row('版次', g.rev),
+      g.status ? [el('dt', {}, '状态码'), el('dd', {}, g.status)] : null,
+      row('专业', g.discipline), s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group, conf('low'), el('small', { class: 'meta' }, ' 智能分类'))] : null,
+      row('楼层', g.floors), row('可能的内容', guessContent(s)),
+      el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n')),
+      (s.cad || []).length ? [el('dt', {}, 'CAD 文件'), el('dd', { class: 'mono' }, s.cad.join('\n'))] : null)];
+  const btns = [];
+  if (s.current_page) btns.push(el('a', { class: 'btn', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, '打开原图'));
+  if ((s.pages || []).length && latest()) btns.push(el('button', { class: 'btn primary', type: 'button',
+    onclick: () => renderRecognizePick(`${s.no.startsWith(NAMELESS) ? s.title : s.no}`, s.pages) }, `看图识别这张（${s.pages.length} 页）`));
+  if (btns.length) out.push(el('div', { class: 'opts' }, btns));
+  if (!(s.pages || []).length) out.push(el('p', { class: 'meta' }, '只有 CAD 文件，没有 PDF，不能看图识别。'));
+  return out;
+}
+
+/* 按需看图识别：图谱里点的那张图、那一框、搜到的图 */
+async function renderRecognizePick(title, pages) {
+  pages = [...new Set(pages)];
+  const back = el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心');
+  const head = el('div', { class: 'ptitle' }, el('h2', {}, '看图识别'), el('p', { class: 'meta' }, title));
+  panel.replaceChildren(back, head, el('p', { class: 'meta' }, '正在检查本机的 Codex 和 Claude 设置……'));
+  try { RECOG = await (await fetch('/api/recognizers')).json(); } catch (e) { RECOG = null; }
+  const R = RECOG || { claude: { ready: APP && APP.claude_ready }, codex: { ready: false, hint: '读不到 Codex 的状态' }, prefs: {} };
+  const pref = R.prefs || {};
+  const executor = el('select', { 'aria-label': '识别方式' },
+    el('option', { value: 'codex' }, 'Codex（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费）'));
+  executor.value = pref.executor || (R.codex.ready ? 'codex' : 'claude');
+  const tier = el('select', { 'aria-label': '档位' },
+    el('option', { value: 'economy' }, '经济档'), el('option', { value: 'strong' }, '强档（加局部切片，看得更细）'));
+  tier.value = pref.tier || 'economy';
+  const box = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
+  const go = el('button', { class: 'btn primary', type: 'button' });
+  const fill = () => {
+    const ex = executor.value, info = R[ex] || {};
+    const min = pages.length * (ex === 'codex' ? 45 / 3 : 20 / 4) / 60 * (tier.value === 'strong' ? 1.5 : 1);
+    go.textContent = `开始识别 ${pages.length} 页（${durText(Math.max(1, min))}）`;
+    go.disabled = !info.ready;
+    box.replaceChildren(...[info.ready ? null : el('div', { class: 'note warn' }, ex === 'codex' ? (info.hint || 'Codex 还不能用。') : '还没有设置 Claude API 密钥。'),
+      el('div', { class: 'note' }, `图纸页面会发送给 ${ex === 'codex' ? 'OpenAI（通过 Codex）' : 'Anthropic'} 识别。识别好一批，左边就更新一批。`)].filter(Boolean));
+  };
+  executor.addEventListener('change', fill);
+  tier.addEventListener('change', fill);
+  fill();
+  go.addEventListener('click', () => startJob('recognize', { executor: executor.value, tier: tier.value,
+    model: pref.executor === executor.value ? pref.model || null : null, pages }));
+  panel.replaceChildren(back, head, field('识别方式', executor), field('档位', tier), box, el('div', { class: 'opts' }, go));
 }
 
 function renderFact(key) {
@@ -1531,6 +1660,7 @@ function renderFact(key) {
   iss.forEach(i => { const o = optionButtons(i); if (o) parts.push(o); });
   if (!iss.length && f.conf !== 'confirmed' && latest())
     parts.push(el('div', { class: 'opts' }, el('button', { class: 'btn', type: 'button', onclick: () => decide({ kind: 'fact', key, value: f.value, label: `确认 ${f.name} = ${f.value}` }) }, '人工确认此值')));
+  if (f.guess) parts.push(el('p', { class: 'meta' }, '这条是按图名推测的，图上还没读到；识别出设计说明后以说明为准。'));
   parts.push(section(`证据（${f.evidence.length}）`, el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, f.evidence.map(e =>
     el('div', { class: `ev${e.active ? '' : ' stale'}` },
       el('div', { class: 'row' }, el('button', { class: 'chip', type: 'button', onclick: () => showSources(key, e.sheet) }, `${e.sheet} ${e.rev || ''}版`),
@@ -1654,7 +1784,16 @@ function showSources(key, no) {
 function clearAll() {
   ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null;
   document.getElementById('g-search').value = '';
+  updateRecogHits();
   paintGraph(); renderMind(); renderOverview();
+}
+function updateRecogHits() {  // 搜到按文件名暂定的图：可以一起看图识别
+  const q = document.getElementById('g-search').value.trim();
+  const gh = q && S ? searchSheets(q).filter(x => x.status === 'guess' && (x.pages || []).length) : [];
+  const rb = document.getElementById('g-recog-hits');
+  rb.hidden = !gh.length || !latest();
+  rb.textContent = `看图识别搜到的 ${gh.length} 张`;
+  rb.onclick = () => renderRecognizePick(`搜“${q}”：按文件名暂定的 ${gh.length} 张`, gh.flatMap(x => x.pages));
 }
 function searchSheets(q) {
   q = q.trim().toLowerCase();
@@ -2188,6 +2327,7 @@ document.getElementById('g-search').addEventListener('input', e => {
   const hits = searchSheets(e.target.value);
   ui.focusSet = e.target.value.trim() ? new Set(hits.map(s => s.no)) : null;
   if (hits.length) revealSheet(hits[0].no);
+  updateRecogHits();
   paintGraph();
   if (hits.length && net.on) netCenter(hits[0].no);
   else if (hits.length && nodeEls[hits[0].no]) nodeEls[hits[0].no].scrollIntoView({ block: 'nearest', inline: 'nearest' });

@@ -153,7 +153,10 @@ class Toolkit:
                 "references": refs, "floors": s["floors_text"], "same_floor": around["same_floor"],
                 **({"more_same_floor": around["more_same_floor"]} if "more_same_floor" in around else {}),
                 "general_sheets": around["general"], "own_values": s["own_values"],
-                "recognition_notes": s["rec_notes"], "facts": facts, "issues": issues}
+                "recognition_notes": s["rec_notes"], "facts": facts, "issues": issues,
+                **({"guess": s["guess"], "guess_confidence": CONF_LABEL[s["conf"]],
+                    "guess_note": "还没看图识别，这些是按文件名、文件夹推测的，把握见各项的 conf"} if s.get("guess") else {}),
+                **({"files_not_recognized_yet": s["pending_files"]} if s.get("pending_files") else {})}
 
     def get_page(self, page_id: str, include_text_layer: bool = False) -> dict:
         if not re.fullmatch(r"[0-9a-f]{12}-p\d{3}", page_id or ""):
