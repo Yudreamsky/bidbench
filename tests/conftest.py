@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "samples"))
 import make_sample  # noqa: E402
 
 from bidbench import debuglog, ingest, recognition, state  # noqa: E402
-from bidbench.executors import simulated  # noqa: E402
+from bidbench.executors import codex, simulated  # noqa: E402
 from bidbench.store import Project  # noqa: E402
 
 
@@ -30,6 +30,21 @@ def _isolated_config(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.mktemp("tmp")))
     yield
     debuglog.close()  # 命令行测试打开的日志文件用完就关，临时目录才删得掉
+
+
+class RealServiceCalled(BaseException):
+    """测试调用了真的 Codex。继承 BaseException：不会被“这一批没分成、继续”之类的处理吞掉。"""
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ai(monkeypatch):
+    """测试不联网、不占额度：没有 Claude 密钥，真的 Codex 一调用就报错。要用 AI 的测试传入假的客户端或 FakeCodex。"""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+    def refuse(cmd, prompt, timeout):
+        raise RealServiceCalled("测试调用了真的 Codex，请传入假的 runner（FakeCodex）")
+    monkeypatch.setattr(codex, "_subprocess_runner", refuse)
 
 
 @pytest.fixture(scope="session")

@@ -224,6 +224,8 @@ def test_workbench_codex_flow(demo_copy, monkeypatch):
     from test_desktop import Client
     monkeypatch.setattr(ops, "codex_status", lambda refresh=False: _fake_status())
     monkeypatch.setattr(ops, "recognize_codex", functools.partial(ops.recognize_codex, runner=FakeCodex()))
+    blank = FakeCodex(lambda p, n: ({"sheets": [], "facts": []}, None))  # 识别完的智能分类另有测试（test_classify）
+    monkeypatch.setattr(ops, "classify", functools.partial(ops.classify, runner=blank))
     httpd = server.serve(demo_copy, port=0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     c = Client(httpd)

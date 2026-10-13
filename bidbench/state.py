@@ -1,17 +1,17 @@
 """派生状态：图纸台账、版本合并、批次性质、缺图、关系、事实层、问题清单。
 
-输入只有两类：收到的批次（及其识别结果）和人的决定。派生结果每次重新计算，
-因此“截至第 N 批”的状态可以随时还原，差异报告就是相邻两批状态的比较。
+输入只有两类：收到的批次（及其识别结果）和人的决定；另外套用 AI 的智能分类（只影响专业认不出的图和显示时的分组）。
+派生结果每次重新计算，因此“截至第 N 批”的状态可以随时还原，差异报告就是相邻两批状态的比较。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
-from . import floors, pdfpages, risk
+from . import classify, floors, pdfpages, risk
 from .ingest import FOLDER_MARK
 from .recognition import weak_reason
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
@@ -220,7 +220,8 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
             return {"project": proj.meta, "generated_at": now_iso(), "as_of": 0, "batches": [], "sheets": [],
                     "edges": [], "issues": [], "facts": {"groups": []}, "baselines": [], "notices": [],
                     "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}},
-                    "security": {"files": [], "scans": [], "pending": 0}, **assistant}
+                    "security": {"files": [], "scans": [], "pending": 0}, "classification": None, **assistant}
+        labels = classify.load_labels(con)
         as_of = as_of or batches[-1]["seq"]
         batches = [b for b in batches if b["seq"] <= as_of]
         decisions = latest_decisions(con)
@@ -239,7 +240,8 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
                              " (SELECT sha256 FROM risk_findings) ORDER BY o.batch_seq, o.id", (as_of,)):
             risk_paths[r["sha256"]].append(r["path"])
 
-    state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of)
+    state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels)
+    state["classification"] = classify.summary(labels, state)
     state["security"] = _security(risk_rows, scans, risk_paths, decisions, state["issues"])
     state["issues"].sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
     state.update(assistant)
@@ -251,7 +253,12 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
     return state
 
 
-def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of):
+def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels=None):
+    labels = labels or {"sheet": {}, "fact": {}, "last": None}
+
+    def disc(no: str) -> str:  # 按图号认不出专业的，用智能分类给的
+        return classify.sheet_discipline(labels["sheet"].get(no), discipline_of(no))
+
     sheets: dict[str, Sheet] = {}
     notices = []  # 变更单、答疑等非图纸文件
     unrecognized = []
@@ -266,7 +273,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             continue
         if not no:
             continue
-        s = sheets.setdefault(no, Sheet(no=no, discipline=discipline_of(no)))
+        s = sheets.setdefault(no, Sheet(no=no, discipline=disc(no)))
         s.pages.append((_val(p.rec, "revision"), p))
 
     issues: list[dict] = []
@@ -345,6 +352,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             "paths": cp.paths, "inner": all(_in_nested_archive(x) for x in cp.paths),
             "notes": notes, "borrowed": cp.rec_borrowed, "own_values": [],
             "rec_notes": [{"type": x["type"], "text": x["description"]} for x in cp.rec["issues"]],
+            "cls": classify.sheet_view(labels["sheet"].get(no), discipline_of(no)),
         }
 
     # ---- 变更单 ----
@@ -439,7 +447,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             t = norm_no(r["target_drawing_no"])
             if not t or t == no:
                 continue
-            etype = "cross" if discipline_of(t) != discipline_of(no) else "ref"
+            etype = "cross" if disc(t) != disc(no) else "ref"
             edges.append({"from": no, "to": t, "type": etype, "label": r["raw_text"], "bbox": r["bbox"],
                           "page_id": p.page_id})
             if t not in live:
@@ -548,7 +556,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                              + "。扫描件或图签不全的页面，识别时选“识别不完整的页面”交给多模态执行器复核。", {}, []))
 
     # ---- 事实层 ----
-    facts = _facts(sheets, sheet_out, current_page, notice_out, decisions, issues, live)
+    facts = _facts(sheets, sheet_out, current_page, notice_out, decisions, issues, live, labels["fact"])
 
     # ---- 楼层覆盖 ----
     floor_coverage = _floor_coverage(sheet_out, current_page, facts, decisions, issues, live)
@@ -573,10 +581,11 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     # ---- 汇总 ----
     sheets_list = list(sheet_out.values())
     for t, m in sorted(missing.items()):
-        out = {"no": t, "title": m["title"], "discipline": discipline_of(t), "status": "missing",
+        out = {"no": t, "title": m["title"], "discipline": disc(t), "status": "missing",
                "current_rev": None, "current_page": None, "versions": [], "paths": [],
                "inner": False, "notes": m["evidence"], "missing_level": m["level"],
-               "confirmed": bool(m.get("confirmed")), "borrowed": False, "own_values": [], "rec_notes": []}
+               "confirmed": bool(m.get("confirmed")), "borrowed": False, "own_values": [], "rec_notes": [],
+               "cls": classify.sheet_view(labels["sheet"].get(t), discipline_of(t))}
         fl = floors.parse_floors(m["title"] or "")
         _set_floors(out, fl, "图名" if fl else "")
         sheets_list.append(out)
@@ -877,7 +886,7 @@ def _security(rows, scans, paths, decisions, issues) -> dict:
 
 
 def _disc_order(d: str) -> int:
-    order = ["建筑", "结构", "给排水", "暖通", "电气", "其他"]
+    order = classify.DISCIPLINES
     return order.index(d) if d in order else len(order)
 
 
@@ -896,7 +905,9 @@ def _basis_quote(evs: list) -> str:
     return f"，原文“{t}”" if t else ""
 
 
-def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live):
+def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live, fact_labels=None):
+    """项目事实，按大类分组；每条带 path（大类下面的小类）：智能分类过的按 AI 的，没分过的按说法粗分。"""
+    fact_labels = fact_labels or {}
     ev_by_key: dict[str, list] = defaultdict(list)
     names: dict[str, str] = {}
     is_std: dict[str, bool] = {}
@@ -988,13 +999,21 @@ def _facts(sheets, sheet_out, current_page, notices, decisions, issues, live):
                 f"出处 {'、'.join(sorted(act_sheets))} 有{'、'.join(by_notice)}，这个数值可能已被修改，以变更单为准。")
         else:
             by_notice = []
-        groups[fact_group(names[key], is_std[key])].append({
+        place = classify.fact_place(fact_labels.get(classify.fact_template(names[key])), is_std[key])
+        top, path = place or (fact_group(names[key], is_std[key]), None)
+        groups[top].append({
             "key": key, "name": names[key], "value": display, "conf": conf, "note": note,
             "evidence": act + stale, "sources": sorted(act_sheets), "notices": by_notice,
+            "path": path, "std": is_std[key], "ai": place is not None,
         })
-    order = ["工程概况", "楼层", "结构构件", "执行规范", "其他"]
+    for fs in groups.values():  # 还没智能分类的：同一说法有两条以上的归成一个小类（KL3 截面、Q1 截面 → 截面）
+        fam = {f["key"]: classify.fact_family(f["name"]) for f in fs if f["path"] is None}
+        n = Counter(fam.values())
+        for f in fs:
+            if f["path"] is None:
+                f["path"] = [fam[f["key"]]] if n[fam[f["key"]]] >= 2 else []
     return {"groups": [{"id": g, "label": g, "facts": sorted(groups[g], key=lambda f: f["name"])}
-                       for g in order if groups.get(g)]}
+                       for g in classify.FACT_TOPS if groups.get(g)]}
 
 
 # ---------------- 差异报告 ----------------

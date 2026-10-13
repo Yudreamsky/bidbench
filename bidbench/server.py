@@ -28,7 +28,7 @@ from .store import Project, SchemaTooNew, add_decision, now_iso
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev"}
 TOKEN_META = '<meta name="bidbench-token" content="">'
-PROJECT_JOBS = {"receive", "estimate", "recognize", "build", "export", "scan"}  # 记进项目操作日志的任务
+PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan"}  # 记进项目操作日志的任务
 SOURCE = "工作台"
 
 log = logging.getLogger(__name__)
@@ -301,9 +301,11 @@ def _job_fn(app: _App, kind: str, body: dict):
         def fn(job):
             def progress(n, total):
                 job.progress = (n, total)
+            along = ops.ClassifyAlong(proj, executor, model, job.log, progress)  # 边识别边分类
 
             def imported(n):
                 job.imported = n
+                along(n)
             t = task
             if t is None:  # 按选中的几档准备页面图片：先目录、说明、平面，详图大样放最后
                 job.stage = "准备页面图片"
@@ -314,11 +316,39 @@ def _job_fn(app: _App, kind: str, body: dict):
                     return None
             job.stage, job.progress = "识别", None
             recognize = ops.recognize_codex if executor == "codex" else ops.recognize_claude
-            r = recognize(proj, t, tier, model, log=job.log, progress=progress, on_import=imported)
-            job.stage = "计算台账"
+            try:
+                r = recognize(proj, t, tier, model, log=job.log, progress=progress, on_import=imported)
+            finally:
+                along.wait()
+            job.stage, job.progress = "智能分类", None  # 把新出现的图纸和事实分完；分不成不影响识别结果
+            along.finish()
+            job.stage, job.progress = "计算台账", None
             ops.build(proj, log=job.log)
             return r
         return f"{oplog.TITLES[executor]}（{'经济档' if tier == 'economy' else '强档'}）", fn
+
+    if kind == "classify":
+        executor = body.get("executor") or "codex"
+        if executor not in (*EXECUTORS, "simulated"):
+            raise ValueError("未知的分类方式")
+        model = _model(body)
+        if executor == "claude" and not ops.has_claude_credentials():
+            raise ValueError("还没有设置 Claude API 密钥，请先到“设置”里填写")
+        if executor == "codex":
+            st = ops.codex_status()
+            if not st["ready"]:
+                raise ValueError(st["hint"] or "Codex 还不能用")
+        redo = bool(body.get("redo"))
+
+        def fn(job):
+            def progress(n, total):
+                job.progress = (n, total)
+            job.stage = "智能分类"
+            r = ops.classify(need_proj(), executor, model, redo, log=job.log, progress=progress)
+            job.stage, job.progress = "计算台账", None
+            ops.build(proj, log=job.log)
+            return r
+        return f"{oplog.TITLES['classify']}（{ops.CLASSIFY_BY[executor]}{'，全部重新分' if redo else ''}）", fn
 
     if kind == "build":
         return oplog.TITLES["build"], lambda job: ops.build(need_proj(), log=job.log)

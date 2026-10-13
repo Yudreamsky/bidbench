@@ -146,6 +146,13 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .mm-fact.hl .box { fill: var(--accent-tint); stroke: var(--accent); }
 .mm-fact.sel .box { stroke: var(--accent); stroke-width: 2.5; }
 .mm-fact.dim { opacity: .35; }
+.mm-sub .box { fill: var(--band); }
+.mm-group.hl .box { fill: var(--accent-tint); stroke: var(--accent); }
+.mm-group.dim { opacity: .45; }
+.mm-group text.cnt .bad { fill: var(--crit); }
+.mm-more .box { fill: none; stroke: var(--line); stroke-dasharray: 4 3; }
+.mm-more text { fill: var(--muted); font-size: 12px; }
+.mm:focus-visible .box { stroke: var(--accent); stroke-width: 2; }
 .cd-confirmed { fill: var(--ink); } .cd-high { fill: var(--ok); } .cd-mid { fill: var(--accent); } .cd-low { fill: var(--warn); } .cd-conflict { fill: var(--crit); }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .panel > * { flex-shrink: 0; }  /* 内容比右栏高时整栏滚动，不把带滚动条的运行记录框压扁 */
@@ -297,6 +304,7 @@ li.recent .linkbtn { flex: 1; }
             <span><i class="ln cross"></i>跨专业</span><span><i class="ln catalog"></i>目录列出</span>
           </div>
           <span class="spacer"></span>
+          <button class="btn" id="g-classify" type="button" title="让 AI 给图纸分专业、分小框、起中文简称">智能分类</button>
           <button class="btn" id="g-reset" type="button" hidden title="展开所有收起的框，拖过的方块回到原来的位置">复原排版</button>
           <button class="btn" id="clear" type="button">清除选择</button>
         </div>
@@ -312,11 +320,13 @@ li.recent .linkbtn { flex: 1; }
             <span><i class="dot c-mid"></i>中置信</span><span><i class="dot c-low"></i>低置信</span><span><i class="dot c-conflict"></i>冲突</span>
           </div>
           <span class="spacer"></span>
+          <span class="meta" id="mm-cls"></span>
+          <button class="btn" id="mm-classify" type="button" title="让 AI 给事实分多级目录，给图纸分专业、分小框">智能分类</button>
           <button class="btn" id="mm-expand" type="button">全部展开</button>
           <button class="btn" id="mm-collapse" type="button">全部收起</button>
         </div>
         <div class="canvas"><svg id="mind" role="group" aria-label="事实思维导图"></svg></div>
-        <p class="hint">点击分组展开或收起；点击事实查看证据，证据里的图号可跳回图谱。</p>
+        <p class="hint">点分组展开或收起，事实多的分组会再分小类（按智能分类，还没分类时按名称粗分）；点事实看证据，证据里的图号可跳回图谱。</p>
       </section>
     </div>
     <aside class="panel" id="panel" aria-live="polite"><p class="meta">加载中…</p></aside>
@@ -330,15 +340,16 @@ const EDGE_ALL_MAX = 150; // 图纸不超过这么多时画出全部连线；更
 const STATUS = { current: '现行', new: '本批新增', updated: '本批升版', changed: '有变更单', conflict: '冲突',
   pending_void: '作废还是漏发', voided: '已作废', missing: '缺失' };
 const CONF = { confirmed: '人工确认', high: '高置信', mid: '中置信', low: '低置信', conflict: '冲突' };
-const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '其他'];
+const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '机电', '总图', '景观', '幕墙', '室内', '其他'];
 
 let S = null, APP = null;
 const TOKEN = document.querySelector('meta[name="bidbench-token"]').content;
-const ui = { view: 'graph', selD: null, selF: null, focusSet: null, backTo: null, collapsed: new Set(),
+const ui = { view: 'graph', selD: null, selF: null, focusSet: null, backTo: null,
+  mmOpen: new Set(), mmShut: new Set(), mmMore: new Set(), mmFor: null, mmFresh: false, mmScroll: false,  // 思维导图：展开的分组（按项目记在本机）、临时收起的、全部列出的
   collapsedBoxes: new Set(), gridPos: {}, layoutFor: null,  // 图谱：收起的框、拖过的方块（按项目记在本机）
   graphIssues: false, factIssues: false, asOf: null,
   job: null, jobView: false, jobFirst: null };  // 后台任务：最新状态、右栏是否在看它的进度、进度面板的第一个元素
-let nodeEls = {}, edgeEls = [], sheetBy = {}, factBy = {}, factGroupOf = {};
+let nodeEls = {}, edgeEls = [], sheetBy = {}, factBy = {}, factGroupOf = {}, factTop = {};
 
 function el(tag, attrs, ...kids) {
   const n = document.createElement(tag);
@@ -358,8 +369,8 @@ function sv(tag, attrs, ...kids) {
   return n;
 }
 const ctx = document.createElement('canvas').getContext('2d');
-function textW(s, size, weight) {
-  ctx.font = `${weight || 400} ${size}px ${getComputedStyle(document.body).fontFamily}`;
+function textW(s, size, weight, mono) {  // mono：等宽字体（数字、图号）
+  ctx.font = `${weight || 400} ${size}px ${mono ? getComputedStyle(document.body).getPropertyValue('--font-mono') : getComputedStyle(document.body).fontFamily}`;
   return ctx.measureText(s).width;
 }
 function toast(msg) {
@@ -410,8 +421,10 @@ async function decide(opt) {
 function setState(st, keepPanel) {
   S = st;
   sheetBy = Object.fromEntries(S.sheets.map(s => [s.no, s]));
-  factBy = {}; factGroupOf = {};
-  S.facts.groups.forEach(g => g.facts.forEach(f => { factBy[f.key] = f; factGroupOf[f.key] = g.label; }));
+  factBy = {}; factGroupOf = {}; factTop = {};
+  S.facts.groups.forEach(g => g.facts.forEach(f => {
+    factBy[f.key] = f; factTop[f.key] = g.id; factGroupOf[f.key] = [g.label, ...(f.path || [])].join(' / ');
+  }));
   if (ui.selD && !sheetBy[ui.selD]) ui.selD = null;
   if (ui.selF && !factBy[ui.selF]) ui.selF = null;
   renderHeader();
@@ -481,6 +494,7 @@ const SHEET_WORDS = [[/目录/, '目录'], [/总说明|设计说明|施工说明
 const SHORTER = { 核心筒: '核心', 卫生间: '卫生', 女儿墙: '女儿', 门窗表: '门窗', 剪力墙: '剪墙', 屋面节: '屋面', 梁柱节: '节点' };
 const units = t => (t.match(/[\u4e00-\u9fff]/g) || []).length + (t.match(/[0-9A-Za-z~\-]+/g) || []).length;
 function shortName(s) {
+  if (s.cls && s.cls.short) return s.cls.short;  // 智能分类起的中文简称
   const t = (s.title || '').replace(/\s+/g, '');
   if (!t) return ((s.discipline || '其')[0]) + ((s.no.match(/(\d+)\D*$/) || [, ''])[1]);  // 没有图名：专业加编号，如 建10
   let m = t.match(/([0-9A-Z]{1,2})[-—]\1剖面/);
@@ -596,15 +610,16 @@ function layout() {
     }
     const cw = Math.max(60, ...items.map(s => Math.ceil(textW(ALIAS[s.no], 12.5, 600)) + 22));  // 同一专业的方块一样宽，排得整齐
     const types = {};
-    items.forEach(s => (types[sheetType(s)] ||= []).push(s));
-    const tkeys = Object.keys(types).sort((a, b) => TYPE_ORDER.indexOf(a) - TYPE_ORDER.indexOf(b));
+    items.forEach(s => (types[sheetGroup(s)] ||= []).push(s));
+    const tkeys = Object.keys(types).sort(groupOrder(items));
     const split = items.length >= SUB_MIN && tkeys.length > 1;
     const parts = split ? tkeys.map(t => ({ key: `${d}|${t}`, label: `${t}（${types[t].length}）`, items: types[t] }))
       : [{ key: d, label: null, items }];
     const inner = split ? SUBPAD : 0, head = split ? SUBHEAD : 0;
     const fit = Math.max(1, Math.floor((MAXW - 24 - PAD * 2 - inner * 2 + GAP) / (cw + GAP)));
     const cols = Math.min(fit, Math.max(1, Math.ceil(Math.sqrt(Math.max(...parts.map(q => q.items.length)) * 2.2))));  // 少时接近方形，多时铺满一行
-    let top = HEAD, bw = minW;
+    const rowMax = MAXW - 24 - PAD * 2;  // 小框在大框里从左往右排，放不下换行
+    let fx = 0, top = HEAD, rowH = 0, bw = minW;
     const placed = parts.map(q => {
       const collapsed = split && ui.collapsedBoxes.has(q.key);
       const cell = collapsed ? new Map() : boxCells(q.items, cols, q.key);
@@ -614,16 +629,17 @@ function layout() {
       const cellsW = ncol ? ncol * (cw + GAP) - GAP : 0;
       const w = split ? Math.max(Math.ceil(textW(q.label, 12, 400)) + 40, cellsW + inner * 2) : cellsW;
       const h = head + (nrow ? nrow * ROWH - GAP + inner : 0);
-      const r = { ...q, collapsed, cell, nrow, w, h, top };
-      top += h + (split ? GAP : 0);
-      bw = Math.max(bw, w + PAD * 2);
+      if (fx > 0 && fx + w > rowMax) { fx = 0; top += rowH + GAP; rowH = 0; }
+      const r = { ...q, collapsed, cell, nrow, w, h, top, left: fx };
+      fx += w + GAP; rowH = Math.max(rowH, h);
+      bw = Math.max(bw, r.left + w + PAD * 2);
       return r;
     });
-    const bh = (split ? top - GAP : top) + PAD;
+    const bh = top + rowH + PAD;
     const [bx, by] = place(bw, bh);
     bands.push({ key: d, label, x: bx, y: by, w: bw, h: bh, collapsed: false });
     placed.forEach(q => {
-      const qx = bx + PAD, qy = by + q.top, cx0 = qx + inner, cy0 = qy + head;
+      const qx = bx + PAD + q.left, qy = by + q.top, cx0 = qx + inner, cy0 = qy + head;
       if (split) subs.push({ key: q.key, label: q.label, x: qx, y: qy, w: q.w, h: q.h, collapsed: q.collapsed });
       if (q.collapsed) return;
       drops.push({ key: q.key, x: qx, y: qy, w: split ? q.w : bw - PAD * 2, h: q.h, cx0, cy0, cols, rows: q.nrow, cw });
@@ -651,7 +667,7 @@ function boxHead(key, label, x, y, w, h, collapsed) {  // 框的标题：点一�
 function revealSheet(no) {  // 图在收起的框里：把它所在的框展开
   const s = sheetBy[no];
   if (!s || nodeBox[no] || net.on) return;
-  const keys = [s.discipline, `${s.discipline}|${sheetType(s)}`].filter(k => ui.collapsedBoxes.has(k));
+  const keys = [s.discipline, `${s.discipline}|${sheetGroup(s)}`].filter(k => ui.collapsedBoxes.has(k));
   if (!keys.length) return;
   keys.forEach(k => ui.collapsedBoxes.delete(k));
   saveLayoutPrefs(); buildGraph();
@@ -851,7 +867,15 @@ function sheetType(s) {  // 图类：中文、英文图名都认
   if (/平面|布置|\bplans?\b|layout|\bga\b|general arrangement|setting out/i.test(t)) return '平面图';
   return '其他';
 }
-const netGroup = s => net.colorBy === 'type' ? sheetType(s) : s.discipline;
+function sheetGroup(s) { return (s.cls && s.cls.group) || sheetType(s); }  // 小框：智能分类给的小类，没分类时按图名认图类
+function groupOrder(items) {  // 小框的先后：按图名认的图类按固定顺序；智能分类的按图号顺序里第一次出现的先后；“其他”放最后
+  const first = new Map();
+  items.forEach((s, i) => { const t = sheetGroup(s); if (!first.has(t)) first.set(t, i); });
+  const ai = items.some(s => s.cls && s.cls.group);
+  const rank = t => t === '其他' ? 1e9 : ai ? first.get(t) : TYPE_ORDER.indexOf(t);
+  return (a, b) => rank(a) - rank(b);
+}
+const netGroup = s => net.colorBy === 'type' ? sheetType(s) : s.discipline;  // 着色用粗分的几类，智能分类的小类太多、颜色分不开
 function hash01(str, salt) {  // 每张图固定的伪随机数：每次打开关系网，点的初始位置都一样
   let h = 2166136261 ^ salt;
   for (const c of str) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
@@ -1070,72 +1094,200 @@ function setGraphMode(m) {
   if (net.on) { netBuild(); net.userView = false; netKick(1); } else buildGraph();
 }
 
-/* ---------- 思维导图 ---------- */
+/* ---------- 思维导图：大类 → 小类 → 事实。小类按智能分类，还没分类时按名称粗分；事实多的分组才往下分，每一级都能收起 ---------- */
 const msvg = document.getElementById('mind');
 const factMatch = f => !ui.factIssues || ['conflict', 'low'].includes(f.conf);
+const MM_SPLIT = 12;  // 分组里的事实不超过这么多时直接列出，不再往下分小类
+const MM_SHOW = 30;   // 分组里直接挂着的事实超过这么多时，先列这么多，其余点“还有…”再显示
+const mmKey = () => `bidbench.mindOpen.${(S && S.project && S.project.name) || ''}`;
+function loadMindPrefs() {  // 每个项目各记各的：展开了哪些分组
+  if (ui.mmFor === mmKey()) return;
+  ui.mmFor = mmKey();
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem(ui.mmFor) || 'null'); } catch (e) { v = null; }
+  ui.mmOpen = new Set(Array.isArray(v) ? v : []);
+  ui.mmShut = new Set(); ui.mmMore = new Set();
+  ui.mmFresh = !Array.isArray(v);  // 第一次打开这个项目的思维导图：事实不多时大类都展开
+}
+function saveMindPrefs() {
+  try { localStorage.setItem(mmKey(), JSON.stringify([...ui.mmOpen])); } catch (e) { /* 忽略 */ }
+}
+function factPathIds(f) {  // 一条事实所在的各级分组
+  const ids = [factTop[f.key]];
+  (f.path || []).forEach(p => ids.push(ids.at(-1) + '/' + p));
+  return ids;
+}
+function mindTree(hl) {  // 大类 → 小类 → 事实。all：分组里的全部事实（按名称排好）；bad、hl：其中冲突的、选中图纸上的条数
+  const mk = (id, label) => ({ id, label, kids: new Map(), facts: [], all: [] });
+  const tops = S.facts.groups.map(g => {
+    const top = mk(g.id, g.label);
+    g.facts.filter(factMatch).forEach(f => {
+      let node = top;
+      top.all.push(f);
+      (f.path || []).forEach(p => {
+        if (!node.kids.has(p)) node.kids.set(p, mk(node.id + '/' + p, p));
+        node = node.kids.get(p);
+        node.all.push(f);
+      });
+      node.facts.push(f);
+    });
+    return top;
+  }).filter(t => t.all.length);
+  tops.forEach(bucket);
+  const nat = new Map();  // 名称里的楼层、编号按数字排：三层在十二层前面，KL2 在 KL10 前面
+  const key = f => nat.get(f.key) ?? nat.set(f.key, f.name.replace(/[一二两三四五六七八九十]+/g, t => cnInt(t) ?? t)).get(f.key);
+  const byName = (a, b) => key(a).localeCompare(key(b), 'zh-CN', { numeric: true });
+  const count = node => {
+    node.all.sort(byName); node.facts.sort(byName);
+    node.n = node.all.length;
+    node.bad = node.all.filter(f => f.conf === 'conflict').length;
+    node.hl = hl ? node.all.filter(f => hl.has(f.key)).length : 0;
+    node.kids.forEach(count);
+  };
+  tops.forEach(count);
+  return tops;
+}
+const bucketKey = f => f.name.split(/[\s（(：:]/)[0];
+function bucket(node) {  // 直接挂着的事实太多：按名称开头的编号（KL1、KL2……）再分一级；分不开的只先列一部分
+  node.kids.forEach(bucket);
+  if (node.facts.length <= MM_SHOW) return;
+  const by = new Map();
+  node.facts.forEach(f => { const k = bucketKey(f); if (!by.has(k)) by.set(k, []); by.get(k).push(f); });
+  if (by.size < 2 || by.size > 40 || by.size * 2 > node.facts.length) return;
+  by.forEach((fs, k) => node.kids.set('~' + k, { id: node.id + '/~' + k, label: k, kids: new Map(), facts: fs, all: fs }));
+  node.facts = [];
+}
+function chain(node) {  // 只有一个小类、也没有直接挂着的事实：并成一级，如“执行规范 · 国家标准”
+  let label = node.label, body = node;
+  while (body.kids.size === 1 && !body.facts.length) { body = body.kids.values().next().value; label += ' · ' + body.label; }
+  return { label, body };
+}
+const subOrder = (a, b) => (a.label === '其他') - (b.label === '其他') || a.label.localeCompare(b.label, 'zh-CN', { numeric: true });
+function mindIds(nodes, out = []) { nodes.forEach(n => { out.push(n.id); mindIds([...n.kids.values()], out); }); return out; }
+function clsStatus() {  // 工具栏上的一句话：分组按智能分类还是按名称粗分
+  const c = S.classification;
+  if (!c || !c.facts) return '';
+  if (!c.facts_done) return '分组按名称粗分，还没智能分类';
+  return c.facts_done < c.facts ? `已智能分类 ${c.facts_done}/${c.facts} 条，其余按名称粗分` : '分组按智能分类';
+}
+function onAct(g, fn) {  // 点击、回车、空格都能操作
+  g.addEventListener('click', fn);
+  g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); fn(); } });
+  return g;
+}
+function toggleMind(id, open) {
+  if (open) { ui.mmOpen.delete(id); ui.mmShut.add(id); } else { ui.mmShut.delete(id); ui.mmOpen.add(id); }
+  saveMindPrefs(); renderMind();
+}
 function renderMind() {
   msvg.textContent = '';
-  const ROW = 40, TOP = 24, X0 = 16, X1 = 196;
-  const groups = S.facts.groups.map(g => ({ g, kids: g.facts.filter(factMatch) })).filter(o => o.kids.length);
-  if (!groups.length) {
+  loadMindPrefs();
+  document.getElementById('mm-cls').textContent = clsStatus();
+  const hl = ui.selD ? new Set(S.facts.groups.flatMap(g => g.facts).filter(f => f.sources.includes(ui.selD)).map(f => f.key)) : null;
+  const tops = mindTree(hl);
+  if (!tops.length) {
     msvg.setAttribute('viewBox', '0 0 600 120'); msvg.setAttribute('width', 600); msvg.setAttribute('height', 120);
-    msvg.append(sv('text', { x: 300, y: 60, 'text-anchor': 'middle', class: 'band-label' }, '还没有事实。识别并导入结果后，这里会显示交叉验证后的项目事实。'));
+    msvg.append(sv('text', { x: 300, y: 60, 'text-anchor': 'middle', class: 'band-label' },
+      ui.factIssues && S.facts.groups.length ? '没有冲突或低置信度的事实。' : '还没有事实。识别并导入结果后，这里会显示交叉验证后的项目事实。'));
     return;
   }
-  let maxGW = 0;
-  groups.forEach(o => { maxGW = Math.max(maxGW, textW(o.g.label, 13, 600) + 58); });
-  const X2 = X1 + maxGW + 50;
-  let y = TOP;
-  const placed = groups.map(o => {
-    const collapsed = ui.collapsed.has(o.g.id);
-    const rows = [];
-    if (!collapsed) o.kids.forEach(f => { rows.push({ f, y }); y += ROW; }); else y += ROW;
-    const gy = collapsed ? y - ROW : (rows[0].y + rows.at(-1).y) / 2;
-    y += 12;
-    return { g: o.g, gy, rows, collapsed, count: o.kids.length };
+  if (ui.mmFresh) {  // 事实不多时大类默认展开；多了只列大类，点开再看
+    ui.mmFresh = false;
+    if (tops.reduce((a, t) => a + t.n, 0) <= 40) tops.forEach(t => ui.mmOpen.add(t.id));
+  }
+  const auto = new Set();  // 临时展开：选中的事实、选中图纸上的事实所在的分组
+  if (ui.selF && factBy[ui.selF]) factPathIds(factBy[ui.selF]).forEach(id => auto.add(id));
+  if (hl && hl.size <= 60) hl.forEach(k => { if (factMatch(factBy[k])) factPathIds(factBy[k]).forEach(id => auto.add(id)); });
+  const isOpen = id => !ui.mmShut.has(id) && (ui.factIssues || ui.mmOpen.has(id) || auto.has(id));
+  const leaf = f => ({ kind: 'fact', f, kids: [] });
+  const build = node => {
+    const { label, body } = chain(node);
+    const v = { kind: 'node', node, label, open: isOpen(node.id), kids: [] };
+    if (!v.open) return v;
+    if (node.n <= MM_SPLIT) { v.kids = node.all.map(leaf); return v; }  // 事实不多：直接列出，不再分小类
+    v.kids = [...body.kids.values()].sort(subOrder).map(build);
+    const fs = body.facts;
+    const cut = fs.length > MM_SHOW && !ui.mmMore.has(node.id) && !fs.slice(MM_SHOW).some(f => f.key === ui.selF);
+    v.kids.push(...(cut ? fs.slice(0, MM_SHOW) : fs).map(leaf));
+    if (cut) v.kids.push({ kind: 'more', node, rest: fs.length - MM_SHOW, kids: [] });
+    return v;
+  };
+  const root = { kind: 'root', label: S.project.name, kids: tops.map(build) };
+  // 行：每个叶子（事实、收起的分组、“还有…”）占一行，分组和它的第一项在同一行（展开、收起时上面的都不动）；列：同一级左对齐
+  const ROW = 36, H = 28, X0 = 16, TOP = 16, GAPX = 44;
+  let next = 0;
+  const place = (v, d) => {
+    v.d = d;
+    v.kids.forEach(k => place(k, d + 1));
+    v.row = v.kids.length ? v.kids[0].row : next++;
+    if (d === 1) next += 0.3;  // 大类之间空一点
+  };
+  root.d = 0;
+  root.kids.forEach(k => place(k, 1));
+  root.row = root.kids[0].row;
+  const list = [];
+  const walk = v => { list.push(v); v.kids.forEach(walk); };
+  walk(root);
+  const cntText = v => `${v.open ? '' : '+'}${v.node.n}`;
+  const badText = v => v.node.bad ? ` · 冲突 ${v.node.bad}` : '';
+  list.forEach(v => {
+    v.text = v.kind === 'fact' ? `${v.f.name}：${v.f.value}` : v.kind === 'more' ? `还有 ${v.rest} 条…`
+      : v.kind === 'root' ? v.label : `${v.open ? '▾' : '▸'} ${v.label}`;
+    v.w = v.kind === 'root' ? textW(v.text, 14, 700) + 28 : v.kind === 'fact' ? textW(v.text, 13) + 40
+      : v.kind === 'more' ? textW(v.text, 12) + 28 : textW(v.text, 13, 600) + textW(cntText(v) + badText(v), 12, 400, true) + 44;
   });
-  const rootY = (placed[0].gy + placed.at(-1).gy) / 2;
-  const fromSheet = ui.selD ? new Set(S.facts.groups.flatMap(g => g.facts).filter(f => f.sources.includes(ui.selD)).map(f => f.key)) : null;
+  const colW = [];
+  list.forEach(v => { if (v.kids.length) colW[v.d] = Math.max(colW[v.d] || 0, v.w); });
+  const colX = [X0];
+  const maxD = Math.max(...list.map(v => v.d));
+  for (let d = 1; d <= maxD; d++) colX[d] = colX[d - 1] + (colW[d - 1] || 0) + GAPX;
   const links = sv('g'), nodes = sv('g');
-  const rootW = textW(S.project.name, 14, 700) + 28;
-  let maxX = X0 + rootW;
-  placed.forEach(p => {
-    const gW = textW(p.g.label, 13, 600) + 58;
-    links.append(sv('path', { class: 'mm-link', d: `M${X0 + rootW} ${rootY + 16}C${X0 + rootW + 40} ${rootY + 16},${X1 - 40} ${p.gy + 16},${X1} ${p.gy + 16}` }));
-    const gg = sv('g', { class: 'mm mm-group', tabindex: 0, role: 'button', 'aria-expanded': String(!p.collapsed), 'aria-label': `${p.g.label}，${p.count} 条事实` });
-    gg.append(sv('rect', { class: 'box', x: X1, y: p.gy, width: gW, height: 32, rx: 8 }));
-    gg.append(sv('text', { class: 'lbl', x: X1 + 12, y: p.gy + 21 }, p.g.label));
-    gg.append(sv('text', { class: 'cnt', x: X1 + gW - 12, y: p.gy + 21, 'text-anchor': 'end' }, p.collapsed ? `+${p.count}` : `${p.count}`));
-    const toggle = () => { ui.collapsed.has(p.g.id) ? ui.collapsed.delete(p.g.id) : ui.collapsed.add(p.g.id); renderMind(); };
-    gg.addEventListener('click', toggle);
-    gg.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
-    nodes.append(gg);
-    maxX = Math.max(maxX, X1 + gW);
-    p.rows.forEach(({ f, y: fy }) => {
-      const label = `${f.name}：${f.value}`;
-      const fw = textW(label, 13) + 40;
-      links.append(sv('path', { class: 'mm-link', d: `M${X1 + gW} ${p.gy + 16}C${X1 + gW + 30} ${p.gy + 16},${X2 - 30} ${fy + 16},${X2} ${fy + 16}` }));
-      const cls = ['mm', 'mm-fact', `conf-${f.conf}`];
-      if (ui.selF === f.key) cls.push('sel');
-      if (fromSheet) cls.push(fromSheet.has(f.key) ? 'hl' : 'dim');
-      const fg = sv('g', { class: cls.join(' '), tabindex: 0, role: 'button', 'aria-label': `${label}，${CONF[f.conf]}` });
-      fg.append(sv('rect', { class: 'box', x: X2, y: fy, width: fw, height: 32, rx: 16 }));
-      fg.append(sv('circle', { class: `cd-${f.conf}`, cx: X2 + 16, cy: fy + 16, r: 5 }));
-      fg.append(sv('text', { x: X2 + 28, y: fy + 21 }, label));
-      const open = () => selectFact(f.key);
-      fg.addEventListener('click', open);
-      fg.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
-      nodes.append(fg);
-      maxX = Math.max(maxX, X2 + fw);
+  let maxX = 0, selEl = null;
+  list.forEach(v => {
+    const x = colX[v.d], y = TOP + v.row * ROW, cy = y + H / 2;
+    v.kids.forEach(k => {
+      const kx = colX[k.d], ky = TOP + k.row * ROW + H / 2;
+      links.append(sv('path', { class: 'mm-link', d: `M${x + v.w} ${cy}C${x + v.w + 22} ${cy},${kx - 22} ${ky},${kx} ${ky}` }));
     });
+    maxX = Math.max(maxX, x + v.w);
+    const g = mindNode(v, x, y, H, v.kind === 'node' ? cntText(v) : '', v.kind === 'node' ? badText(v) : '', hl);
+    if (v.kind === 'fact' && v.f.key === ui.selF) selEl = g;
+    nodes.append(g);
   });
-  const rg = sv('g', { class: 'mm mm-root' });
-  rg.append(sv('rect', { class: 'box', x: X0, y: rootY, width: rootW, height: 32, rx: 8 }));
-  rg.append(sv('text', { x: X0 + 14, y: rootY + 21 }, S.project.name));
-  nodes.append(rg);
   msvg.append(links, nodes);
-  const w = Math.ceil(maxX + 24), h = y + 12;
+  const w = Math.ceil(maxX + 24), h = Math.ceil(TOP + next * ROW + 8);
   msvg.setAttribute('viewBox', `0 0 ${w} ${h}`); msvg.setAttribute('width', w); msvg.setAttribute('height', h);
+  if (ui.mmScroll && selEl) { ui.mmScroll = false; selEl.scrollIntoView({ block: 'center', inline: 'nearest' }); }
+}
+function mindNode(v, x, y, H, cnt, bad, hl) {
+  if (v.kind === 'root') {
+    const g = sv('g', { class: 'mm mm-root' });
+    g.append(sv('rect', { class: 'box', x, y, width: v.w, height: H, rx: 8 }), sv('text', { x: x + 14, y: y + 19 }, v.text));
+    return g;
+  }
+  if (v.kind === 'fact') {
+    const f = v.f, cls = ['mm', 'mm-fact', `conf-${f.conf}`];
+    if (ui.selF === f.key) cls.push('sel');
+    if (hl) cls.push(hl.has(f.key) ? 'hl' : 'dim');
+    const g = sv('g', { class: cls.join(' '), tabindex: 0, role: 'button', 'aria-label': `${v.text}，${CONF[f.conf]}` });
+    g.append(sv('rect', { class: 'box', x, y, width: v.w, height: H, rx: H / 2 }),
+      sv('circle', { class: `cd-${f.conf}`, cx: x + 14, cy: y + H / 2, r: 5 }), sv('text', { x: x + 26, y: y + 19 }, v.text));
+    return onAct(g, () => selectFact(f.key));
+  }
+  if (v.kind === 'more') {
+    const g = sv('g', { class: 'mm mm-more', tabindex: 0, role: 'button', 'aria-label': `${v.text}，点击全部显示` });
+    g.append(sv('rect', { class: 'box', x, y, width: v.w, height: H, rx: H / 2 }), sv('text', { x: x + 14, y: y + 18 }, v.text));
+    return onAct(g, () => { ui.mmMore.add(v.node.id); renderMind(); });
+  }
+  const n = v.node, cls = ['mm', 'mm-group'];
+  if (v.d > 1) cls.push('mm-sub');
+  if (hl) cls.push(n.hl ? 'hl' : 'dim');
+  const g = sv('g', { class: cls.join(' '), tabindex: 0, role: 'button', 'aria-expanded': String(v.open),
+    'aria-label': `${v.label}，${n.n} 条事实${n.bad ? `，其中冲突 ${n.bad} 条` : ''}，点击${v.open ? '收起' : '展开'}` });
+  const c = sv('text', { class: 'cnt', x: x + v.w - 12, y: y + 19, 'text-anchor': 'end' }, cnt);
+  if (bad) c.append(sv('tspan', { class: 'bad' }, bad));
+  g.append(sv('rect', { class: 'box', x, y, width: v.w, height: H, rx: 8 }), sv('text', { class: 'lbl', x: x + 12, y: y + 19 }, v.text), c);
+  return onAct(g, () => toggleMind(n.id, v.open));
 }
 
 /* ---------- 面板 ---------- */
@@ -1216,6 +1368,11 @@ function renderOverview() {
   const recognizing = ui.job && ui.job.status === 'running' && ui.job.kind === 'recognize';
   if (left > 0 && (recognizing || S.recognition.recognized)) parts.push(el('div', { class: 'note warn' },
     `还有 ${left} 页没识别${recognizing ? '（正在识别，左边会跟着更新）' : ''}：缺图、楼层覆盖、编号断号这些结论要等识别完才准。`));
+  const cls = S.classification, other = S.sheets.filter(x => x.discipline === '其他').length;
+  if (latest() && cls && !cls.last && (other >= 5 || cls.facts > 40)) parts.push(el('div', { class: 'note' },
+    other >= 5 ? `${other} 张图按图号认不出专业，都排在“其他”里。` : `已有 ${cls.facts} 条事实。`,
+    '可以用智能分类让 AI 给图纸分专业、分小框、起中文简称，给事实分多级目录。',
+    el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn', type: 'button', onclick: renderClassify }, '智能分类'))));
   if (!S.batches.length) parts.push(el('div', { class: 'note' }, '新项目还没有收图。每收到一批图纸（压缩包、文件或文件夹）就登记一次。',
     el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn primary', type: 'button', onclick: renderReceive }, '收图'))));
   const sec = S.security || { files: [], scans: [], pending: 0 };
@@ -1313,7 +1470,8 @@ function renderSheet(no) {
     el('button', { class: 'linkbtn', type: 'button', onclick: () => goTarget(i.target) },
       el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : 'c-low'}` }), el('span', {}, `${i.kind}：${i.title}`)))))));
   if (s.status !== 'missing') {
-    parts.push(el('dl', { class: 'kv' }, el('dt', {}, '专业'), el('dd', {}, s.discipline),
+    parts.push(el('dl', { class: 'kv' }, el('dt', {}, '专业'), el('dd', {}, s.discipline + (s.cls && s.cls.discipline ? '（智能分类）' : '')),
+      s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group)] : null,
       el('dt', {}, '现行版次'), el('dd', {}, s.current_rev || '—'),
       el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n'))));
     if (s.current_page) parts.push(el('a', { class: 'btn', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, '打开现行版原图'));
@@ -1393,7 +1551,7 @@ async function checkFresh() {
   if (!S || document.hidden) return;
   try {
     const v = await (await fetch('/api/state/version', { cache: 'no-store' })).json();
-    if ((v.busy && v.job !== 'recognize') || !v.version || v.version === S.db_version) return;  // 识别途中分批导入，跟着刷新；其他任务跑完会自己刷新
+    if ((v.busy && !['recognize', 'classify'].includes(v.job)) || !v.version || v.version === S.db_version) return;  // 识别、智能分类途中分批写入，跟着刷新；其他任务跑完会自己刷新
     const r = await fetch('/api/state' + (latest() ? '' : `?as_of=${S.as_of}`), { cache: 'no-store' });
     if (!r.ok) return;
     const st = await r.json();
@@ -1483,8 +1641,10 @@ function selectSheet(no) { revealSheet(no); ui.selD = no; ui.selF = null; paintG
 function selectFact(key) { ui.selF = key; ui.selD = null; ui.focusSet = null; ui.backTo = null; renderMind(); paintGraph(); renderFact(key); }
 function jumpSheet(no) { ui.focusSet = null; ui.backTo = null; setView('graph'); selectSheet(no); }
 function jumpFact(key) {
-  ui.collapsed.delete(factGroupOf[key]);
   if (ui.factIssues && !factMatch(factBy[key])) { ui.factIssues = false; document.getElementById('f-facts-issues').checked = false; }
+  loadMindPrefs();
+  factPathIds(factBy[key]).forEach(id => { ui.mmOpen.add(id); ui.mmShut.delete(id); });  // 展开事实所在的各级分组
+  saveMindPrefs(); ui.mmScroll = true;
   ui.selD = null; setView('facts'); selectFact(key);
 }
 function showSources(key, no) {
@@ -1658,6 +1818,45 @@ async function renderRecognize(refresh) {
     field('模型', model, '一般用默认；想换模型时在这里选。'),
     el('div', { class: 'opts' }, go,
       el('button', { class: 'btn', type: 'button', title: '只读 PDF 文字层，扫描件无法识别，用于演示', onclick: () => startJob('recognize', { executor: 'simulated' }) }, '用模拟执行器（演示）')));
+}
+
+/* 智能分类：AI 给图纸分专业、分小框、起中文简称，给事实分多级目录 */
+const CLS_BY = { codex: 'Codex', claude: 'Claude', simulated: '规则演示' };
+async function renderClassify() {
+  const back = el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心');
+  const head = el('div', { class: 'ptitle' }, el('h2', {}, '智能分类'),
+    el('p', { class: 'meta' }, '让 AI 给图纸分专业、分小框、起中文简称，给项目事实分多级目录。图谱和思维导图按它显示；台账、缺图、冲突的判断不受影响。'));
+  panel.replaceChildren(back, head, el('p', { class: 'meta' }, '正在检查本机的 Codex 和 Claude 设置……'));
+  try { RECOG = await (await fetch('/api/recognizers')).json(); } catch (e) { RECOG = null; }
+  const R = RECOG || { claude: { ready: APP && APP.claude_ready }, codex: { ready: false, hint: '读不到 Codex 的状态' }, prefs: {} };
+  const c = S && S.classification;
+  const status = !c ? '还没有图纸。'
+    : !c.last ? `还没有智能分类：图谱和思维导图现在按规则粗分（图纸 ${c.sheets} 张，事实 ${c.facts} 条）。`
+    : `已分好图纸 ${c.sheets_done}/${c.sheets} 张、事实 ${c.facts_done}/${c.facts} 条。上次用 ${CLS_BY[c.last.executor] || c.last.executor}`
+      + `${c.last.model ? '（' + c.last.model + '）' : ''}，${c.last.at.slice(0, 16).replace('T', ' ')}。`;
+  const executor = el('select', { id: 'cl-exec', 'aria-label': '分类方式' },
+    el('option', { value: 'codex' }, 'Codex（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费，一般几美分）'));
+  executor.value = (R.prefs || {}).executor || (R.codex.ready ? 'codex' : 'claude');
+  const redo = el('input', { type: 'checkbox', id: 'cl-redo' });
+  const box = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
+  const go = el('button', { class: 'btn primary', type: 'button', onclick: () => startJob('classify', { executor: executor.value, redo: redo.checked }) }, '开始智能分类');
+  const fill = () => {
+    const ex = executor.value, info = R[ex] || {};
+    box.replaceChildren(...[  // replaceChildren 会把 null 显示成文字，先去掉
+      ex === 'codex' && !info.ready ? el('div', { class: 'note warn' }, info.hint || 'Codex 还不能用。',
+        el('button', { class: 'btn', type: 'button', onclick: renderClassify, style: 'margin-left:8px' }, '重新检查')) : null,
+      ex === 'claude' && !info.ready ? el('div', { class: 'note warn' }, '还没有设置 Claude API 密钥。',
+        el('button', { class: 'btn', type: 'button', onclick: renderSettings, style: 'margin-left:8px' }, '去设置')) : null,
+      el('div', { class: 'note' }, `只把图号、图名、所在文件夹和事实的名称、示例数值发给 ${ex === 'codex' ? 'OpenAI（通过 Codex）' : 'Anthropic'}，`
+        + '不发图纸页面。几百张图一般几分钟，分好一批左边就更新一批。')].filter(Boolean));
+    go.disabled = !info.ready;
+  };
+  executor.addEventListener('change', fill);
+  fill();
+  panel.replaceChildren(back, head, el('p', {}, status), field('分类方式', executor), box,
+    el('label', { for: 'cl-redo' }, redo, ' 全部重新分（默认只分还没分过的；对分类结果不满意时用）'),
+    el('div', { class: 'opts' }, go),
+    el('p', { class: 'meta' }, '用 Codex 或 Claude 识别完新页面后，会自动给新出现的图纸和事实分类。图纸的专业只在按图号认不出（排在“其他”里）时采用 AI 的。'));
 }
 
 function renderExport() {
@@ -1909,6 +2108,7 @@ function paintJobBar(j) {  // 顶部常驻：任务在跑时，右栏去看别�
     el('span', { class: 'meta' }, [j.stage, p ? progText(p[0], p[1]) : '进行中…'].filter(Boolean).join(' ')),
     p ? el('div', { class: 'bar' }, el('i', { style: `width:${Math.round(p[0] / p[1] * 100)}%` })) : null,
     j.kind === 'recognize' && j.imported ? el('span', { class: 'meta' }, `已导入 ${j.imported} 页，左边跟着更新`) : null,
+    j.kind === 'classify' ? el('span', { class: 'meta' }, '分好一批，左边就更新一批') : null,
     ui.jobView ? null : el('button', { class: 'btn', type: 'button', onclick: showJob }, '查看进度')].filter(Boolean));
   bar.hidden = false;
 }
@@ -1956,6 +2156,9 @@ function renderJob(j) {
           : el('button', { class: 'btn', type: 'button', onclick: renderSettings }, '先设置 API 密钥')));
     }
   }
+  if (j.status === 'done' && j.kind === 'classify') parts.push(el('div', { class: 'opts' },
+    el('button', { class: 'btn primary', type: 'button', onclick: () => { ui.jobView = false; setView('facts'); clearAll(); } }, '看思维导图'),
+    el('button', { class: 'btn', type: 'button', onclick: () => { ui.jobView = false; setView('graph'); clearAll(); } }, '看图谱')));
   if (j.status === 'done' && j.kind === 'export' && res) parts.push(el('div', { class: 'opts' },
     el('button', { class: 'btn primary', type: 'button', onclick: () => openFolder(res.path) }, '打开文件夹'), el('span', { class: 'mono' }, res.path)));
   if (j.status === 'done' && j.kind === 'receive') parts.push(el('div', { class: 'opts' },
@@ -1995,9 +2198,17 @@ document.getElementById('g-search').addEventListener('keydown', e => {
   if (hits.length) { ui.focusSet = null; selectSheet(hits[0].no); }
 });
 document.getElementById('f-graph-issues').addEventListener('change', e => { ui.graphIssues = e.target.checked; paintGraph(); });
-document.getElementById('f-facts-issues').addEventListener('change', e => { ui.factIssues = e.target.checked; renderMind(); });
-document.getElementById('mm-expand').addEventListener('click', () => { ui.collapsed.clear(); renderMind(); });
-document.getElementById('mm-collapse').addEventListener('click', () => { S.facts.groups.forEach(g => ui.collapsed.add(g.id)); renderMind(); });
+document.getElementById('f-facts-issues').addEventListener('change', e => { ui.factIssues = e.target.checked; ui.mmShut.clear(); if (S) renderMind(); });
+document.getElementById('mm-expand').addEventListener('click', () => {
+  if (!S) return;
+  loadMindPrefs(); mindIds(mindTree(null)).forEach(id => ui.mmOpen.add(id)); ui.mmShut.clear(); saveMindPrefs(); renderMind();
+});
+document.getElementById('mm-collapse').addEventListener('click', () => {
+  if (!S) return;
+  loadMindPrefs(); ui.mmOpen.clear(); ui.mmShut.clear(); ui.mmMore.clear(); saveMindPrefs(); renderMind();
+});
+document.getElementById('mm-classify').addEventListener('click', () => { if (S) renderClassify(); });
+document.getElementById('g-classify').addEventListener('click', () => { if (S) renderClassify(); });
 document.getElementById('as-of').addEventListener('change', e => { const v = Number(e.target.value); ui.asOf = v; load(v === Math.max(...S.batches.map(b => b.seq)) ? null : v); });
 
 setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');

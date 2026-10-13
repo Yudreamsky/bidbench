@@ -180,22 +180,24 @@ def status(refresh: bool = False) -> dict:
 
 # ---------------- 输出格式 ----------------
 
+def strict_schema(n):
+    """OpenAI 结构化输出（严格模式）的格式：每个对象的字段都要列为必填，$ref 旁边不能有别的关键字。"""
+    if isinstance(n, list):
+        return [strict_schema(x) for x in n]
+    if not isinstance(n, dict):
+        return n
+    if "$ref" in n:
+        return {"$ref": n["$ref"]}
+    out = {k: strict_schema(v) for k, v in n.items()}
+    if isinstance(out.get("properties"), dict):
+        out["required"] = list(out["properties"])
+        out["additionalProperties"] = False
+    return out
+
+
 def output_schema() -> dict:
-    """OpenAI 结构化输出（严格模式）的格式：每个对象的字段都要列为必填，$ref 旁边不能有别的关键字。
-    完整格式里可选的字段本来都允许为 null（有测试保证），所以都列为必填不改变含义。"""
-    def strict(n):
-        if isinstance(n, list):
-            return [strict(x) for x in n]
-        if not isinstance(n, dict):
-            return n
-        if "$ref" in n:
-            return {"$ref": n["$ref"]}
-        out = {k: strict(v) for k, v in n.items()}
-        if isinstance(out.get("properties"), dict):
-            out["required"] = list(out["properties"])
-            out["additionalProperties"] = False
-        return out
-    return strict(claude.body_schema())
+    """识别结果的严格格式。完整格式里可选的字段本来都允许为 null（有测试保证），所以都列为必填不改变含义。"""
+    return strict_schema(claude.body_schema())
 
 
 def build_prompt(task_dir: Path, item: dict, notes: list[str]) -> str:
@@ -224,8 +226,11 @@ def _message(raw: str) -> str:
     return raw.strip()
 
 
-def classify(msg: str, model: str) -> str | None:
-    """整次运行都会失败的错误：返回给人看的原因，停下来；其余只算这一页失败。"""
+RESUME = "用同一个任务包续跑，已识别的页面会跳过"
+
+
+def classify(msg: str, model: str, resume: str = RESUME) -> str | None:
+    """整次运行都会失败的错误：返回给人看的原因，停下来；其余只算这一页失败。resume：额度恢复后怎么接着做。"""
     m = msg.lower()
     if ("model" in m and ("not supported" in m or "does not exist" in m or "not found" in m)) or "model_not_found" in m:
         return f"Codex 不能用模型 {model}：{msg}。可以换一个模型；新模型需要先更新 Codex：{INSTALL_HINT}"
@@ -234,7 +239,7 @@ def classify(msg: str, model: str) -> str | None:
     if "not logged in" in m or "unauthorized" in m or re.search(r"\b401\b", m) or "authentication" in m:
         return "Codex 还没有登录或登录已过期：在命令行运行 codex login 后重试"
     if "usage limit" in m or "rate limit" in m or re.search(r"\b429\b", m) or "quota" in m:
-        return f"Codex 的用量额度暂时用完了（{msg}）。等额度恢复后，用同一个任务包续跑，已识别的页面会跳过"
+        return f"Codex 的用量额度暂时用完了（{msg}）。等额度恢复后，{resume}"
     return None
 
 
@@ -325,6 +330,43 @@ def recognize_page(cmd_prefix, runner, task_dir: Path, item: dict, model: str, e
             prompt = (build_prompt(task_dir, item, notes) + f"\n\n上一次的输出没有通过校验：{last_error}。"
                       f"请输出修正后的完整 JSON。上一次的输出：\n{call.text}")
     raise RecognitionError(f"两次输出都没有通过校验：{last_error}", "两次输出都没有通过格式校验")
+
+
+def ask_json(prompt: str, schema: dict, model: str | None = None, effort: str = "medium", runner=None,
+             usage=None, resume: str = "再试一次") -> dict:
+    """不带图片问一次 Codex，按给定格式输出 JSON（智能分类用）。整次都会失败的错误抛 FatalError，其余抛 RecognitionError。"""
+    model = model or DEFAULT_MODEL
+    found = None
+    if runner is None:
+        found = find_codex()
+        if found is None:
+            raise FatalError(f"没有找到 Codex。安装：{INSTALL_HINT}，再运行 codex login 登录 ChatGPT 账号")
+        runner = _subprocess_runner
+    with tempfile.TemporaryDirectory(prefix="bidbench-codex-") as tmp:
+        tmp = Path(tmp)
+        schema_path = tmp / "schema.json"
+        schema_path.write_text(json.dumps(strict_schema(claude._api_compatible(schema)), ensure_ascii=False),
+                               encoding="utf-8")
+        try:
+            call = _call(found.cmd if found else ["codex"], runner, tmp, model, effort, schema_path, [], prompt)
+        except OSError as e:
+            raise FatalError(f"Codex 没能运行：{e}") from e
+    u = call.usage
+    if usage is not None:
+        usage.add(SimpleNamespace(input_tokens=u.get("input_tokens", 0), output_tokens=u.get("output_tokens", 0),
+                                  cache_read_input_tokens=u.get("cached_input_tokens", 0), cache_creation_input_tokens=0))
+    if call.error:
+        fatal = classify(call.error, model, resume)
+        if fatal:
+            raise FatalError(fatal)
+        raise RecognitionError(f"Codex 出错：{call.error}", "Codex 出错")
+    try:
+        body = claude._parse_json(call.text or "")
+    except ValueError as e:
+        raise RecognitionError(f"Codex 的输出不是合法 JSON：{e}", "输出不是合法 JSON") from e
+    if not isinstance(body, dict):
+        raise RecognitionError("Codex 的输出不是 JSON 对象", "输出不是合法 JSON")
+    return body
 
 
 def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
