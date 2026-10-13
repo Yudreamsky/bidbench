@@ -230,9 +230,9 @@ def guess(paths: list[str], text: str = "") -> dict | None:
     if not no:
         return None
     title = got["title"] if not multi else None
-    tconf = MID if title else LOW
+    tconf, tsrc = (MID if title else LOW), "文件名"
     if title and flat and _squash(title) in flat:
-        tconf = HIGH
+        tconf, tsrc = HIGH, "文件名，PDF 文字里也有"
     disc, dconf, dsrc = None, LOW, ""
     r = role_discipline(no)
     if r:
@@ -256,7 +256,7 @@ def guess(paths: list[str], text: str = "") -> dict | None:
     ip = iso_parts(no)
     return {
         "no": {"value": no, "conf": conf, "src": src},
-        "title": {"value": title, "conf": tconf, "src": "文件名"} if title else None,
+        "title": {"value": title, "conf": tconf, "src": tsrc} if title else None,
         "rev": {"value": got["rev"], "conf": MID, "src": "文件名"} if got["rev"] and not multi else None,
         "status": got["status"] if not multi else None,
         "discipline": {"value": disc or "其他", "conf": dconf if disc else LOW, "src": dsrc or "认不出"},
