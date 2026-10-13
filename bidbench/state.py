@@ -50,7 +50,7 @@ def norm_no(s: str | None) -> str | None:
     if not s:
         return None
     s = re.sub(r"\s+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
-    if names.iso_parts(s):  # ISO 19650 编号各段照原样，编号的前导零也留着（CGK9-STR-ZZ-00-DR-S-0001）
+    if names.iso_parts(s):  # ISO 19650 编号各段照原样，编号的前导零也留着（PRJ1-STR-ZZ-00-DR-S-0001）
         return s
     m = re.match(r"^(.*?)-?(\d+)([A-Z]?)$", s)
     if not m or not m.group(1):

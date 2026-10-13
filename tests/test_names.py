@@ -28,12 +28,12 @@ def bare_pdf(*lines, pages=1):
 
 
 @pytest.mark.parametrize("stem,no,rev,status,title", [
-    ("CGK9-ARC-ZZ-00-DR-A-1001_S4_P01_Ground Floor GA Plan", "CGK9-ARC-ZZ-00-DR-A-1001", "P01", "S4", "Ground Floor GA Plan"),
-    ("CGK9-ARC-ZZ-00-DR-A-1001 - Ground Floor GA Plan [P01]", "CGK9-ARC-ZZ-00-DR-A-1001", "P01", None, "Ground Floor GA Plan"),
-    ("CGK9-ARC-ZZ-00-DR-A-1001-P02-S4 Ground Floor GA Plan", "CGK9-ARC-ZZ-00-DR-A-1001", "P02", "S4", "Ground Floor GA Plan"),
-    ("CGK9-STR-ZZ-B1-DR-S-2001 Basement 01 Slab Layout Rev C02", "CGK9-STR-ZZ-B1-DR-S-2001", "C02", None, "Basement 01 Slab Layout"),
-    ("CGK9-ARC-ZZ-B2-DR-A-1003 Level B2 GA Plan", "CGK9-ARC-ZZ-B2-DR-A-1003", None, None, "Level B2 GA Plan"),  # B2 是楼层，不是版次
-    ("CGK9-ARC-ZZ-ZZ-DR-A-5001 Section A1", "CGK9-ARC-ZZ-ZZ-DR-A-5001", None, None, "Section A1"),
+    ("PRJ1-ARC-ZZ-00-DR-A-1001_S4_P01_Ground Floor GA Plan", "PRJ1-ARC-ZZ-00-DR-A-1001", "P01", "S4", "Ground Floor GA Plan"),
+    ("PRJ1-ARC-ZZ-00-DR-A-1001 - Ground Floor GA Plan [P01]", "PRJ1-ARC-ZZ-00-DR-A-1001", "P01", None, "Ground Floor GA Plan"),
+    ("PRJ1-ARC-ZZ-00-DR-A-1001-P02-S4 Ground Floor GA Plan", "PRJ1-ARC-ZZ-00-DR-A-1001", "P02", "S4", "Ground Floor GA Plan"),
+    ("PRJ1-STR-ZZ-B1-DR-S-2001 Basement 01 Slab Layout Rev C02", "PRJ1-STR-ZZ-B1-DR-S-2001", "C02", None, "Basement 01 Slab Layout"),
+    ("PRJ1-ARC-ZZ-B2-DR-A-1003 Level B2 GA Plan", "PRJ1-ARC-ZZ-B2-DR-A-1003", None, None, "Level B2 GA Plan"),  # B2 是楼层，不是版次
+    ("PRJ1-ARC-ZZ-ZZ-DR-A-5001 Section A1", "PRJ1-ARC-ZZ-ZZ-DR-A-5001", None, None, "Section A1"),
     ("建施-01 建筑设计总说明", "建施-01", None, None, "建筑设计总说明"),
     ("结施03 二层梁配筋图", "结施-03", None, None, "二层梁配筋图"),
     ("A-101 First Floor Plan Rev B", "A-101", "B", None, "First Floor Plan"),
@@ -45,10 +45,10 @@ def test_parse_name(stem, no, rev, status, title):
 
 
 def test_iso_role_and_folder_discipline():
-    assert state.discipline_of("CGK9-ARC-ZZ-00-DR-A-1001") == "建筑"
-    assert state.discipline_of("CGK9-MEP-ZZ-XX-DR-E-3001") == "电气"
+    assert state.discipline_of("PRJ1-ARC-ZZ-00-DR-A-1001") == "建筑"
+    assert state.discipline_of("PRJ1-MEP-ZZ-XX-DR-E-3001") == "电气"
     assert state.discipline_of("SKY1-ABC-ZZ-00-DR-S-0001") == "结构"  # 不再按首字母 S 误判
-    assert state.norm_no("CGK9-STR-ZZ-00-DR-S-0001") == "CGK9-STR-ZZ-00-DR-S-0001"  # 前导零留着
+    assert state.norm_no("PRJ1-STR-ZZ-00-DR-S-0001") == "PRJ1-STR-ZZ-00-DR-S-0001"  # 前导零留着
     assert state.norm_no("建施 -5") == "建施-05"
     assert names.words_discipline("Structure") == "结构" and names.words_discipline("Drawings") is None
     assert names.listed_numbers("建施-07~08、10 详图合订本") == ["建施-07", "建施-08", "建施-10"]
@@ -73,12 +73,12 @@ def test_english_floors(title, base, expect):
 def named(sheets_project):
     """识别过的中文图 + 只按名字认的英文图（ISO 编号、看不出图号的、合订本、CAD 文件）。"""
     proj = sheets_project({
-        "建施-01 建筑设计总说明.pdf": pdf("建施-01", "建筑设计总说明", "详见 CGK9-STR-ZZ-00-DR-S-2001"),
-        "CGK9-ARC-ZZ-00-DR-A-1001_S4_P01_Ground Floor GA Plan.pdf": bare_pdf("GROUND FLOOR GA PLAN", "CGK9-ARC-ZZ-00-DR-A-1001"),
-        "CGK9-ARC-ZZ-05-DR-A-1006_P02_Level 05 GA Plan.pdf": bare_pdf("some text"),
-        "CGK9-STR-ZZ-00-DR-S-2001 Ground Floor Slab Layout [C01].pdf": bare_pdf("SLAB"),
+        "建施-01 建筑设计总说明.pdf": pdf("建施-01", "建筑设计总说明", "详见 PRJ1-STR-ZZ-00-DR-S-2001"),
+        "PRJ1-ARC-ZZ-00-DR-A-1001_S4_P01_Ground Floor GA Plan.pdf": bare_pdf("GROUND FLOOR GA PLAN", "PRJ1-ARC-ZZ-00-DR-A-1001"),
+        "PRJ1-ARC-ZZ-05-DR-A-1006_P02_Level 05 GA Plan.pdf": bare_pdf("some text"),
+        "PRJ1-STR-ZZ-00-DR-S-2001 Ground Floor Slab Layout [C01].pdf": bare_pdf("SLAB"),
         "Mechanical Riser Diagram.pdf": bare_pdf("riser"),
-        "CGK9-ARC-ZZ-RF-DR-A-1099_Roof Plan.dwg": b"AC1032 placeholder",
+        "PRJ1-ARC-ZZ-RF-DR-A-1099_Roof Plan.dwg": b"AC1032 placeholder",
         "建施-07~08 详图合订本.pdf": bare_pdf("binder page", pages=2),
     })
     return proj
@@ -87,18 +87,18 @@ def named(sheets_project):
 def test_first_guess_sheets(named):
     st = state.build(named)
     by = {s["no"]: s for s in st["sheets"]}
-    g = by["CGK9-ARC-ZZ-00-DR-A-1001"]
+    g = by["PRJ1-ARC-ZZ-00-DR-A-1001"]
     assert g["status"] == "guess" and g["title"] == "Ground Floor GA Plan" and g["current_rev"] == "P01"
     assert g["guess"]["no"]["conf"] == "high"  # 文件名里有，PDF 文字里也有
     assert g["guess"]["discipline"] == {"value": "建筑", "conf": "high", "src": "图号里的角色代码"}
     assert g["floors"] == [1] and g["guess"]["floors"]["conf"] == "low"
     assert "建筑平面图：可能有房间布置" in g["guess"]["content"]["value"] and g["guess"]["content"]["conf"] == "low"
-    l5 = by["CGK9-ARC-ZZ-05-DR-A-1006"]
+    l5 = by["PRJ1-ARC-ZZ-05-DR-A-1006"]
     assert l5["guess"]["no"]["conf"] == "mid" and l5["floors"] == [6]  # 有 Ground Floor：英式，Level 05 是 6F
-    assert by["CGK9-STR-ZZ-00-DR-S-2001"]["discipline"] == "结构"
+    assert by["PRJ1-STR-ZZ-00-DR-S-2001"]["discipline"] == "结构"
     riser = by["文件：Mechanical Riser Diagram"]  # 看不出图号也出一张，把握低
     assert riser["conf"] == "low" and riser["discipline"] == "暖通" and riser["guess"]["no"]["value"] is None
-    roof = by["CGK9-ARC-ZZ-RF-DR-A-1099"]  # 只有 CAD 文件
+    roof = by["PRJ1-ARC-ZZ-RF-DR-A-1099"]  # 只有 CAD 文件
     assert roof["pages"] == [] and roof["cad"] and roof["floors"] == [floors.ROOF]
     assert by["建施-07"]["conf"] == "low" and by["建施-08"]["pages"] == by["建施-07"]["pages"]  # 合订本文件名列出的图号
     assert st["guess"]["nameless"] == 1 and st["guess"]["sheets"] >= 6
@@ -117,7 +117,7 @@ def test_guess_not_exported(named, tmp_path):
     st = state.build(named)
     out = export.export_current(named, st, tmp_path / "out")
     listing = (out / "现行图纸清单.md").read_text(encoding="utf-8")
-    assert "按文件名暂定、还没看图识别的图" in listing and not list(out.rglob("CGK9*.pdf"))
+    assert "按文件名暂定、还没看图识别的图" in listing and not list(out.rglob("PRJ1*.pdf"))
 
 
 def test_file_name_vs_title_block(sheets_project):
@@ -156,7 +156,7 @@ def test_recognize_on_demand(named, monkeypatch):
     monkeypatch.setattr(ops, "recognize_codex", functools.partial(ops.recognize_codex, runner=fake))
     monkeypatch.setattr(ops, "classify", functools.partial(ops.classify, runner=FakeCodex(lambda p, n: ({"sheets": [], "facts": []}, None))))
     st = state.build(named)
-    want = next(s for s in st["sheets"] if s["no"] == "CGK9-ARC-ZZ-00-DR-A-1001")["pages"]
+    want = next(s for s in st["sheets"] if s["no"] == "PRJ1-ARC-ZZ-00-DR-A-1001")["pages"]
     httpd = server.serve(named, port=0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     c = Client(httpd)

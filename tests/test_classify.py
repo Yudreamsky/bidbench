@@ -27,9 +27,9 @@ def mixed(sheets_project):
                                        "执行《建筑设计防火规范》GB 50016-2014（2018年版）"),
         "建施-02 一层平面图.pdf": pdf("建施-02", "一层平面图", "1F 层高 5.10 m", "2F 层高 4.50 m"),
         "结施-03 三层梁配筋图.pdf": pdf("结施-03", "三层梁配筋图", "KL1 截面 300×650", "KL3 截面 350×700", "Q1 墙厚 300"),
-        "A-1001.pdf": pdf("CGK9-ARC-ZZ-00-DR-A-1001", "Ground Floor GA Plan"),
-        "A-1002.pdf": pdf("CGK9-ARC-ZZ-01-DR-A-1002", "Level 01 GA Plan"),
-        "S-2001.pdf": pdf("CGK9-STR-ZZ-00-DR-S-2001", "Ground Floor Slab Layout"),
+        "A-1001.pdf": pdf("PRJ1-ARC-ZZ-00-DR-A-1001", "Ground Floor GA Plan"),
+        "A-1002.pdf": pdf("PRJ1-ARC-ZZ-01-DR-A-1002", "Level 01 GA Plan"),
+        "S-2001.pdf": pdf("PRJ1-STR-ZZ-00-DR-S-2001", "Ground Floor Slab Layout"),
     })
 
 
@@ -103,7 +103,7 @@ def test_codex_classifies_sheets_and_facts(mixed):
     assert (r["sheets"], r["facts"], r["missed"]) == (6, 7, 0), lines  # 9 条事实，7 类：1F/2F 层高、KL1/KL3 截面各算一类
     first = fake.calls[0]
     assert "-i" not in first["cmd"] and "--sandbox" in first["cmd"]  # 只发文字，不发图片
-    assert "CGK9-ARC-ZZ-00-DR-A-1001|Ground Floor GA Plan|" in first["prompt"]
+    assert "PRJ1-ARC-ZZ-00-DR-A-1001|Ground Floor GA Plan|" in first["prompt"]
     assert all("工程名称" not in c["prompt"] for c in fake.calls)  # 不发页面的文字层
 
     def strict(n):  # OpenAI 严格模式：字段全部必填、不许多余字段、可空写成 anyOf
@@ -121,9 +121,9 @@ def test_codex_classifies_sheets_and_facts(mixed):
 
     st = state.build(mixed)
     by = {s["no"]: s for s in st["sheets"]}
-    assert by["CGK9-ARC-ZZ-00-DR-A-1001"]["discipline"] == "建筑"  # ISO 编号里的角色代码 A，按规则就认得出
-    assert by["CGK9-ARC-ZZ-00-DR-A-1001"]["cls"] == {"group": "平面图", "short": "Grou简", "discipline": False}
-    assert by["CGK9-STR-ZZ-00-DR-S-2001"]["discipline"] == "结构"
+    assert by["PRJ1-ARC-ZZ-00-DR-A-1001"]["discipline"] == "建筑"  # ISO 编号里的角色代码 A，按规则就认得出
+    assert by["PRJ1-ARC-ZZ-00-DR-A-1001"]["cls"] == {"group": "平面图", "short": "Grou简", "discipline": False}
+    assert by["PRJ1-STR-ZZ-00-DR-S-2001"]["discipline"] == "结构"
     assert by["建施-01"]["discipline"] == "建筑" and by["建施-01"]["cls"] == {"group": "说明", "short": None, "discipline": False}
     facts = _facts(st)
     assert facts["1F 层高"] == facts["2F 层高"] == ("楼层", ["层高"], True)
@@ -216,7 +216,7 @@ def test_workbench_job_and_after_recognition(mixed, monkeypatch):
         assert j["status"] == "done" and j["title"] == "智能分类（演示）", j
         st = c.get("/api/state")
         assert st["classification"]["sheets_done"] == 6
-        assert {s["no"]: s["discipline"] for s in st["sheets"]}["CGK9-STR-ZZ-00-DR-S-2001"] == "结构"  # ISO 编号里的角色代码
+        assert {s["no"]: s["discipline"] for s in st["sheets"]}["PRJ1-STR-ZZ-00-DR-S-2001"] == "结构"  # ISO 编号里的角色代码
         # 识别完自动分一次：只分新出现的（这里都分过了），再全部重新分一次看 AI 的结果
         j = c.job("recognize", executor="codex", scope="all", priorities=["catalog", "notes", "plans", "sections",
                                                                           "details", "other"])
@@ -224,7 +224,7 @@ def test_workbench_job_and_after_recognition(mixed, monkeypatch):
         j = c.job("classify", executor="codex", redo=True)
         assert j["status"] == "done" and j["title"] == "智能分类（Codex，全部重新分）", j
         st = c.get("/api/state")
-        assert {s["no"]: s["cls"] for s in st["sheets"]}["CGK9-ARC-ZZ-01-DR-A-1002"]["short"] == "Leve简"
+        assert {s["no"]: s["cls"] for s in st["sheets"]}["PRJ1-ARC-ZZ-01-DR-A-1002"]["short"] == "Leve简"
     finally:
         httpd.shutdown()
     assert [e["title"] for e in oplog.read(mixed)][:3] == ["智能分类（Codex，全部重新分）", "Codex 识别（经济档）", "智能分类（演示）"]

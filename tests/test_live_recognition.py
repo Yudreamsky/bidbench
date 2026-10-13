@@ -18,13 +18,13 @@ from bidbench import ops, recognition, server, state
     ("批次#1 / 建筑 / 详图 / 建施-07~08、10 详图合订本.pdf", "details"),
     ("批次#1 / 楼梯平面详图.pdf", "details"),  # 详图先于平面认
     ("批次#1 / 建施-06 门窗表.pdf", "details"),
-    ("批次#1 / Drawings / CGK9-ARC-ZZ-00-DR-A-1001_Ground Floor GA Plan.pdf", "plans"),
+    ("批次#1 / Drawings / PRJ1-ARC-ZZ-00-DR-A-1001_Ground Floor GA Plan.pdf", "plans"),
     ("批次#1 / Drawings / North Elevation.pdf", "sections"),
     ("批次#1 / Drawings / Drawing Register.pdf", "catalog"),
     ("批次#1 / Drawings / General Notes.pdf", "notes"),
-    ("批次#1 / Details / CGK9-ARC-XX-DR-A-5001.pdf", "details"),  # 文件名认不出，看所在文件夹
+    ("批次#1 / Details / PRJ1-ARC-XX-DR-A-5001.pdf", "details"),  # 文件名认不出，看所在文件夹
     ("批次#1 / Drawings / Plant Room Layout.pdf", "plans"),
-    ("批次#1 / Drawings / CGK9-STR-ZZ-DR-S-0001.pdf", "other"),
+    ("批次#1 / Drawings / PRJ1-STR-ZZ-DR-S-0001.pdf", "other"),
 ])
 def test_priority_of(path, key):
     assert recognition.priority_of(path) == key
