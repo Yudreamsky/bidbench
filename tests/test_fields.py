@@ -44,7 +44,7 @@ def test_recognized_sheet_fields(sheets_project):
         "no": ("建施-02", "high"), "title": ("一层平面图", "high"), "rev": ("A", "high"), "date": ("2026-01-01", "high")}
     assert f["title"]["src"] == "看图识别（PDF 文字层）" and f["title"]["where"]["page_id"] == by["建施-02"]["current_page"]
     assert _pick(f["discipline"], "value", "src", "conf") == ("建筑", "图号", "high")
-    assert _pick(f["floors"], "value", "src", "conf") == ("1F", "图名（看图识别）", "high")
+    assert _pick(f["floors"], "value", "src", "conf") == ("一层（1F）", "图名（看图识别）", "high")  # 原叫法 + 换算出的第几层
     assert _pick(f["content"], "src", "conf") == ("看图识别", "mid")
     iso = by["PRJ1-ARC-ZZ-05-DR-A-1006"]["fields"]
     assert iso["discipline"]["src"] == "图号里的角色代码"

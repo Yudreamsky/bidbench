@@ -4,6 +4,7 @@
 
 英文图名（Ground Floor、Level 05、Basement 01、Roof）也认。英式写法 Level 00 是首层（1F），Level 01 是 2F；
 项目里没有 Ground、Level 00 时按 Level 01 是首层算（base=0），由调用方判断后传入。
+夹层（5F夹层、Level 05M）算在下面那一层，排在上下两层之间；原叫法里写着“夹层”“避难层”的照样显示，不另加标签。
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ _ORD = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6
 EN_GROUND = re.compile(r"\b(?:ground\s*(?:floor|level|flr)?|G/F|GF|UGF|(?:level|lvl|L)\s*0{1,2})(?![\w/])", re.I)
 EN_RANGE = re.compile(r"\b(?:levels?|lvls?|floors?|L)\s*0*(\d{1,3})\s*(?:-|–|~|to)\s*(?:levels?\s*|L)?0*(\d{1,3})\b", re.I)
 EN_BASEMENT = re.compile(r"\b(?:basement|level\s*B|LB|B)\s*0*(\d{1,2})\b", re.I)
-EN_LEVEL = re.compile(r"\b(?:level|lvl|L)\s*0*(\d{1,3})\b", re.I)
+EN_LEVEL = re.compile(r"\b(?:level|lvl|L)\s*0*(\d{1,3})M?\b", re.I)  # Level 05M：5 层的夹层
 EN_ORDINAL = re.compile(r"\b(?:(\d{1,2})(?:st|nd|rd|th)|(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth))"
                         r"\s*(?:floor|level|flr|storey)\b", re.I)
 EN_ROOF = re.compile(r"\broof\b|(?<![A-Za-z])RF(?![A-Za-z])", re.I)
@@ -121,6 +122,34 @@ def parse_floors(text: str, base: int = 1) -> set[int]:
         if n and n <= 200:
             out.add(n)
     return {f for f in out if f != 0}
+
+
+NAME_CN = re.compile(r"屋顶|屋面|机房层|首层|底层")
+LEVEL_WORD = re.compile(r"\b(?:level|lvl|L)\s*\d|\b\d{1,2}(?:st|nd|rd|th)\s*(?:floor|level|flr|storey)\b"
+                        r"|\b(?:first|second|third|fourth|fifth)\s+(?:floor|level)\b", re.I)  # 第几层要看怎么数的英文写法
+
+
+def floor_names(text: str) -> list[str]:
+    """楼层的原叫法：Level 05、Ground Floor、Basement 01、4F~20F、地下一层、五层、屋顶……按出现先后，去重。"""
+    def scan(t, regexes, offset=0):
+        taken, out = [], []
+        for rx in regexes:
+            for m in rx.finditer(t):
+                a, b = m.span()
+                if any(a < y and x < b for x, y in taken):
+                    continue  # 已经算在更长的写法里（如 Levels 02-04 里的 Level 02）
+                taken.append((a, b))
+                out.append((offset + a, m.group(0).strip()))
+        return out
+    t = text or ""
+    found = scan(t, (EN_RANGE, EN_GROUND, EN_BASEMENT, EN_LEVEL, EN_ORDINAL, EN_ROOF)) if re.search(r"[A-Za-z]{2}", t) else []
+    found += [(a, x) for a, x in scan(_norm(t), (BASEMENT_RANGE, RANGE, BASEMENT, SINGLE_F, SINGLE_CN, NAME_CN), 10_000)
+              if not any(x in y or y in x for _, y in found)]
+    out: list[str] = []
+    for _, x in sorted(found):
+        if x and x not in out:
+            out.append(x)
+    return out
 
 
 def label(f: int) -> str:

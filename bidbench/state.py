@@ -834,24 +834,34 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     for k, v in prov.items():
         sheet_tower[k] = v["tower"]
 
-    # ---- 每张图管哪几层（图纸卡片上的同层图纸、楼层覆盖都用） ----
-    base = _floor_base(list(sheet_out.values()) + list(prov.values()))
+    # ---- 每张图管哪几层（图纸卡片上的同层图纸、楼层覆盖都用）：原叫法 + 换算出的第几层 ----
+    bases = _floor_bases(list(sheet_out.values()) + list(prov.values()), sheet_tower, decisions, keys.multi, issues)
+
+    def base_for(t):
+        return bases.get(t) or bases["*"]
     for no, s in sheet_out.items():
-        fl, how = _sheet_floors(s["title"], current_page[no], base)
-        _set_floors(s, fl, how)
+        b, sure = base_for(sheet_tower.get(no))
+        fl, how, src_text = _sheet_floors(s["title"], current_page[no], b)
+        _set_floors(s, fl, how, floors.floor_names(src_text))
         conf = (s["fields"]["title"] or {}).get("conf", "mid") if how == "图名" else "mid"
-        if how == "图名" and re.search(r"\blevel\s*\d", s["title"] or "", re.I):
-            conf = lower_conf(conf, "mid")  # Level 01 是 1F 还是 2F，是按全项目的写法推的
-        s["fields"]["floors"] = fld(s["floors_text"], f"{how}（看图识别）", conf, where=_where(current_page[no])) if fl else None
+        english = how == "图名" and floors.LEVEL_WORD.search(s["title"] or "")
+        if english and not sure:
+            conf = lower_conf(conf, "mid")  # Level 01 是 1F 还是 2F，是猜的
+        src = f"{how}（看图识别）" + (f"，{BASE_SHORT[b]}（{'已确认' if sure else '猜的'}）" if english else "")
+        s["fields"]["floors"] = fld(s["floors_name"], src, conf, where=_where(current_page[no])) if fl else None
     for no, s in prov.items():
-        fl = floors.parse_floors(s["title"] or "", base)
-        how = ("图名（按文件名）" + ("，英式：Level 00 是 1F" if base and re.search(r"\blevel\b", s["title"] or "", re.I) else "")) if fl else ""
+        b, sure = base_for(s["tower"])
+        fl = floors.parse_floors(s["title"] or "", b)
+        english = fl and floors.LEVEL_WORD.search(s["title"] or "")
+        how, raw = ("图名（按文件名）" + (f"，{BASE_SHORT[b]}（{'已确认' if sure else '猜的'}）" if english else ""),
+                    floors.floor_names(s["title"] or "")) if fl else ("", [])
         if not fl:
-            fl = _level_floors((names.iso_parts(no) or {}).get("level"), base)
-            how = "图号里的楼层代码" if fl else ""
-        _set_floors(s, fl, how)
+            code = (names.iso_parts(no) or {}).get("level")
+            fl = _level_floors(code, b)
+            how, raw = ("图号里的楼层代码", [f"楼层代码 {code}"]) if fl else ("", [])
+        _set_floors(s, fl, how, raw)
         where = {"page_id": s["current_page"], "path": s["paths"][0]}
-        s["fields"]["floors"] = fld(s["floors_text"], how, names.LOW if how.startswith("图名") else names.MID, where=where) if fl else None
+        s["fields"]["floors"] = fld(s["floors_name"], how, names.LOW if how.startswith("图名") else names.MID, where=where) if fl else None
         if (s["cls"] or {}).get("content"):  # 智能分类看名字推测的内容优先
             s["fields"]["content"] = fld(s["cls"]["content"], AI_SRC, names.LOW)
             continue
@@ -1059,8 +1069,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                "inner": False, "notes": m["evidence"], "missing_level": m["level"],
                "confirmed": bool(m.get("confirmed")), "borrowed": False, "own_values": [], "rec_notes": [],
                "cls": classify.sheet_view(lab(t), discipline_of(t)), "fields": {}}
-        fl = floors.parse_floors(m["title"] or "", base)
-        _set_floors(out, fl, "图名" if fl else "")
+        fl = floors.parse_floors(m["title"] or "", base_for(tower_part(t))[0])
+        _set_floors(out, fl, "图名" if fl else "", floors.floor_names(m["title"] or ""))
         sheets_list.append(out)
     sheets_list += prov.values()
     _guess_facts(facts, sheets_list, decisions)
@@ -1174,12 +1184,54 @@ def _fact_int(facts: dict, key: str) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _floor_base(sheets: list) -> int:
-    """英文图名的楼层怎么数：项目里有 Ground Floor、Level 00（或图号里的楼层代码 00）就按英式，Level 01 是 2F。"""
+BASE_LABEL = {1: "Level 00（Ground）是首层，Level 01 是 2F", 0: "Level 01 是首层（1F）"}
+BASE_SHORT = {1: "按英式数：Level 00 是首层", 0: "Level 01 是首层"}
+
+
+def _base_guess(sheets: list) -> tuple[int, str]:
+    """英文楼层怎么数（猜）：有 Ground Floor、Level 00（或图号里的楼层代码 00）就按英式，Level 01 是 2F；否则 Level 01 是首层。"""
     for x in sheets:
-        if floors.is_ground_zero(x["title"] or "") or (names.iso_parts(x["no"]) or {}).get("level") in ("00", "GF"):
-            return 1
-    return 0
+        m = floors.EN_GROUND.search(x["title"] or "")
+        if m:
+            return 1, f"图纸里有“{m.group(0)}”（{x['no']}）"
+        lv = (names.iso_parts(bare(x["no"])) or {}).get("level")
+        if lv in ("00", "GF"):
+            return 1, f"图号里有楼层代码 {lv}（{x['no']}）"
+    return 0, "图纸里没有 Ground Floor、Level 00"
+
+
+def _needs_base(sheets: list) -> bool:
+    """有没有要看数法才知道第几层的写法：Level 01、1st Floor，或图号里 01、02 这样的楼层代码。"""
+    return any(floors.LEVEL_WORD.search(x["title"] or "")
+               or re.fullmatch(r"0[1-9]|[1-9]\d", (names.iso_parts(bare(x["no"])) or {}).get("level") or "") for x in sheets)
+
+
+def _floor_bases(sheets: list, sheet_tower: dict, decisions: dict, multi: bool, issues: list) -> dict:
+    """英文楼层的数法：{"*" 或塔楼: (base, 是否人工确认)}（docs/图纸字段.md 9.3）。
+
+    软件先猜、写明理由，问人确认一次；多栋楼各栋猜得不一样时按栋问。没有 Level 01 这类写法的项目不问。"""
+    by_t: dict = defaultdict(list)
+    for x in sheets:
+        by_t[sheet_tower.get(x["no"])].append(x)
+    asking = [t for t, xs in by_t.items() if t and _needs_base(xs)] if multi else []
+    if len({_base_guess(by_t[t])[0] for t in asking}) <= 1:
+        asking = []  # 各栋猜得一样：全项目问一次
+    out = {}
+    for k, xs in [("*", sheets)] + [(t, by_t[t]) for t in asking]:
+        d = decisions.get(("floor_base", k)) or (decisions.get(("floor_base", "*")) if k != "*" else None)
+        if d and d["value"] in ("0", "1"):
+            out[k] = (int(d["value"]), True)
+            continue
+        guess, why = _base_guess(xs)
+        out[k] = (guess, False)
+        if (k == "*" and asking) or not _needs_base(xs):
+            continue  # 按栋问了，或这些图里没有要看数法的写法
+        who = "这个项目" if k == "*" else k
+        issues.append(_issue("warn", "楼层数法", f"floor_base:{k}", f"{'' if k == '*' else k + ' '}英文楼层怎么数？",
+                             f"图名里有 Level 01 这样的写法，第几层要看{who}怎么数。{why}，先按“{BASE_LABEL[guess]}”算，请确认。"
+                             "同层图纸、楼层覆盖都按这个数。", {},
+                             [{"label": BASE_LABEL[v], "kind": "floor_base", "key": k, "value": str(v)} for v in (guess, 1 - guess)]))
+    return out
 
 
 def _level_floors(code: str | None, base: int) -> set[int]:
@@ -1197,26 +1249,30 @@ def _level_floors(code: str | None, base: int) -> set[int]:
     return set()
 
 
-def _sheet_floors(title: str, page, base: int = 1) -> tuple[set[int], str]:
-    """一张图覆盖的楼层：先看图名；图名没有（如“标准层平面图”）再看“适用楼层”类说明和关键数值。"""
+def _sheet_floors(title: str, page, base: int = 1) -> tuple[set[int], str, str]:
+    """一张图覆盖的楼层：先看图名；图名没有（如“标准层平面图”）再看“适用楼层”类说明和关键数值。
+    返回 (楼层, 从哪看出来的, 那段文字)，那段文字用来留楼层的原叫法。"""
     got = floors.parse_floors(title or "", base)
     if got:
-        return got, "图名"
+        return got, "图名", title
     rec = page.rec
     for n in rec["content"]["notes"]:
         if floors.STANDARD_HINT.search(n["text"]):
-            got = floors.parse_floors(n["text"])
+            got = floors.parse_floors(n["text"], base)
             if got:
-                return got, "说明"
+                return got, "说明", n["text"]
     for kv in rec["content"]["key_values"]:
         if re.search(r"适用(?:楼层|范围)|楼层范围", kv["name"]):
-            got = floors.parse_floors(f"{kv['value'] or ''} {kv['raw_text'] or ''}")
+            text = f"{kv['value'] or ''} {kv['raw_text'] or ''}"
+            got = floors.parse_floors(text, base)
             if got:
-                return got, "说明"
+                return got, "说明", text
+    texts = []
     for kv in rec["content"]["key_values"]:
         if "层高" in kv["name"]:
-            got |= floors.parse_floors(kv["name"].replace("层高", ""))
-    return got, ("关键数值" if got else "")
+            got |= floors.parse_floors(kv["name"].replace("层高", ""), base)
+            texts.append(kv["name"].replace("层高", ""))
+    return got, ("关键数值" if got else ""), " ".join(texts)
 
 
 def _first_guess(unrecognized, cad: dict, sheet_out: dict, labels: dict, disc_how, keys: Keys | None = None,
@@ -1421,9 +1477,12 @@ def _guess_facts(facts: dict, sheets: list, decisions: dict | None = None) -> No
     group["facts"].sort(key=lambda f: f["name"])
 
 
-def _set_floors(s: dict, fl: set[int], how: str) -> None:
+def _set_floors(s: dict, fl: set[int], how: str, raw=()) -> None:
+    """楼层：换算出的第几层（floors、floors_text），加上原叫法显示成“Level 05（6F）”（floors_name）。"""
     title = s["title"] or ""
     s["floors"], s["floors_from"], s["floors_text"] = sorted(fl), how, floors.compress(fl) or None
+    name = "、".join(list(raw)[:3])
+    s["floors_name"] = (f"{name}（{s['floors_text']}）" if name and name != s["floors_text"] else s["floors_text"]) if fl else None
     # 通用图只看图名：没写楼层的柱平面布置图，即使层高表里列了各层，也是建哪一层都要看的图
     s["general"] = bool(GENERAL_SHEET.search(title)) and "目录" not in title and not floors.parse_floors(title)
 
