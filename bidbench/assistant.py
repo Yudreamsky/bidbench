@@ -47,10 +47,20 @@ class Toolkit:
         return self._cache[key]
 
     def _sheet(self, st: dict, no: str) -> dict:
-        n = state.norm_no(no)
+        n = (no or "").strip()
+        if "·" in n:  # 带塔楼的写法：“T1 · 建施-01”
+            tw, _, num = n.partition("·")
+            n = f"{tw.strip()}{state.SEP}{state.norm_no(num)}"
+        else:
+            n = state.norm_no(n)
         for s in st["sheets"]:
             if s["no"] == n:
                 return s
+        same = [s for s in st["sheets"] if s.get("number") == n]
+        if len(same) == 1:
+            return same[0]
+        if same:
+            raise ToolError(f"图号 {no} 在几栋楼都有：{'、'.join(s['no'] for s in same)}。请带上塔楼，例如“{same[0]['no']}”。")
         raise ToolError(f"没有图号 {no}。可以先用 list_sheets 查看全部图号。")
 
     def _facts(self, st: dict) -> list[dict]:
@@ -119,7 +129,7 @@ class Toolkit:
                 continue
             rows.append({"no": s["no"], "title": s["title"], "discipline": s["discipline"],
                          "status": STATUS_LABEL[s["status"]], "current_rev": s["current_rev"],
-                         "page_id": s["current_page"]})
+                         "page_id": s["current_page"], **({"tower": s["tower"]} if s.get("tower") else {})})
         limit = max(1, min(limit, MAX_LIST))
         return {"total": len(rows), "sheets": rows[:limit], "truncated": len(rows) > limit,
                 "statuses": list(STATUS_LABEL.values())}
@@ -145,7 +155,8 @@ class Toolkit:
         notices = [{"id": n["id"], "title": n["title"], "kind": n["kind"], "batch": n["batch"], "page_id": n["page_id"],
                     "also_changes": [x for x in n["affects"] if x != s["no"]]}
                    for n in st["notices"] if s["no"] in n["affects"]]
-        return {"no": s["no"], "title": s["title"], "discipline": s["discipline"], "status": STATUS_LABEL[s["status"]],
+        return {"no": s["no"], "tower": s.get("tower"), "title": s["title"], "discipline": s["discipline"],
+                "status": STATUS_LABEL[s["status"]],
                 "current_rev": s["current_rev"], "current_page_id": s["current_page"], "paths": s["paths"],
                 "notes": s["notes"], "notices": notices,
                 "versions": [{"rev": v["rev"], "date": v["date"], "batch": v["batch"], "state": v["state"],

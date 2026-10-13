@@ -14,6 +14,8 @@
 - 批次5 文件夹（build_folder）：补发建施-09、建施-12；文件夹里直接放的“电气.zip”（外层包，不算内层）
   里面再套一个压缩包（内层）；夹着系统缩略图缓存 Thumbs.db 和 Office 临时锁文件 ~$*.docx（不该收）
 
+另有单独的一批 build_towers：两栋塔楼各一套编号相同的图（测试“塔楼 + 图号”的图纸身份，不在演示流水线里）。
+
 用法：python samples/make_sample.py <输出目录>
 """
 
@@ -285,6 +287,41 @@ def build_folder(out: Path) -> tuple[Path, str]:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
     return root, "2026-10-20"
+
+
+TOWERS_NAME = "双塔首批"
+
+
+def build_towers(out: Path) -> tuple[Path, str]:
+    """两栋塔楼（T1、T2）的文件夹里各有一套编号相同的图，另有“公共”文件夹里的总平面、一份放在最外层看不出是哪栋的补图。
+
+    用来检查：同图号不同楼不混成一张、不误报版本冲突；缺图按楼各查各的（T1 目录列了建施-03、T1 一层平面引用了
+    建施-04，这两张只有 T2 有）；T1 的图引用公共的总平面能找到；看不出是哪栋的补图要人指定。"""
+    root = out / TOWERS_NAME
+    h = [("A", "2026-09-01", "出图")]
+    cat = [("建施-01", "一层平面图", "A"), ("建施-02", "二层平面图", "A"), ("建施-03", "三层平面图", "A")]
+
+    def pdf(no, title, body=(), variant=0, catalog=None):
+        return sheet_pdf(no, title, "A", "2026-09-01", list(body), h, variant=variant, catalog=catalog)
+    files = {
+        "T1/建筑/建施-00 建筑图纸目录.pdf": pdf("建施-00", "建筑图纸目录", catalog=cat),
+        "T1/建筑/建施-01 一层平面图.pdf": pdf("建施-01", "一层平面图", ["墙身详见建施-04"]),
+        "T1/建筑/建施-02 二层平面图.pdf": pdf("建施-02", "二层平面图", ["总平面详见建施-90"]),
+        "T1/结构/结施-01 一层结构平面图.pdf": pdf("结施-01", "一层结构平面图"),
+        "T2/建筑/建施-00 建筑图纸目录.pdf": pdf("建施-00", "建筑图纸目录", variant=1, catalog=cat),
+        "T2/建筑/建施-01 一层平面图.pdf": pdf("建施-01", "一层平面图", ["墙身详见建施-04"], variant=1),
+        "T2/建筑/建施-02 二层平面图.pdf": pdf("建施-02", "二层平面图", variant=1),
+        "T2/建筑/建施-03 三层平面图.pdf": pdf("建施-03", "三层平面图", variant=1),
+        "T2/建筑/建施-04 墙身大样.pdf": pdf("建施-04", "墙身大样", variant=1),
+        "T2/结构/结施-01 一层结构平面图.pdf": pdf("结施-01", "一层结构平面图", variant=1),
+        "公共/建施-90 总平面图.pdf": pdf("建施-90", "总平面图"),
+        "建施-02 二层平面图（补）.pdf": pdf("建施-02", "二层平面图", variant=2),
+    }
+    for rel, data in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return root, "2026-09-01"
 
 
 if __name__ == "__main__":

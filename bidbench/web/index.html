@@ -562,10 +562,14 @@ function altName(s, name) {  // 详图和同名的分层图撞名时换个写法
   const m = name.match(/^([一-鿿]+)(.+)$/);
   return m && /详图|大样/.test(s.title || '') ? (DETAIL_SHORT[m[1]] || m[1][0]) + '详' + m[2] : null;
 }
+const multiTower = () => !!(S && S.towers && S.towers.multi);
+function bandKey(s) {  // 图谱的大框：一栋楼的项目按专业分；多栋楼的项目按“塔楼 + 专业”分
+  return multiTower() ? `${s.tower || '未分塔楼'}｜${s.discipline}` : s.discipline;
+}
 function shortNames() {
   const out = {}, used = new Set();
   S.sheets.forEach(s => {
-    const key = x => s.discipline + '|' + x;
+    const key = x => bandKey(s) + '|' + x;
     let n = shortName(s);
     if (used.has(key(n))) { const a = altName(s, n); if (a && !used.has(key(a))) n = a; }
     let name = n, k = 1;
@@ -624,8 +628,10 @@ function layout() {
   ALIAS = shortNames();
   loadLayoutPrefs();
   const groups = {};
-  S.sheets.forEach(s => (groups[s.discipline] ||= []).push(s));
-  const discs = Object.keys(groups).sort((a, b) => DISC_ORDER.indexOf(a) - DISC_ORDER.indexOf(b));
+  S.sheets.forEach(s => (groups[bandKey(s)] ||= []).push(s));
+  const towerRank = t => { const i = ((S.towers || {}).list || []).findIndex(x => x.name === t); return i < 0 ? 999 : i; };
+  const bandRank = k => { const [t, d] = k.includes('｜') ? k.split('｜') : ['', k]; return [towerRank(t), DISC_ORDER.indexOf(d)]; };
+  const discs = Object.keys(groups).sort((a, b) => { const x = bandRank(a), y = bandRank(b); return x[0] - y[0] || x[1] - y[1]; });
   const MAXW = laidOutAt, GAPX = 16, GAPY = 16, PAD = 12, GAP = GRID_GAP, ROWH = GRID_ROWH, HEAD = 34, SUBHEAD = 26, SUBPAD = 8;
   let x = 12, y = 12, rowH = 0, maxX = 0;
   const bands = [], subs = [], drops = [], pos = {}, boxOf = {};
@@ -637,7 +643,7 @@ function layout() {
   };
   discs.forEach(d => {
     const items = groups[d];
-    const label = `${d}（${items.length}）`;
+    const label = `${d.replace('｜', ' ')}（${items.length}）`;
     const minW = Math.max(150, Math.ceil(textW(label, 12, 400)) + 48);
     if (ui.collapsedBoxes.has(d)) {  // 收起的大框只留标题
       const [bx, by] = place(minW, HEAD);
@@ -712,7 +718,7 @@ function boxHead(key, label, x, y, w, h, collapsed, guess) {  // 框的标题：
 function revealSheet(no) {  // 图在收起的框里：把它所在的框展开
   const s = sheetBy[no];
   if (!s || nodeBox[no] || net.on) return;
-  const keys = [s.discipline, `${s.discipline}|${sheetGroup(s)}`].filter(k => ui.collapsedBoxes.has(k));
+  const keys = [bandKey(s), `${bandKey(s)}|${sheetGroup(s)}`].filter(k => ui.collapsedBoxes.has(k));
   if (!keys.length) return;
   keys.forEach(k => ui.collapsedBoxes.delete(k));
   saveLayoutPrefs(); buildGraph();
@@ -835,7 +841,7 @@ function buildGraph() {
       sv('path', { d: 'M0 0L10 5L0 10z', class: cls }))));
   gsvg.append(defs);
   const guessIn = key => S.sheets.filter(s => s.status === 'guess' && (s.pages || []).length
-    && (key === s.discipline || key === `${s.discipline}|${sheetGroup(s)}`));
+    && (key === bandKey(s) || key === `${bandKey(s)}|${sheetGroup(s)}`));
   L.bands.forEach(b => {
     gsvg.append(sv('rect', { class: 'band', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10 }));
     gsvg.append(boxHead(b.key, b.label, b.x + 6, b.y + 4, b.w - 12, 26, b.collapsed, guessIn(b.key)));
@@ -1369,10 +1375,12 @@ function sheetChip(no) {
   return sheetBy[no] ? el('button', { class: 'chip', type: 'button', onclick: () => { ui.focusSet = null; selectSheet(no); } }, no) : el('span', { class: 'mono' }, no);
 }
 /* 同层图纸：楼层有交集的图（通用图另列），楼层完全一样的排前面；通用图：设计说明、没写楼层的柱平面等。规则与 state.same_floor 相同 */
+const SHARED_TOWERS = new Set(['公共', '裙楼', '地下室']);
+const sameBuilding = (a, b) => !a.tower || !b.tower || a.tower === b.tower || SHARED_TOWERS.has(a.tower) || SHARED_TOWERS.has(b.tower);
 function sameFloor(no) {
   const s = sheetBy[no], mine = new Set(s.floors || []);
   const order = new Map(S.sheets.map((t, i) => [t.no, i]));
-  const live = S.sheets.filter(t => t.no !== no && t.status !== 'voided');
+  const live = S.sheets.filter(t => t.no !== no && t.status !== 'voided' && sameBuilding(s, t));
   const diff = t => (t.floors || []).filter(f => !mine.has(f)).length + [...mine].filter(f => !(t.floors || []).includes(f)).length;
   const near = mine.size ? live.filter(t => !t.general && (t.floors || []).some(f => mine.has(f))) : [];
   near.sort((a, b) => DISC_ORDER.indexOf(a.discipline) - DISC_ORDER.indexOf(b.discipline) || diff(a) - diff(b) || order.get(a.no) - order.get(b.no));
@@ -1592,7 +1600,7 @@ function fieldRows(s) {  // 图纸的每一项：值、把握、来源，原文�
   const row = (label, item, fallback) => item && (item.value || fallback)
     ? [el('dt', {}, label), el('dd', {}, String(item.value || fallback), confPill(item.conf),
       el('small', { class: 'meta' }, ` ${item.src}${item.raw ? `，原文“${item.raw}”` : ''}`))] : null;
-  return [row('图号', f.no, '看不出'), row('图名', f.title),
+  return [row('图号', f.no, '看不出'), row('塔楼', f.tower), row('图名', f.title),
     f.rev ? row(guess ? '版次' : '现行版次', f.rev) : guess ? null : [el('dt', {}, '现行版次'), el('dd', {}, '—')],
     row('出图日期', f.date), row('状态码', f.issue_status), row('专业', f.discipline),
     s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group, confPill('low'), el('small', { class: 'meta' }, ' AI 推测（智能分类）'))] : null,
