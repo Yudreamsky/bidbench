@@ -154,8 +154,10 @@ class Toolkit:
                 **({"more_same_floor": around["more_same_floor"]} if "more_same_floor" in around else {}),
                 "general_sheets": around["general"], "own_values": s["own_values"],
                 "recognition_notes": s["rec_notes"], "facts": facts, "issues": issues,
-                **({"guess": s["guess"], "guess_confidence": CONF_LABEL[s["conf"]],
-                    "guess_note": "还没看图识别，这些是按文件名、文件夹推测的，把握见各项的 conf"} if s.get("guess") else {}),
+                "fields": {k: {"value": f["value"], "confidence": CONF_LABEL[f["conf"]], "source": f["src"],
+                               **({"raw": f["raw"]} if f["raw"] else {})} for k, f in (s.get("fields") or {}).items() if f},
+                **({"guess_confidence": CONF_LABEL[s["conf"]],
+                    "guess_note": "还没看图识别，fields 是按文件名、文件夹推测的，把握见各项的 confidence"} if s["status"] == "guess" else {}),
                 **({"files_not_recognized_yet": s["pending_files"]} if s.get("pending_files") else {})}
 
     def get_page(self, page_id: str, include_text_layer: bool = False) -> dict:

@@ -89,15 +89,16 @@ def test_first_guess_sheets(named):
     by = {s["no"]: s for s in st["sheets"]}
     g = by["PRJ1-ARC-ZZ-00-DR-A-1001"]
     assert g["status"] == "guess" and g["title"] == "Ground Floor GA Plan" and g["current_rev"] == "P01"
-    assert g["guess"]["no"]["conf"] == "high"  # 文件名里有，PDF 文字里也有
-    assert g["guess"]["discipline"] == {"value": "建筑", "conf": "high", "src": "图号里的角色代码"}
-    assert g["floors"] == [1] and g["guess"]["floors"]["conf"] == "low"
-    assert "建筑平面图：可能有房间布置" in g["guess"]["content"]["value"] and g["guess"]["content"]["conf"] == "low"
+    assert g["fields"]["no"]["conf"] == "high"  # 文件名里有，PDF 文字里也有
+    assert {k: g["fields"]["discipline"][k] for k in ("value", "conf", "src")} == {"value": "建筑", "conf": "high", "src": "图号里的角色代码"}
+    assert g["fields"]["no"]["where"]["path"].endswith("Ground Floor GA Plan.pdf")  # 每项都带出处
+    assert g["floors"] == [1] and g["fields"]["floors"]["conf"] == "low"
+    assert "建筑平面图：可能有房间布置" in g["fields"]["content"]["value"] and g["fields"]["content"]["conf"] == "low"
     l5 = by["PRJ1-ARC-ZZ-05-DR-A-1006"]
-    assert l5["guess"]["no"]["conf"] == "mid" and l5["floors"] == [6]  # 有 Ground Floor：英式，Level 05 是 6F
+    assert l5["fields"]["no"]["conf"] == "mid" and l5["floors"] == [6]  # 有 Ground Floor：英式，Level 05 是 6F
     assert by["PRJ1-STR-ZZ-00-DR-S-2001"]["discipline"] == "结构"
     riser = by["文件：Mechanical Riser Diagram"]  # 看不出图号也出一张，把握低
-    assert riser["conf"] == "low" and riser["discipline"] == "暖通" and riser["guess"]["no"]["value"] is None
+    assert riser["conf"] == "low" and riser["discipline"] == "暖通" and riser["fields"]["no"]["value"] is None
     roof = by["PRJ1-ARC-ZZ-RF-DR-A-1099"]  # 只有 CAD 文件
     assert roof["pages"] == [] and roof["cad"] and roof["floors"] == [floors.ROOF]
     assert by["建施-07"]["conf"] == "low" and by["建施-08"]["pages"] == by["建施-07"]["pages"]  # 合订本文件名列出的图号

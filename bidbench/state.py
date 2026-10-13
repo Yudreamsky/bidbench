@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from . import classify, floors, names, pdfpages, risk
 from .ingest import FOLDER_MARK
-from .recognition import weak_reason
+from .recognition import HIGH_SCORE, LOW_SCORE, weak_reason
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
 
 SAME_TEXT = 0.97      # 文字层相似度阈值：高于它且图形接近，视为重新导出的同一张图
@@ -33,6 +33,9 @@ STATUS_LABEL = {
 }
 NAMELESS = "文件："  # 文件名里看不出图号的文件，先用文件名代替图号
 CONF_LABEL = {"confirmed": "人工确认", "high": "高置信", "mid": "中置信", "low": "低置信", "conflict": "冲突"}
+CONF_RANK = {"confirmed": 4, "high": 3, "mid": 2, "low": 1}
+REC_SRC = {"text_layer": "看图识别（PDF 文字层）", "vision": "看图识别", "both": "看图识别（图像和文字层一致）"}
+AI_SRC = "AI 推测（智能分类）"  # AI 看名字推的，一律算把握低
 
 DISCIPLINES = [("建", "建筑"), ("结", "结构"), ("水", "给排水"), ("暖", "暖通"), ("电", "电气"),
                ("A", "建筑"), ("S", "结构"), ("P", "给排水"), ("M", "暖通"), ("N", "暖通"), ("E", "电气"), ("D", "电气")]
@@ -103,6 +106,45 @@ def norm_value(v) -> str:
 
 def norm_fact_key(name: str) -> str:
     return re.sub(r"\s+", "", name).replace("～", "~")
+
+
+# ---------------- 字段的统一写法 ----------------
+
+def conf_of(score) -> str | None:
+    """看图识别给的 0–1 分数换成把握：0.85 及以上高，0.6 以下低，中间为中。"""
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    return "high" if score >= HIGH_SCORE else "mid" if score >= LOW_SCORE else "low"
+
+
+def lower_conf(a: str, b: str) -> str:
+    return a if CONF_RANK.get(a, 0) <= CONF_RANK.get(b, 0) else b
+
+
+def fld(value, src: str, conf: str, raw=None, where: dict | None = None) -> dict | None:
+    """一个字段（docs/图纸字段.md 第 3 节）：值、原文（和值不同时才有）、来源、把握（confirmed/high/mid/low）、出处。没有值返回 None。"""
+    if value is None or value == "":
+        return None
+    raw = raw if raw not in (None, "") and str(raw) != str(value) else None
+    return {"value": value, "raw": raw, "src": src, "conf": conf, "where": where}
+
+
+def _where(p) -> dict:
+    return {"page_id": p.page_id, "path": p.paths[0]}
+
+
+def _rec_field(p, key: str, value=None) -> dict | None:
+    """看图识别读出的一项：分数换成把握；给了 value 就用整理后的值，识别出的原样写法放进原文。"""
+    f = p.rec["title_block"].get(key) or {}
+    return fld(f.get("value") if value is None else value, REC_SRC.get(f.get("source"), "看图识别"),
+               conf_of(f.get("confidence")) or "mid", f.get("raw_text") or f.get("value"), _where(p))
+
+
+def _rule_disc_src(no: str) -> tuple[str, str]:
+    """按图号认出专业时的来源和把握：ISO 角色代码、中文前缀算高；只凭英文首字母（A、S……）算中。"""
+    if names.role_discipline(no):
+        return "图号里的角色代码", "high"
+    return ("图号", "high") if re.match(r"[\u4e00-\u9fff]", no) else ("图号首字母", "mid")
 
 
 def fact_group(name: str, is_standard: bool) -> str:
@@ -273,15 +315,23 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
 def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels=None, cad=None):
     labels = labels or {"sheet": {}, "fact": {}, "last": None}
 
-    def disc(no: str, paths=()) -> str:  # 按图号认不出专业的，用智能分类给的；再认不出看所在的文件夹
-        d = classify.sheet_discipline(labels["sheet"].get(no), discipline_of(no))
-        if d == "其他":
-            for x in paths:
-                for f in reversed(names.split_path(x)[0]):
-                    w = names.words_discipline(f)
-                    if w:
-                        return w
-        return d
+    def disc_how(no: str, paths=()) -> tuple[str, str, str]:
+        """专业及其来源、把握：按图号认；认不出的用智能分类给的（AI 推测，低）；再认不出看所在的文件夹（中）。"""
+        rule = discipline_of(no)
+        if rule != "其他":
+            return (rule, *_rule_disc_src(no))
+        ai = classify.sheet_discipline(labels["sheet"].get(no), rule)
+        if ai != "其他":
+            return ai, AI_SRC, "low"
+        for x in paths:
+            for f in reversed(names.split_path(x)[0]):
+                w = names.words_discipline(f)
+                if w:
+                    return w, f"文件夹“{f}”", "mid"
+        return "其他", "认不出", "low"
+
+    def disc(no: str, paths=()) -> str:
+        return disc_how(no, paths)[0]
 
     sheets: dict[str, Sheet] = {}
     notices = []  # 变更单、答疑等非图纸文件
@@ -344,8 +394,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         current_page[no] = cp
         title = _val(cp.rec, "drawing_title")
         s.title = title
-        if s.discipline == "其他":
-            s.discipline = disc(no, cp.paths)
+        d, dsrc, dconf = disc_how(no, cp.paths)
+        s.discipline = d
         if conflict_groups:
             status = "conflict"
             batches_desc = "、".join(f"批次#{g[0].first_batch}" for g in cur["groups"])
@@ -374,13 +424,21 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                 state_txt = "现行" if (r is cur and g is chosen_group) else ("内容不同，待确认" if r is cur and conflict_groups else "已替代")
                 vlist.append({"rev": r["rev"], "date": r["date"], "batch": g[0].first_batch, "state": state_txt,
                               "page_id": g[0].page_id, "paths": sorted({x for p in g for x in p.paths})})
+        cls = classify.sheet_view(labels["sheet"].get(no), discipline_of(no))
+        fields = {"no": _rec_field(cp, "drawing_no", no), "title": _rec_field(cp, "drawing_title"),
+                  "rev": _rec_field(cp, "revision"), "date": _rec_field(cp, "issue_date"),
+                  "discipline": fld(d, dsrc, dconf, where=None if dsrc == AI_SRC else _where(cp)),
+                  "content": fld(cp.rec["content"]["summary"], "看图识别", "mid", where=_where(cp))
+                  or fld((cls or {}).get("content"), AI_SRC, "low")}
+        if override and cur["rev"] == override["value"]:  # 人工定的现行版
+            fields["rev"] = fld(cur["rev"], f"人工确认（{override['created_at'][:10]}）", "confirmed", where=_where(cp))
         sheet_out[no] = {
             "no": no, "title": title, "discipline": s.discipline, "status": status,
             "current_rev": cur["rev"], "current_page": cp.page_id, "versions": vlist,
             "paths": cp.paths, "inner": all(_in_nested_archive(x) for x in cp.paths),
             "notes": notes, "borrowed": cp.rec_borrowed, "own_values": [],
             "rec_notes": [{"type": x["type"], "text": x["description"]} for x in cp.rec["issues"]],
-            "cls": classify.sheet_view(labels["sheet"].get(no), discipline_of(no)),
+            "cls": cls, "fields": fields,
         }
 
     # ---- 变更单 ----
@@ -463,12 +521,17 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     live = {no for no, s in sheet_out.items() if s["status"] != "voided"}
 
     # ---- 一级识别：还没看图识别的页面、CAD 文件，按文件名暂定成图纸 ----
-    prov, nameless = _first_guess(unrecognized + unnumbered, cad or {}, sheet_out, labels, disc)
+    prov, nameless = _first_guess(unrecognized + unnumbered, cad or {}, sheet_out, labels, disc_how)
 
     # ---- 每张图管哪几层（图纸卡片上的同层图纸、楼层覆盖都用） ----
     base = _floor_base(list(sheet_out.values()) + list(prov.values()))
     for no, s in sheet_out.items():
-        _set_floors(s, *_sheet_floors(s["title"], current_page[no], base))
+        fl, how = _sheet_floors(s["title"], current_page[no], base)
+        _set_floors(s, fl, how)
+        conf = (s["fields"]["title"] or {}).get("conf", "mid") if how == "图名" else "mid"
+        if how == "图名" and re.search(r"\blevel\s*\d", s["title"] or "", re.I):
+            conf = lower_conf(conf, "mid")  # Level 01 是 1F 还是 2F，是按全项目的写法推的
+        s["fields"]["floors"] = fld(s["floors_text"], f"{how}（看图识别）", conf, where=_where(current_page[no])) if fl else None
     for no, s in prov.items():
         fl = floors.parse_floors(s["title"] or "", base)
         how = ("图名（按文件名）" + ("，英式：Level 00 是 1F" if base and re.search(r"\blevel\b", s["title"] or "", re.I) else "")) if fl else ""
@@ -476,14 +539,17 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             fl = _level_floors((names.iso_parts(no) or {}).get("level"), base)
             how = "图号里的楼层代码" if fl else ""
         _set_floors(s, fl, how)
-        s["guess"]["floors"] = {"value": s["floors_text"], "conf": names.LOW if how.startswith("图名") else names.MID,
-                                "src": how} if fl else None
+        where = {"page_id": s["current_page"], "path": s["paths"][0]}
+        s["fields"]["floors"] = fld(s["floors_text"], how, names.LOW if how.startswith("图名") else names.MID, where=where) if fl else None
+        if (s["cls"] or {}).get("content"):  # 智能分类看名字推测的内容优先
+            s["fields"]["content"] = fld(s["cls"]["content"], AI_SRC, names.LOW)
+            continue
         kind, things = names.kind_of(s["title"], s["discipline"])
         if kind:
             what = f"{s['floors_text'] + ' ' if s['floors_text'] and len(s['floors']) <= 3 else ''}{s['discipline'] if s['discipline'] != '其他' else ''}{kind}"
-            before = s["guess"].get("content")  # 合订本的说明留着，接在前面
-            s["guess"]["content"] = {"value": (before["value"] + "；" if before else "") + f"{what}：可能有{things}",
-                                     "conf": names.LOW, "src": "看名字推测"}
+            before = s["fields"].get("content")  # 合订本的说明留着，接在前面
+            s["fields"]["content"] = fld((before["value"] + "；" if before else "") + f"{what}：可能有{things}",
+                                         "看名字推测", names.LOW, where=where)
 
     # ---- 关系 ----
     edges, dangling = [], defaultdict(list)
@@ -644,7 +710,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                "current_rev": None, "current_page": None, "versions": [], "paths": [],
                "inner": False, "notes": m["evidence"], "missing_level": m["level"],
                "confirmed": bool(m.get("confirmed")), "borrowed": False, "own_values": [], "rec_notes": [],
-               "cls": classify.sheet_view(labels["sheet"].get(t), discipline_of(t))}
+               "cls": classify.sheet_view(labels["sheet"].get(t), discipline_of(t)), "fields": {}}
         fl = floors.parse_floors(m["title"] or "", base)
         _set_floors(out, fl, "图名" if fl else "")
         sheets_list.append(out)
@@ -802,7 +868,7 @@ def _sheet_floors(title: str, page, base: int = 1) -> tuple[set[int], str]:
     return got, ("关键数值" if got else "")
 
 
-def _first_guess(unrecognized, cad: dict, sheet_out: dict, labels: dict, disc) -> tuple[dict, int]:
+def _first_guess(unrecognized, cad: dict, sheet_out: dict, labels: dict, disc_how) -> tuple[dict, int]:
     """一级识别：还没看图识别的页面、CAD 文件，只看文件名、文件夹和 PDF 自带的文字，暂定成图纸。
 
     已看图识别的图号：记在那张图上（pending_files），文件名版次更新的提醒；其余的出一张“按文件名暂定”的图。
@@ -856,7 +922,7 @@ def _first_guess(unrecognized, cad: dict, sheet_out: dict, labels: dict, disc) -
                     s["notes"].append(f"文件名显示有更新的 {rev} 版（{(plist[0].paths[0] if plist else cpaths[0]).split(' / ')[-1]}），"
                                       "还没看图识别；识别后再确认现行版。")
             continue
-        prov[key] = _guess_sheet(key, group, labels, disc)
+        prov[key] = _guess_sheet(key, group, labels, disc_how)
         nameless += key.startswith(NAMELESS)
     return prov, nameless
 
@@ -874,7 +940,7 @@ def _nameless_key(paths: list) -> str:
     return NAMELESS + names.split_path(paths[0])[1]
 
 
-def _guess_sheet(key: str, group: list, labels: dict, disc) -> dict:
+def _guess_sheet(key: str, group: list, labels: dict, disc_how) -> dict:
     """一张“按文件名暂定”的图：各项推测带来源和把握（高、中、低），图谱里画虚线框。"""
     def rk(item):
         g = item[0] or {}
@@ -890,24 +956,27 @@ def _guess_sheet(key: str, group: list, labels: dict, disc) -> dict:
     if key.startswith(NAMELESS):
         title = next((_val(x.rec, "drawing_title") for x in seen if _val(x.rec, "drawing_title")), None) \
             or names.parse_name(stem)["title"] or stem
-    guess = {k: g.get(k) for k in ("no", "title", "rev", "status")}
+    where = {"page_id": plist[0].page_id if plist else None, "path": paths[0]}
+
+    def env(x):  # 一级识别推出的一项，补上出处
+        return fld(x["value"], x["src"], x["conf"], where=where) if x else None
+    fields = {k: env(g.get(k)) for k in ("no", "title", "rev")}
+    fields["issue_status"] = fld(g.get("status"), "文件名", names.MID, where=where)
     if key.startswith(NAMELESS):
-        guess["no"] = {"value": None, "conf": names.LOW, "src": "文件名里看不出图号"}
-        guess["title"] = {"value": title, "conf": names.LOW, "src": "文件名"}
-    d = disc(key, paths)
+        fields["no"] = {"value": None, "raw": None, "src": "文件名里看不出图号", "conf": names.LOW, "where": where}
+        fields["title"] = fld(title, "文件名", names.LOW, where=where)
+    d, dsrc, dconf = disc_how(key, paths)
     if d != "其他":
-        lab = labels["sheet"].get(key)
-        ai = classify.sheet_discipline(lab, discipline_of(key)) == d and discipline_of(key) == "其他"
-        guess["discipline"] = (g.get("discipline") if g.get("discipline") and g["discipline"]["value"] == d
-                               else {"value": d, "conf": names.MID, "src": "智能分类" if ai else "所在文件夹"})
+        gd = g.get("discipline")
+        fields["discipline"] = env(gd) if gd and gd["value"] == d else fld(d, dsrc, dconf, where=None if dsrc == AI_SRC else where)
     else:
         w = names.words_discipline(title or "")
         d = w or "其他"
-        guess["discipline"] = {"value": d, "conf": names.LOW, "src": "图名里的词" if w else "认不出"}
+        fields["discipline"] = fld(d, "图名里的词" if w else "认不出", names.LOW, where=where)
     if g.get("binder"):
-        guess["content"] = {"value": f"合订本“{g['binder']}”里的一张，具体在哪页要看图识别", "conf": names.LOW, "src": "合订本文件名"}
+        fields["content"] = fld(f"合订本“{g['binder']}”里的一张，具体在哪页要看图识别", "合订本文件名", names.LOW, where=where)
     elif key.startswith(NAMELESS) and len(pages) > 1:
-        guess["content"] = {"value": f"{len(pages)} 页的合订本，看不出里面有哪些图", "conf": names.LOW, "src": "文件名"}
+        fields["content"] = fld(f"{len(pages)} 页的合订本，看不出里面有哪些图", "文件名", names.LOW, where=where)
     conf = g.get("conf") or names.LOW
     versions = []
     for gg, pl, cp in group:
@@ -921,7 +990,7 @@ def _guess_sheet(key: str, group: list, labels: dict, disc) -> dict:
         "versions": versions, "paths": paths, "inner": all(_in_nested_archive(x) for x in paths),
         "notes": [], "borrowed": False, "own_values": [], "rec_notes": [],
         "cls": classify.sheet_view(labels["sheet"].get(key), discipline_of(key)),
-        "guess": guess, "conf": conf, "pages": pages, "seen": bool(seen),
+        "fields": fields, "conf": conf, "pages": pages, "seen": bool(seen),
         "cad": [x for _g, _pl, cp in group if cp for x in cp],
     }
 

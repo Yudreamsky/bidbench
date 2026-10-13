@@ -41,6 +41,7 @@ SCOPES = {
 
 SERIOUS_ISSUES = ("字迹不清", "图签缺失", "疑似多张图", "文字层与图像不一致")
 NO_NUMBER_KINDS = ("变更单", "答疑或澄清", "封面")  # 这几类页面本来就可以没有图号
+HIGH_SCORE, LOW_SCORE = 0.85, 0.6  # 识别给的 0–1 分数：0.85 及以上把握高，0.6 以下把握低（docs/图纸字段.md 第 3 节）
 
 
 def weak_reason(rec: dict) -> str | None:
@@ -53,7 +54,7 @@ def weak_reason(rec: dict) -> str | None:
     tb = rec["title_block"]
     if not tb["drawing_no"]["value"] and rec["page_kind"] not in NO_NUMBER_KINDS:
         return "缺图号"
-    if any((tb[k].get("confidence") or 0) < 0.6 for k in ("drawing_no", "drawing_title", "revision") if tb[k]["value"]):
+    if any((tb[k].get("confidence") or 0) < LOW_SCORE for k in ("drawing_no", "drawing_title", "revision") if tb[k]["value"]):
         return "图签把握低"
     return None
 

@@ -348,7 +348,7 @@ const NH = 28;            // 图谱里图号方块的高度
 const EDGE_ALL_MAX = 150; // 图纸不超过这么多时画出全部连线；更多时只画选中、指向的那张图的连线
 const STATUS = { current: '现行', new: '本批新增', updated: '本批升版', changed: '有变更单', conflict: '冲突',
   pending_void: '作废还是漏发', voided: '已作废', missing: '缺失', guess: '按文件名暂定' };
-const CONFW = { high: '高', mid: '中', low: '低' };
+const CONFW = { confirmed: '已确认', high: '高', mid: '中', low: '低' };
 const NAMELESS = '文件：';  // 文件名里看不出图号的文件，先用文件名代替图号
 const CONF = { confirmed: '人工确认', high: '高置信', mid: '中置信', low: '低置信', conflict: '冲突' };
 const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '机电', '总图', '景观', '幕墙', '室内', '其他'];
@@ -796,7 +796,7 @@ function showTip(s, r) {  // r：图纸在屏幕上的位置（getBoundingClient
     el('div', {}, (s.title || '（图名未知）') + (s.current_rev ? `，${s.current_rev} 版` : '')),
     el('div', { class: 'file' }, src ? `源文件：${src.split(' / ').pop()}` : (s.notes || []).join('；') || '没有收到'),
     ...(s.status === 'guess' ? [el('div', { class: 'file' }, `${s.seen ? '看图没读出图号' : '还没看图识别'}，按文件名暂定，把握${CONFW[s.conf] || '低'}`),
-      guessContent(s) ? el('div', { class: 'file' }, `可能的内容：${guessContent(s).value}`) : null].filter(Boolean) : []),
+      (s.fields || {}).content ? el('div', { class: 'file' }, `可能的内容：${s.fields.content.value}`) : null].filter(Boolean) : []),
     ...((s.versions || []).length > 1 ? [el('ul', { class: 'vers' }, s.versions.map(v =>
       el('li', { class: v.state === '现行' ? 'cur' : '' }, `${v.rev || '?'} 版　${v.date || '日期不详'}　批次#${v.batch}　${v.state}`)))] : []),
     ...((s.paths || []).length > 1 ? [el('div', { class: 'file' }, `另有 ${s.paths.length - 1} 处出处`)] : []));
@@ -1532,9 +1532,7 @@ function renderSheet(no) {
     el('button', { class: 'linkbtn', type: 'button', onclick: () => goTarget(i.target) },
       el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : 'c-low'}` }), el('span', {}, `${i.kind}：${i.title}`)))))));
   if (s.status !== 'missing' && s.status !== 'guess') {
-    parts.push(el('dl', { class: 'kv' }, el('dt', {}, '专业'), el('dd', {}, s.discipline + (s.cls && s.cls.discipline ? '（智能分类）' : '')),
-      s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group)] : null,
-      el('dt', {}, '现行版次'), el('dd', {}, s.current_rev || '—'),
+    parts.push(el('dl', { class: 'kv' }, ...fieldRows(s),
       el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n'))));
     if (s.current_page) parts.push(el('a', { class: 'btn', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, '打开现行版原图'));
     if (s.borrowed) parts.push(el('p', { class: 'meta' }, '这一页与已识别过的页面像素完全相同，直接复用了识别结果。'));
@@ -1588,22 +1586,23 @@ function renderSheet(no) {
   ui.statePanel = panel.firstChild;
 }
 
-function guessContent(s) {  // 可能的内容：智能分类给的优先，没有就按图名推测
-  if (s.cls && s.cls.content) return { value: s.cls.content, conf: 'low', src: 'AI 看名字推测' };
-  return (s.guess || {}).content || null;
+const confPill = c => el('span', { class: `pill conf-${c}` }, c === 'confirmed' ? '人工确认' : `把握${CONFW[c] || '低'}`);
+function fieldRows(s) {  // 图纸的每一项：值、把握、来源，原文和值不同时也写上（docs/图纸字段.md 第 3 节）
+  const f = s.fields || {}, guess = s.status === 'guess';
+  const row = (label, item, fallback) => item && (item.value || fallback)
+    ? [el('dt', {}, label), el('dd', {}, String(item.value || fallback), confPill(item.conf),
+      el('small', { class: 'meta' }, ` ${item.src}${item.raw ? `，原文“${item.raw}”` : ''}`))] : null;
+  return [row('图号', f.no, '看不出'), row('图名', f.title),
+    f.rev ? row(guess ? '版次' : '现行版次', f.rev) : guess ? null : [el('dt', {}, '现行版次'), el('dd', {}, '—')],
+    row('出图日期', f.date), row('状态码', f.issue_status), row('专业', f.discipline),
+    s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group, confPill('low'), el('small', { class: 'meta' }, ' AI 推测（智能分类）'))] : null,
+    row('楼层', f.floors), row(guess ? '可能的内容' : '内容', f.content)];
 }
 function guessCard(s) {  // 按文件名暂定的图：每项推测带把握，按需看图识别
-  const g = s.guess || {};
-  const conf = c => el('span', { class: `pill conf-${c}` }, `把握${CONFW[c] || '低'}`);
-  const row = (label, item, fallback) => item && (item.value || fallback)
-    ? [el('dt', {}, label), el('dd', {}, String(item.value || fallback), conf(item.conf), item.src ? el('small', { class: 'meta' }, ` ${item.src}`) : null)] : null;
   const out = [el('div', { class: 'note' },
     s.seen ? '看图识别过这张，但没读出图号。下面是按文件名、文件夹推测的，' : '这张还没看图识别。下面是按文件名、文件夹和 PDF 自带的文字推测的，',
     '把握低的也先列出来供参考；看图识别后以图签为准，判断缺图、版本不用这些推测。'),
-    el('dl', { class: 'kv' }, row('图号', g.no, '看不出'), row('图名', g.title), row('版次', g.rev),
-      g.status ? [el('dt', {}, '状态码'), el('dd', {}, g.status)] : null,
-      row('专业', g.discipline), s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group, conf('low'), el('small', { class: 'meta' }, ' 智能分类'))] : null,
-      row('楼层', g.floors), row('可能的内容', guessContent(s)),
+    el('dl', { class: 'kv' }, ...fieldRows(s),
       el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n')),
       (s.cad || []).length ? [el('dt', {}, 'CAD 文件'), el('dd', { class: 'mono' }, s.cad.join('\n'))] : null)];
   const btns = [];
