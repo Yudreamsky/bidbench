@@ -121,8 +121,8 @@ def test_codex_classifies_sheets_and_facts(mixed):
 
     st = state.build(mixed)
     by = {s["no"]: s for s in st["sheets"]}
-    assert by["CGK9-ARC-ZZ-00-DR-A-1001"]["discipline"] == "建筑"
-    assert by["CGK9-ARC-ZZ-00-DR-A-1001"]["cls"] == {"group": "平面图", "short": "Grou简", "discipline": True}
+    assert by["CGK9-ARC-ZZ-00-DR-A-1001"]["discipline"] == "建筑"  # ISO 编号里的角色代码 A，按规则就认得出
+    assert by["CGK9-ARC-ZZ-00-DR-A-1001"]["cls"] == {"group": "平面图", "short": "Grou简", "discipline": False}
     assert by["CGK9-STR-ZZ-00-DR-S-2001"]["discipline"] == "结构"
     assert by["建施-01"]["discipline"] == "建筑" and by["建施-01"]["cls"] == {"group": "说明", "short": None, "discipline": False}
     facts = _facts(st)
@@ -135,6 +135,14 @@ def test_codex_classifies_sheets_and_facts(mixed):
     n = len(fake.calls)  # 再点一次：都分过了，不再问
     assert ops.classify(mixed, "codex", runner=runner, log=lines.append)["sheets"] == 0 and len(fake.calls) == n
     assert ops.classify(mixed, "codex", runner=runner, redo=True, log=lines.append)["sheets"] == 6
+
+
+def test_ai_discipline_only_when_rules_cannot_tell():
+    lab = {"discipline": "暖通", "group": "平面图", "short": None}
+    assert classify.sheet_discipline(lab, "其他") == "暖通"
+    assert classify.sheet_view(lab, "其他") == {"group": "平面图", "short": None, "discipline": True}
+    assert classify.sheet_discipline(lab, "建筑") == "建筑"  # 按图号认得出的不听 AI 的
+    assert classify.sheet_view({"discipline": "园林"}, "其他") is None
 
 
 def test_pending_only_new_or_renamed():

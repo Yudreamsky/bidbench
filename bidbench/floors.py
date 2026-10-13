@@ -1,6 +1,9 @@
 """楼层识别与覆盖检查用的工具：从图名、说明里读出覆盖了哪些楼层。
 
 楼层表示：地上用正整数（1 = 1F），地下用负整数（-1 = B1），屋顶用 ROOF。
+
+英文图名（Ground Floor、Level 05、Basement 01、Roof）也认。英式写法 Level 00 是首层（1F），Level 01 是 2F；
+项目里没有 Ground、Level 00 时按 Level 01 是首层算（base=0），由调用方判断后传入。
 """
 
 from __future__ import annotations
@@ -42,11 +45,57 @@ SINGLE_F = re.compile(r"(?<![\d.\-~A-Za-z])(\d{1,3})F(?![A-Za-z])")
 SINGLE_CN = re.compile(rf"(?<!地下)(?<!负)(?<![\d~\-])({NUM})层(?!高)")
 
 
-def parse_floors(text: str) -> set[int]:
-    """从一段文字（图名或说明）里读出楼层集合。读不出返回空集合。"""
-    t = _norm(text)
+_ORD = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
+        "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12}
+EN_GROUND = re.compile(r"\b(?:ground\s*(?:floor|level|flr)?|G/F|GF|UGF|(?:level|lvl|L)\s*0{1,2})(?![\w/])", re.I)
+EN_RANGE = re.compile(r"\b(?:levels?|lvls?|floors?|L)\s*0*(\d{1,3})\s*(?:-|–|~|to)\s*(?:levels?\s*|L)?0*(\d{1,3})\b", re.I)
+EN_BASEMENT = re.compile(r"\b(?:basement|level\s*B|LB|B)\s*0*(\d{1,2})\b", re.I)
+EN_LEVEL = re.compile(r"\b(?:level|lvl|L)\s*0*(\d{1,3})\b", re.I)
+EN_ORDINAL = re.compile(r"\b(?:(\d{1,2})(?:st|nd|rd|th)|(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth))"
+                        r"\s*(?:floor|level|flr|storey)\b", re.I)
+EN_ROOF = re.compile(r"\broof\b|(?<![A-Za-z])RF(?![A-Za-z])", re.I)
+
+
+def is_ground_zero(text: str) -> bool:
+    """英文图名、楼层代码里有 Ground Floor、Level 00、GF：按英式写法，Level 01 是 2F。"""
+    return bool(EN_GROUND.search(text or ""))
+
+
+def parse_floors_en(text: str, base: int = 1) -> set[int]:
+    """英文图名里的楼层。base=1：Level 00 / Ground 是 1F、Level 01 是 2F；base=0：Level 01 是 1F。"""
     out: set[int] = set()
-    if re.search(r"屋顶|屋面|RF|机房层", t) and not re.search(r"屋面标高|屋面排水|屋面做法", t):
+    t = text or ""
+    if EN_ROOF.search(t):
+        out.add(ROOF)
+    if EN_GROUND.search(t):
+        out.add(1)
+    t = EN_GROUND.sub(" ", t)
+    for m in EN_RANGE.finditer(t):
+        a, b = int(m.group(1)), int(m.group(2))
+        if a < b <= 200:
+            out |= set(range(a + base, b + base + 1))
+    t = EN_RANGE.sub(" ", t)
+    for m in EN_BASEMENT.finditer(t):
+        if int(m.group(1)):
+            out.add(-int(m.group(1)))
+    if re.search(r"\bbasement\b", t, re.I) and not EN_BASEMENT.search(t):
+        out.add(-1)
+    t = EN_BASEMENT.sub(" ", t)
+    for m in EN_LEVEL.finditer(t):
+        n = int(m.group(1)) + base
+        if 0 < n <= 200:
+            out.add(n)
+    for m in EN_ORDINAL.finditer(t):
+        n = int(m.group(1)) if m.group(1) else _ORD[m.group(2).lower()]
+        out.add(n + base)
+    return {f for f in out if f != 0}
+
+
+def parse_floors(text: str, base: int = 1) -> set[int]:
+    """从一段文字（图名或说明）里读出楼层集合。读不出返回空集合。base 只管英文写法，见 parse_floors_en。"""
+    out: set[int] = parse_floors_en(text, base) if re.search(r"[A-Za-z]{2}", text or "") else set()
+    t = _norm(text)
+    if re.search(r"屋顶|屋面|机房层", t) and not re.search(r"屋面标高|屋面排水|屋面做法", t):
         out.add(ROOF)
     if re.search(r"首层|底层", t):
         out.add(1)

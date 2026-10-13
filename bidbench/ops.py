@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from collections.abc import Callable
 
-from . import antivirus, export, ingest, recognition, reports, risk, state
+from . import antivirus, appconfig, export, ingest, recognition, reports, risk, state
 from .store import Project
 
 Log = Callable[[str], None]
@@ -346,6 +346,20 @@ class ClassifyAlong:
             classify(self.proj, self.executor, self.model, log=self.log, progress=self.progress)
         except OpError as e:
             self.log(f"智能分类没有完成：{e}。稍后可以再点“智能分类”（命令行：bidbench classify）。")
+
+
+def classify_if_ready(proj: Project, log: Log = print) -> dict | None:
+    """收图后：用过 Codex、Claude 识别（设置里记着识别方式）而且现在能用，就按名字给新图纸智能分类（只发名字，几分钟）。"""
+    pref = appconfig.prefs().get("recognize") or {}
+    ex = pref.get("executor")
+    if ex == "codex" and not codex_status()["ready"] or ex == "claude" and not has_claude_credentials() \
+            or ex not in ("codex", "claude"):
+        return None
+    try:
+        return classify(proj, ex, pref.get("model") if ex == "codex" else None, log=log)
+    except OpError as e:
+        log(f"智能分类没有完成：{e}。稍后可以再点“智能分类”（命令行：bidbench classify）。")
+        return None
 
 
 def codex_status(refresh: bool = False) -> dict:

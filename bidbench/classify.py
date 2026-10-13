@@ -27,6 +27,7 @@ FACT_BATCH = 150      # 一次问多少类事实
 WORKERS = 3           # 第一批先问，定下小类的叫法；其余几批同时问
 LABEL_MAX = 12        # 小类名称最多几个字（提示里要 2~6 个字，这里只防过长）
 SHORT_MAX = 10        # 图纸简称最多几个字
+CONTENT_MAX = 40      # 推测内容最多几个字
 KNOWN_MAX = 200       # 提示里附上的已有小类最多几条
 EFFORT = "medium"
 CLAUDE_MODEL = "claude-sonnet-5-5"
@@ -35,7 +36,8 @@ SYSTEM = "你是建筑工程投标图纸的整理员，帮投标人把图纸和�
 SHEET_RULES = """下面每行是一张图：编号|图号|图名|所在文件夹。请为每张图给出：
 - discipline：专业，只能从这些里选：{disc}。依据图号里的专业代码（例如 ISO 19650 编号里的角色代码 A 建筑、S 结构、M 暖通、E 电气、P 给排水，或 ARC、STR、MEP 这类代码）、图名和所在文件夹判断；说不准的填 其他。
 - group：这张图在本专业里的小类，2~6 个汉字，把明显同类的图归在一起，例如 目录说明、平面图、立面图、剖面图、楼梯详图、墙身大样、门窗表、梁配筋、板配筋、系统图。各楼层的平面图归进同一个小类，不要按楼层拆开；一个专业的小类一般 3~10 个，不要一张图一个小类。
-- short：图名的中文简称，不超过 8 个字，要能和同专业的其他图区分开，例如 Level 02 GA Plan → 2层平面，Stair 1 Details → 1号楼梯详图，North Elevation → 北立面。图名本来就是不超过 8 个字的中文时填 null。"""
+- short：图名的中文简称，不超过 8 个字，要能和同专业的其他图区分开，例如 Level 02 GA Plan → 2层平面，Stair 1 Details → 1号楼梯详图，North Elevation → 北立面。图名本来就是不超过 8 个字的中文时填 null。
+- content：看名字推测这张图大概画了什么、能查到哪些信息，不超过 24 个字，例如 2层建筑平面：房间、门窗、轴网尺寸；推测不出填 null。很多图还没看图识别，把握低的推测也有用。"""
 FACT_RULES = """下面每行是一类事实：编号|名称（同一类的几个例子，用；隔开）|示例数值|条数。名称前标〔规范〕的是图上引用的规范标准。请为每一类给出：
 - top：大类，只能从这些里选：{tops}。规范标准一律放 执行规范，其他事实不要放 执行规范。
 - sub：大类下面的小类，从粗到细 0~2 级，每级 2~6 个汉字，例如 楼层 → ["层高"]、["标高"]；结构构件 → ["梁", "截面"]、["墙", "墙厚"]；建筑 → ["门窗", "樘数"]；执行规范 → ["国家标准"]、["图集"]。同类的事实放进同一个小类，叫法前后一致；一般给 1 级，同一小类里的事实很多时再给第 2 级；实在不好归类的填空数组。"""
@@ -44,9 +46,10 @@ TAIL = "每一行都要给出，i 填行首的编号。这是一次整理任务�
 SCHEMAS = {
     "sheet": {"type": "object", "additionalProperties": False, "required": ["sheets"], "properties": {"sheets": {
         "type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["i", "discipline", "group", "short"],
+            "type": "object", "additionalProperties": False, "required": ["i", "discipline", "group", "short", "content"],
             "properties": {"i": {"type": "integer"}, "discipline": {"type": "string", "enum": DISCIPLINES},
-                           "group": {"type": "string"}, "short": {"type": ["string", "null"]}}}}}},
+                           "group": {"type": "string"}, "short": {"type": ["string", "null"]},
+                           "content": {"type": ["string", "null"]}}}}}},
     "fact": {"type": "object", "additionalProperties": False, "required": ["facts"], "properties": {"facts": {
         "type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["i", "top", "sub"],
@@ -107,15 +110,19 @@ def sheet_discipline(lab, rule: str) -> str:
 
 
 def sheet_view(lab, rule: str) -> dict | None:
-    """图谱、图纸卡片用：AI 给的小类和简称，专业是不是 AI 定的。"""
+    """图谱、图纸卡片用：AI 给的小类、简称、看名字推测的内容，专业是不是 AI 定的。"""
     if not isinstance(lab, dict):
         return None
     group = lab.get("group") if isinstance(lab.get("group"), str) and lab.get("group") else None
     short = lab.get("short") if isinstance(lab.get("short"), str) and lab.get("short") else None
+    content = lab.get("content") if isinstance(lab.get("content"), str) and lab.get("content") else None
     ai_disc = sheet_discipline(lab, rule) != rule
-    if not (group or short or ai_disc):
+    if not (group or short or ai_disc or content):
         return None
-    return {"group": group, "short": short, "discipline": ai_disc}
+    out = {"group": group, "short": short, "discipline": ai_disc}
+    if content:
+        out["content"] = content
+    return out
 
 
 def fact_place(lab, std: bool) -> tuple[str, list[str]] | None:
@@ -242,6 +249,9 @@ def clean(kind: str, body, items: list[dict]) -> dict[int, dict]:
             if group:
                 out[i] = {"discipline": x.get("discipline") if x.get("discipline") in DISCIPLINES else "其他",
                           "group": group, "short": _label(x.get("short"), SHORT_MAX), "title": it["title"]}
+                content = _label(x.get("content"), CONTENT_MAX)
+                if content:
+                    out[i]["content"] = content
             continue
         top = STANDARD_TOP if it["std"] else x.get("top")
         if top not in FACT_TOPS or (top == STANDARD_TOP and not it["std"]):

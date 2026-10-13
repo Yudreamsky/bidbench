@@ -11,7 +11,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
-from . import classify, floors, pdfpages, risk
+from . import classify, floors, names, pdfpages, risk
 from .ingest import FOLDER_MARK
 from .recognition import weak_reason
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
@@ -29,7 +29,9 @@ SHEET_SCOPED = re.compile(r"^(?:本层|本图|本页|该层|此层|本张)|适�
 STATUS_LABEL = {
     "current": "现行", "new": "本批新增", "updated": "本批升版", "changed": "有变更单",
     "conflict": "冲突", "pending_void": "作废还是漏发待确认", "voided": "已作废", "missing": "缺失",
+    "guess": "按文件名暂定",
 }
+NAMELESS = "文件："  # 文件名里看不出图号的文件，先用文件名代替图号
 CONF_LABEL = {"confirmed": "人工确认", "high": "高置信", "mid": "中置信", "low": "低置信", "conflict": "冲突"}
 
 DISCIPLINES = [("建", "建筑"), ("结", "结构"), ("水", "给排水"), ("暖", "暖通"), ("电", "电气"),
@@ -48,6 +50,8 @@ def norm_no(s: str | None) -> str | None:
     if not s:
         return None
     s = re.sub(r"\s+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
+    if names.iso_parts(s):  # ISO 19650 编号各段照原样，编号的前导零也留着（CGK9-STR-ZZ-00-DR-S-0001）
+        return s
     m = re.match(r"^(.*?)-?(\d+)([A-Z]?)$", s)
     if not m or not m.group(1):
         return s
@@ -60,17 +64,26 @@ def no_parts(no: str) -> tuple[str, int | None]:
 
 
 def discipline_of(no: str) -> str:
+    role = names.role_discipline(no)  # ISO 19650 编号里的角色代码：A 建筑、S 结构、M 暖通、E 电气、P 给排水……
+    if role:
+        return role
     for prefix, name in DISCIPLINES:
         if no.startswith(prefix):
             return name
     return "其他"
 
 
+ISO_REV = {"P": 1, "T": 2, "C": 3}  # ISO 19650 版次：P（初步）在前，T（招标）其次，C（合同、施工）在后
+
+
 def rev_key(rev: str | None) -> tuple | None:
-    """版次排序键：A<B<C，0<1<2；无法比较返回 None。"""
+    """版次排序键：A<B<C，0<1<2；ISO 写法 P01<P02<C01，P01.1 在 P01 和 P02 之间；无法比较返回 None。"""
     if not rev:
         return None
     r = re.sub(r"[版第次\s]", "", rev).upper()
+    m = re.fullmatch(r"([PTC])(\d{1,3})(?:\.(\d{1,2}))?", r)
+    if m and (len(m.group(2)) >= 2 or m.group(3)):
+        return (1000 + ISO_REV[m.group(1)], int(m.group(2)) + int(m.group(3) or 0) / 100)
     m = re.match(r"^([A-Z]*)(\d*)$", r)
     if not m or not r:
         return None
@@ -232,6 +245,10 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
         file_counts = {r["batch_seq"]: dict(r) for r in con.execute(
             "SELECT o.batch_seq, COUNT(*) AS n, SUM(f.kind='pdf') AS pdf, SUM(o.depth>1) AS nested"
             " FROM occurrences o JOIN files f ON f.sha256=o.sha256 WHERE f.kind!='archive' GROUP BY o.batch_seq")}
+        cad: dict[str, list] = defaultdict(list)  # CAD 文件不能看图识别，只按名字暂定
+        for r in con.execute("SELECT o.sha256, o.path FROM occurrences o JOIN files f ON f.sha256 = o.sha256"
+                             " WHERE f.kind = 'cad' AND o.batch_seq <= ? ORDER BY o.batch_seq, o.id", (as_of,)):
+            cad[r["sha256"]].append(r["path"])
         risk_rows = [dict(r) for r in con.execute("SELECT * FROM risk_findings WHERE batch_seq<=? ORDER BY id", (as_of,))]
         risk_rows += risk.blocked_rows(ext_issues)  # 收图时被杀毒软件拦下的文件，也按高风险文件处理
         scans = [dict(r) for r in con.execute("SELECT * FROM av_scans WHERE batch_seq<=? ORDER BY id", (as_of,))]
@@ -240,7 +257,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
                              " (SELECT sha256 FROM risk_findings) ORDER BY o.batch_seq, o.id", (as_of,)):
             risk_paths[r["sha256"]].append(r["path"])
 
-    state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels)
+    state = _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels, dict(cad))
     state["classification"] = classify.summary(labels, state)
     state["security"] = _security(risk_rows, scans, risk_paths, decisions, state["issues"])
     state["issues"].sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
@@ -253,15 +270,23 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
     return state
 
 
-def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels=None):
+def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_counts, as_of, labels=None, cad=None):
     labels = labels or {"sheet": {}, "fact": {}, "last": None}
 
-    def disc(no: str) -> str:  # 按图号认不出专业的，用智能分类给的
-        return classify.sheet_discipline(labels["sheet"].get(no), discipline_of(no))
+    def disc(no: str, paths=()) -> str:  # 按图号认不出专业的，用智能分类给的；再认不出看所在的文件夹
+        d = classify.sheet_discipline(labels["sheet"].get(no), discipline_of(no))
+        if d == "其他":
+            for x in paths:
+                for f in reversed(names.split_path(x)[0]):
+                    w = names.words_discipline(f)
+                    if w:
+                        return w
+        return d
 
     sheets: dict[str, Sheet] = {}
     notices = []  # 变更单、答疑等非图纸文件
     unrecognized = []
+    unnumbered = []  # 看图识别了、但没读出图号的页面：也按文件名暂定
     for p in pages:
         if p.rec is None:
             unrecognized.append(p)
@@ -272,6 +297,7 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
             notices.append(p)
             continue
         if not no:
+            unnumbered.append(p)
             continue
         s = sheets.setdefault(no, Sheet(no=no, discipline=disc(no)))
         s.pages.append((_val(p.rec, "revision"), p))
@@ -318,6 +344,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         current_page[no] = cp
         title = _val(cp.rec, "drawing_title")
         s.title = title
+        if s.discipline == "其他":
+            s.discipline = disc(no, cp.paths)
         if conflict_groups:
             status = "conflict"
             batches_desc = "、".join(f"批次#{g[0].first_batch}" for g in cur["groups"])
@@ -434,9 +462,28 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
 
     live = {no for no, s in sheet_out.items() if s["status"] != "voided"}
 
+    # ---- 一级识别：还没看图识别的页面、CAD 文件，按文件名暂定成图纸 ----
+    prov, nameless = _first_guess(unrecognized + unnumbered, cad or {}, sheet_out, labels, disc)
+
     # ---- 每张图管哪几层（图纸卡片上的同层图纸、楼层覆盖都用） ----
+    base = _floor_base(list(sheet_out.values()) + list(prov.values()))
     for no, s in sheet_out.items():
-        _set_floors(s, *_sheet_floors(s["title"], current_page[no]))
+        _set_floors(s, *_sheet_floors(s["title"], current_page[no], base))
+    for no, s in prov.items():
+        fl = floors.parse_floors(s["title"] or "", base)
+        how = ("图名（按文件名）" + ("，英式：Level 00 是 1F" if base and re.search(r"\blevel\b", s["title"] or "", re.I) else "")) if fl else ""
+        if not fl:
+            fl = _level_floors((names.iso_parts(no) or {}).get("level"), base)
+            how = "图号里的楼层代码" if fl else ""
+        _set_floors(s, fl, how)
+        s["guess"]["floors"] = {"value": s["floors_text"], "conf": names.LOW if how.startswith("图名") else names.MID,
+                                "src": how} if fl else None
+        kind, things = names.kind_of(s["title"], s["discipline"])
+        if kind:
+            what = f"{s['floors_text'] + ' ' if s['floors_text'] and len(s['floors']) <= 3 else ''}{s['discipline'] if s['discipline'] != '其他' else ''}{kind}"
+            before = s["guess"].get("content")  # 合订本的说明留着，接在前面
+            s["guess"]["content"] = {"value": (before["value"] + "；" if before else "") + f"{what}：可能有{things}",
+                                     "conf": names.LOW, "src": "看名字推测"}
 
     # ---- 关系 ----
     edges, dangling = [], defaultdict(list)
@@ -504,7 +551,9 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         d = decisions.get(("missing", t))
         if d and d["value"] == "not_needed":
             continue
-        hit = _in_pending(t, pending_names)
+        if t in prov and not prov[t]["pages"]:
+            continue  # 只有 CAD 文件：图是有的，只是不能看图识别
+        hit = _in_pending(t, pending_names) or (prov[t]["paths"][0].split(" / ")[-1] if t in prov else None)
         if hit:
             pending.append((t, hit))
             continue
@@ -542,9 +591,18 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
 
     # ---- 未识别页面 ----
     if unrecognized:
-        issues.append(_issue("info", "待识别", "unrecognized", f"{len(unrecognized)} 页尚未识别",
-                             "点上方的「识别」，范围选“新页面”接着识别（命令行：bidbench recognize）。"
-                             "没识别的页面里的图，暂时不会出现在图谱和缺图检查里。", {}, []))
+        named = sum(1 for e in prov.values() if not e["no"].startswith(NAMELESS))
+        issues.append(_issue("info", "待识别", "unrecognized", f"{len(unrecognized)} 页还没看图识别",
+                             f"已按文件名暂定成 {named} 张图" + (f"，另有 {nameless} 个文件看不出图号、先用文件名代替" if nameless else "")
+                             + "（图谱里的虚线框）。这些信息把握不高，不拿来判断缺图和版本；"
+                             "在图谱里点一张图或一个框可以按需看图识别，也可以点上方的「识别」按优先级识别。", {}, []))
+    newer = [(no, f) for no, s in sheet_out.items() for f in s.get("pending_files", []) if f.get("newer")]
+    if newer:
+        eg = "；".join(f"{no} 文件名 {f['rev']} 版（{f['path'].split(' / ')[-1]}）" for no, f in newer[:5])
+        issues.append(_issue("info", "待识别", "newer_files", f"{len(newer)} 个文件的文件名版次比现行版新，还没看图识别",
+                             f"{eg}{'……' if len(newer) > 5 else ''}。看图识别后再确认现行版，在这之前别拿旧版建模。", {}, [],
+                             sheets=[no for no, _f in newer]))
+    _name_checks(sheet_out, current_page, decisions, issues, live)
     reasons: dict[str, int] = defaultdict(int)  # 只数缺图号、字迹不清这类；“没写单位”之类的备注显示在图纸卡片上
     for p in pages:
         r = p.rec and weak_reason(p.rec)
@@ -553,7 +611,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     if reasons:
         issues.append(_issue("info", "识别不完整", "weak_rec", f"{sum(reasons.values())} 页识别不完整",
                              "其中" + "、".join(f"{r} {n} 页" for r, n in sorted(reasons.items(), key=lambda x: -x[1]))
-                             + "。扫描件或图签不全的页面，识别时选“识别不完整的页面”交给多模态执行器复核。", {}, []))
+                             + "。扫描件或图签不全的页面，识别时选“识别不完整的页面”交给多模态执行器复核。"
+                             + ("没读出图号的页先按文件名暂定（图谱里的虚线框）。" if unnumbered else ""), {}, []))
 
     # ---- 事实层 ----
     facts = _facts(sheets, sheet_out, current_page, notice_out, decisions, issues, live, labels["fact"])
@@ -586,9 +645,11 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                "inner": False, "notes": m["evidence"], "missing_level": m["level"],
                "confirmed": bool(m.get("confirmed")), "borrowed": False, "own_values": [], "rec_notes": [],
                "cls": classify.sheet_view(labels["sheet"].get(t), discipline_of(t))}
-        fl = floors.parse_floors(m["title"] or "")
+        fl = floors.parse_floors(m["title"] or "", base)
         _set_floors(out, fl, "图名" if fl else "")
         sheets_list.append(out)
+    sheets_list += prov.values()
+    _guess_facts(facts, sheets_list, decisions)
     sheets_list.sort(key=lambda s: (_disc_order(s["discipline"]), no_parts(s["no"])[0], no_parts(s["no"])[1] or 0, s["no"]))
     issues.sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
     executors = defaultdict(int)
@@ -599,6 +660,9 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         "project": proj.meta, "generated_at": now_iso(), "as_of": as_of,
         "batches": batch_out, "sheets": sheets_list, "edges": edges, "notices": notice_out,
         "issues": issues, "facts": facts, "baselines": baselines, "floor_coverage": floor_coverage,
+        "guess": {"sheets": sum(1 for e in prov.values() if not e["no"].startswith(NAMELESS)), "nameless": nameless,
+                  "pages": sum(len(e["pages"]) for e in prov.values()),
+                  "low": sum(1 for e in prov.values() if e["conf"] == names.LOW)},
         "recognition": {"pages": len(pages), "recognized": sum(1 for p in pages if p.rec),
                         "borrowed": sum(1 for p in pages if p.rec_borrowed), "executors": dict(executors)},
     }
@@ -693,9 +757,32 @@ def _fact_int(facts: dict, key: str) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _sheet_floors(title: str, page) -> tuple[set[int], str]:
+def _floor_base(sheets: list) -> int:
+    """英文图名的楼层怎么数：项目里有 Ground Floor、Level 00（或图号里的楼层代码 00）就按英式，Level 01 是 2F。"""
+    for x in sheets:
+        if floors.is_ground_zero(x["title"] or "") or (names.iso_parts(x["no"]) or {}).get("level") in ("00", "GF"):
+            return 1
+    return 0
+
+
+def _level_floors(code: str | None, base: int) -> set[int]:
+    """ISO 19650 图号里的楼层代码：00 首层，01、02……地上，B1 地下，RF 屋顶；ZZ（多层）、XX（不分层）没有楼层。"""
+    c = (code or "").upper()
+    if c in ("00", "GF"):
+        return {1}
+    if re.fullmatch(r"\d{2}", c):
+        return {int(c) + base} if int(c) + base > 0 else set()
+    m = re.fullmatch(r"B(\d{1,2})", c)
+    if m and int(m.group(1)):
+        return {-int(m.group(1))}
+    if c in ("RF", "RL", "R1", "RF1"):
+        return {floors.ROOF}
+    return set()
+
+
+def _sheet_floors(title: str, page, base: int = 1) -> tuple[set[int], str]:
     """一张图覆盖的楼层：先看图名；图名没有（如“标准层平面图”）再看“适用楼层”类说明和关键数值。"""
-    got = floors.parse_floors(title or "")
+    got = floors.parse_floors(title or "", base)
     if got:
         return got, "图名"
     rec = page.rec
@@ -713,6 +800,193 @@ def _sheet_floors(title: str, page) -> tuple[set[int], str]:
         if "层高" in kv["name"]:
             got |= floors.parse_floors(kv["name"].replace("层高", ""))
     return got, ("关键数值" if got else "")
+
+
+def _first_guess(unrecognized, cad: dict, sheet_out: dict, labels: dict, disc) -> tuple[dict, int]:
+    """一级识别：还没看图识别的页面、CAD 文件，只看文件名、文件夹和 PDF 自带的文字，暂定成图纸。
+
+    已看图识别的图号：记在那张图上（pending_files），文件名版次更新的提醒；其余的出一张“按文件名暂定”的图。
+    看不出图号的文件也出一张，用“文件：文件名”代替图号——把握低的信息也比没有好。返回 (暂定图纸, 看不出图号的文件数)。"""
+    items: dict[str, list] = defaultdict(list)  # 图号 → [(推测, [页面], CAD 路径)]
+    by_file: dict[str, list] = defaultdict(list)
+    for p in unrecognized:
+        by_file[p.file_sha].append(p)
+    for plist in by_file.values():
+        if not any("（第 " in x for x in plist[0].paths):  # 单页文件：文件名说的就是这张图
+            p = plist[0]
+            g = _page_guess(p)
+            items[norm_no(g["no"]["value"]) if g else _nameless_key(p.paths)].append((g, plist, None))
+            continue
+        left, found = [], set()  # 多页文件（合订本）：每页先在自己的文字里找图号
+        for p in plist:
+            g = _page_guess(p)
+            if g:
+                found.add(norm_no(g["no"]["value"]))
+                items[norm_no(g["no"]["value"])].append((g, [p], None))
+            else:
+                left.append(p)
+        if not left:
+            continue
+        stem = names.split_path(left[0].paths[0])[1]
+        rest = [n for n in (norm_no(x) for x in names.listed_numbers(stem)) if n not in found]
+        for n in rest:  # 文件名里列了图号：每个图号一张，指向这本里还没认出的几页（把握低）
+            items[n].append(({"no": {"value": n, "conf": names.LOW, "src": "合订本文件名"}, "title": None, "rev": None,
+                              "status": None, "discipline": None, "level": None, "conf": names.LOW, "binder": stem}, left, None))
+        if not rest:
+            items[_nameless_key(left[0].paths)].append((None, left, None))
+    for paths in cad.values():
+        g = names.guess(paths, "")
+        key = norm_no(g["no"]["value"]) if g else _nameless_key(paths)
+        if g or key in items:  # 看不出图号的 CAD 只并到同名的 PDF 上，不单独出图（外部参照之类）
+            items[key].append((g, [], paths))
+    prov: dict[str, dict] = {}
+    nameless = 0
+    for key, group in items.items():
+        if key in sheet_out:  # 已看图识别的图：同图号还没识别的文件记在它上面
+            s = sheet_out[key]
+            for g, plist, cpaths in group:
+                rev = (g or {}).get("rev") and g["rev"]["value"]
+                cur = s["current_rev"]
+                newer = bool(rev and cur and _rev_scheme(rev) == _rev_scheme(cur) and (rev_key(rev) or (0, 0)) > (rev_key(cur) or (0, 0)))
+                for x in plist:
+                    s.setdefault("pending_files", []).append({"page_id": x.page_id, "path": x.paths[0], "rev": rev, "newer": newer})
+                if cpaths:
+                    s.setdefault("cad", []).extend(cpaths)
+                if newer:
+                    s["notes"].append(f"文件名显示有更新的 {rev} 版（{(plist[0].paths[0] if plist else cpaths[0]).split(' / ')[-1]}），"
+                                      "还没看图识别；识别后再确认现行版。")
+            continue
+        prov[key] = _guess_sheet(key, group, labels, disc)
+        nameless += key.startswith(NAMELESS)
+    return prov, nameless
+
+
+def _page_guess(p) -> dict | None:
+    """一页的一级识别；看图识别读出了图名（只是没读出图号）就用读出的图名。"""
+    g = names.guess(p.paths, p.text)
+    title = _val(p.rec, "drawing_title") if p.rec else None
+    if g and title:
+        g["title"] = {"value": title, "conf": names.MID, "src": "看图识别读出的图名"}
+    return g
+
+
+def _nameless_key(paths: list) -> str:
+    return NAMELESS + names.split_path(paths[0])[1]
+
+
+def _guess_sheet(key: str, group: list, labels: dict, disc) -> dict:
+    """一张“按文件名暂定”的图：各项推测带来源和把握（高、中、低），图谱里画虚线框。"""
+    def rk(item):
+        g = item[0] or {}
+        return (bool(item[1]), rev_key(g["rev"]["value"]) if g.get("rev") else (0, 0) or (0, 0), -min((x.first_batch for x in item[1]), default=0))
+    best = max(group, key=rk)
+    g, plist, cpaths = best
+    g = g or {}
+    paths = plist[0].paths if plist else cpaths
+    stem = names.split_path(paths[0])[1]
+    pages = list(dict.fromkeys(x.page_id for _g, pl, _c in group for x in pl))
+    title = (g.get("title") or {}).get("value")
+    seen = [x for _g, pl, _c in group for x in pl if x.rec is not None]  # 看图识别过、只是没读出图号的页面
+    if key.startswith(NAMELESS):
+        title = next((_val(x.rec, "drawing_title") for x in seen if _val(x.rec, "drawing_title")), None) \
+            or names.parse_name(stem)["title"] or stem
+    guess = {k: g.get(k) for k in ("no", "title", "rev", "status")}
+    if key.startswith(NAMELESS):
+        guess["no"] = {"value": None, "conf": names.LOW, "src": "文件名里看不出图号"}
+        guess["title"] = {"value": title, "conf": names.LOW, "src": "文件名"}
+    d = disc(key, paths)
+    if d != "其他":
+        lab = labels["sheet"].get(key)
+        ai = classify.sheet_discipline(lab, discipline_of(key)) == d and discipline_of(key) == "其他"
+        guess["discipline"] = (g.get("discipline") if g.get("discipline") and g["discipline"]["value"] == d
+                               else {"value": d, "conf": names.MID, "src": "智能分类" if ai else "所在文件夹"})
+    else:
+        w = names.words_discipline(title or "")
+        d = w or "其他"
+        guess["discipline"] = {"value": d, "conf": names.LOW, "src": "图名里的词" if w else "认不出"}
+    if g.get("binder"):
+        guess["content"] = {"value": f"合订本“{g['binder']}”里的一张，具体在哪页要看图识别", "conf": names.LOW, "src": "合订本文件名"}
+    elif key.startswith(NAMELESS) and len(pages) > 1:
+        guess["content"] = {"value": f"{len(pages)} 页的合订本，看不出里面有哪些图", "conf": names.LOW, "src": "文件名"}
+    conf = g.get("conf") or names.LOW
+    versions = []
+    for gg, pl, cp in group:
+        for x in pl or [None]:
+            versions.append({"rev": (gg or {}).get("rev") and gg["rev"]["value"], "date": None,
+                             "batch": x.first_batch if x else None, "state": "按文件名暂定",
+                             "page_id": x.page_id if x else None, "paths": x.paths if x else cp})
+    return {
+        "no": key, "title": title, "discipline": d, "status": "guess",
+        "current_rev": (g.get("rev") or {}).get("value"), "current_page": plist[0].page_id if plist else None,
+        "versions": versions, "paths": paths, "inner": all(_in_nested_archive(x) for x in paths),
+        "notes": [], "borrowed": False, "own_values": [], "rec_notes": [],
+        "cls": classify.sheet_view(labels["sheet"].get(key), discipline_of(key)),
+        "guess": guess, "conf": conf, "pages": pages, "seen": bool(seen),
+        "cad": [x for _g, _pl, cp in group if cp for x in cp],
+    }
+
+
+def _name_checks(sheet_out, current_page, decisions, issues, live) -> None:
+    """看图识别出的图号、版次和文件名对不上：可能是文件名写错，也可能是识别看错了，列出来让人核对。"""
+    for no, cp in sorted(current_page.items()):
+        if no not in live or cp.rec["page_kind"] == "图纸目录":
+            continue
+        g = names.guess(cp.paths, "")
+        if not g or not g["no"]["src"].startswith("文件名"):
+            continue
+        gno, diffs = norm_no(g["no"]["value"]), []
+        if gno != no and not (gno.endswith("-" + no) or no.endswith("-" + gno)):
+            diffs.append(f"图号：文件名写 {gno}，图签是 {no}")
+        grev, cur = (g.get("rev") or {}).get("value"), sheet_out[no]["current_rev"]
+        if grev and cur and _rev_scheme(grev) and _rev_scheme(grev) == _rev_scheme(cur) and rev_key(grev) != rev_key(cur):
+            diffs.append(f"版次：文件名写 {grev}，图签是 {cur}")
+        if not diffs:
+            continue
+        fname = cp.paths[0].split(" / ")[-1]
+        key = f"{no}|{fname}"
+        d = decisions.get(("name_check", key))
+        if d and d["value"] == "ignore":
+            continue
+        issue = _issue("warn", "文件名不符", f"name:{no}", f"{no} 文件名和图签对不上",
+                       f"{fname}：" + "；".join(diffs) + "。台账以图签为准；也可能是识别看错了，打开原图核对。",
+                       {"sheet": no},
+                       [{"label": "列入答疑", "kind": "name_check", "key": key, "value": "ask"},
+                        {"label": "知道了，以图签为准", "kind": "name_check", "key": key, "value": "ignore"}],
+                       confirmed=bool(d and d["value"] == "ask"))
+        issue["qa"] = f"文件 {fname} 的文件名与图签不一致（{'；'.join(diffs)}），请确认以哪个为准。"
+        issues.append(issue)
+
+
+def _guess_facts(facts: dict, sheets: list, decisions: dict | None = None) -> None:
+    """还没从图上读到层数时，按图名里出现的楼层推测地上、地下层数（低置信，不参与冲突和楼层覆盖检查）。"""
+    have = {f["key"] for g in facts["groups"] for f in g["facts"]}
+    fl = [(f, s["no"]) for s in sheets if s["status"] not in ("missing", "voided") for f in s.get("floors") or []]
+    above = [x for x in fl if 0 < x[0] < floors.ROOF]
+    below = [x for x in fl if x[0] < 0]
+    add = []
+    if "地上层数" not in have and above:
+        top = max(f for f, _ in above)
+        if top >= 2:
+            srcs = sorted({no for f, no in above if f == top})
+            add.append(("地上层数", f"{top}层", f"按图名推测：最高到 {floors.label(top)}（{'、'.join(srcs[:3])}）。图上的说明识别出来后以说明为准。", srcs))
+    if "地下层数" not in have and below:
+        low = min(f for f, _ in below)
+        srcs = sorted({no for f, no in below if f == low})
+        add.append(("地下层数", f"{-low}层", f"按图名推测：最低到 {floors.label(low)}（{'、'.join(srcs[:3])}）。图上的说明识别出来后以说明为准。", srcs))
+    if not add:
+        return
+    group = next((g for g in facts["groups"] if g["id"] == "工程概况"), None)
+    if group is None:
+        group = {"id": "工程概况", "label": "工程概况", "facts": []}
+        facts["groups"].insert(0, group)
+    for key, value, note, srcs in add:
+        conf, d = "low", (decisions or {}).get(("fact", key))
+        if d:  # 人工确认过推测的值
+            conf, value = "confirmed", d["value"]
+            note = f"人工确认（{d['created_at'][:10]}）" + (f"：{d['note']}" if d["note"] else "") + "。" + note
+        group["facts"].append({"key": key, "name": key, "value": value, "conf": conf, "note": note, "evidence": [],
+                               "sources": srcs[:5], "notices": [], "path": [], "std": False, "ai": False, "guess": True})
+    group["facts"].sort(key=lambda f: f["name"])
 
 
 def _set_floors(s: dict, fl: set[int], how: str) -> None:

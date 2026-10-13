@@ -33,8 +33,11 @@ def cmd_receive(args):
         if total >= 20:  # 文件多时显示进度
             print(f"\r  已处理 {n}/{total} 个文件", end="" if n < total else "\n", flush=True)
 
-    return ops.receive(_proj(args), [Path(a) for a in args.archive], args.date, args.name, args.password, args.note,
-                       av=not args.no_av, progress=progress)
+    proj = _proj(args)
+    r = ops.receive(proj, [Path(a) for a in args.archive], args.date, args.name, args.password, args.note,
+                    av=not args.no_av, progress=progress)
+    ops.classify_if_ready(proj)  # 用过 Codex、Claude 识别的：新图纸先按名字分一下类
+    return r
 
 
 def cmd_scan(args):
@@ -502,7 +505,8 @@ def main(argv=None):
     s.set_defaults(fn=cmd_build)
 
     s = sub.add_parser("decide", help="记录人工决定")
-    s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev"])
+    s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev",
+                                    "name_check"])
     s.add_argument("key")
     s.add_argument("value")
     s.add_argument("--note")
