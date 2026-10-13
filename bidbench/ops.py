@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from collections.abc import Callable
 
@@ -85,6 +86,88 @@ def recognize_simulated(proj: Project, task: Path | None = None, log: Log = prin
     return {"done": n, "imported": res.imported, "errors": len(res.errors)}
 
 
+LIVE_IMPORT_PAGES = 20    # 识别途中每识别这么多页导入一次
+LIVE_IMPORT_SECONDS = 60  # 或者隔这么久导入一次
+
+
+class LiveImport:
+    """识别途中分批把识别好的页导入项目：工作台跟着刷新，中途停下（额度用完、出错、关掉）也不丢已识别的页。
+
+    当作进度回调交给执行器：执行器在自己的主线程里逐页调用，导入也就在这个线程里做。"""
+
+    def __init__(self, proj: Project, task: Path, progress=None, on_import=None):
+        self.proj, self.results = proj, Path(task) / "results"
+        self.progress, self.on_import = progress, on_import
+        self.seen: set[str] = set()
+        self.errors: list[dict] = []
+        self.count = 0  # 已导入的页（内容没变的也算）
+        self.pending, self.t = 0, time.monotonic()
+
+    def __call__(self, n: int, total: int) -> None:
+        if self.progress:
+            self.progress(n, total)
+        self.pending += 1
+        if self.pending >= LIVE_IMPORT_PAGES or time.monotonic() - self.t >= LIVE_IMPORT_SECONDS:
+            self.flush()
+
+    def flush(self) -> None:
+        self.pending, self.t = 0, time.monotonic()
+        files = [f for f in recognition.result_files(self.results) if str(f) not in self.seen]
+        if not files:
+            return
+        res = recognition.import_results(self.proj, self.results, files=files, report=False)
+        self.seen |= {str(f) for f in files}
+        self.errors += res.errors
+        self.count += res.imported + res.unchanged
+        if self.on_import:
+            self.on_import(self.count)
+
+    def finish(self) -> None:
+        self.flush()
+        if self.errors:
+            recognition.write_import_report(self.proj, self.errors)
+
+    def stopped(self, e: Exception) -> OpError:
+        """整次识别停下了（额度用完、凭据不对等）：先把已识别的导入，再告诉用户。"""
+        self.finish()
+        got = f"已识别的 {self.count} 页已导入。" if self.count else ""
+        return OpError(f"{e}。{got}任务包已保留，可以续跑")
+
+
+def plan_recognition(proj: Project, scope: str = "new", executor: str = "codex", tier: str = "economy",
+                     model: str | None = None, tiles: int | None = None, workers: int | None = None) -> dict | None:
+    """估算：要识别多少页、按优先级分几档（先目录、说明、平面，详图大样放最后）、各要多久或多少钱。
+
+    不生成任务包、不渲染图片，几千页也很快；开始识别时才只为选中的几档准备图片。没有要识别的页面时返回 None。"""
+    from .executors import claude, codex
+    rows = recognition.pick_pages(proj, scope)
+    if not rows:
+        return None
+    plan = recognition.priority_plan(rows)
+    by_key: dict[str, list] = {}
+    for r in rows:
+        by_key.setdefault(recognition.priority_of(r["first_path"]), []).append(r)
+    if executor == "codex":
+        cfg = codex.TIERS[tier]
+        tiles = cfg["tiles"] if tiles is None else tiles
+        workers = workers or codex.DEFAULT_WORKERS
+        per_page = codex.SECONDS_PER_PAGE * (1.5 if tiles > 1 else 1) / max(1, workers) / 60  # 分钟
+        for g in plan:
+            g["minutes"] = max(1, round(g["pages"] * per_page))
+        return {"executor": "codex", "scope": scope, "tier": tier, "pages": len(rows),
+                "images": len(rows) * (2 + (tiles * tiles if tiles > 1 else 0)), "model": model or cfg["model"],
+                "effort": cfg["effort"], "workers": workers, "minutes": max(1, round(len(rows) * per_page)),
+                "priorities": plan}
+    total = claude.estimate_rows(rows, tier, model, tiles)
+    for g in plan:
+        g["usd"] = claude.estimate_rows(by_key[g["key"]], tier, model, tiles)["estimated_usd"]
+    return {"executor": "claude", "scope": scope, "tier": tier, "pages": len(rows), **total, "priorities": plan}
+
+
+def duration_text(minutes: float) -> str:
+    return f"约 {round(minutes)} 分钟" if minutes < 90 else f"约 {minutes / 60:.1f} 小时"
+
+
 def prepare_claude(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
                    tiles: int | None = None, task: Path | None = None) -> dict | None:
     """生成任务包并估算花费（不调用 API）。没有要识别的页面时返回 None。"""
@@ -107,47 +190,62 @@ def prepare_codex(proj: Project, scope: str = "new", tier: str = "economy", mode
 
 def estimate_text(est: dict) -> str:
     if est.get("executor") == "codex":
-        return (f"待识别 {est['pages']} 页，{est['images']} 张图片，用 Codex（模型 {est['model']}，思考强度 {est['effort']}），"
-                f"同时识别 {est['workers']} 页，预计约 {est['minutes']} 分钟。不另外花钱，占用你 ChatGPT 账号的 Codex 用量额度。")
-    usd = f"约 ${est['estimated_usd']:.2f}" if est["estimated_usd"] is not None else "未知（模型不在价格表里）"
-    return (f"待识别 {est['pages']} 页，{est['images']} 张图片，模型 {est['model']}，粗略估算输入 {est['input_tokens']} tokens、"
-            f"输出 {est['output_tokens']} tokens，花费{usd}。")
+        text = (f"待识别 {est['pages']} 页，{est['images']} 张图片，用 Codex（模型 {est['model']}，思考强度 {est['effort']}），"
+                f"同时识别 {est['workers']} 页，预计{duration_text(est['minutes'])}。不另外花钱，占用你 ChatGPT 账号的 Codex 用量额度。")
+    else:
+        usd = f"约 ${est['estimated_usd']:.2f}" if est["estimated_usd"] is not None else "未知（模型不在价格表里）"
+        text = (f"待识别 {est['pages']} 页，{est['images']} 张图片，模型 {est['model']}，粗略估算输入 {est['input_tokens']} tokens、"
+                f"输出 {est['output_tokens']} tokens，花费{usd}。")
+    for i, g in enumerate(est.get("priorities") or [], 1):
+        cost = duration_text(g["minutes"]) if "minutes" in g else (f"约 ${g['usd']:.2f}" if g.get("usd") is not None else "")
+        text += f"\n  {i}. {g['label']} {g['pages']} 页（{cost}），例如：{'、'.join(g['examples'])}"
+    return text
 
 
-def _finish_recognition(proj: Project, task: Path, r, usage_text: str, log: Log) -> dict:
+def _finish_recognition(proj: Project, task: Path, r, usage_text: str, log: Log, live: LiveImport) -> dict:
     log(f"识别 {r.done} 页，跳过 {r.skipped} 页，失败 {len(r.failed)} 页；{usage_text}。")
     for f in r.failed[:5]:
         log(f"  ✗ {f['file']}：{f['error']}")
-    res = recognition.import_results(proj, Path(task) / "results")
-    log(f"导入 {res.imported} 页。" + (f"{len(res.errors)} 个文件未通过校验，详见 reports/识别结果导入问题.md" if res.errors else ""))
-    return {"done": r.done, "failed": len(r.failed), "imported": res.imported, "task": str(task), "model": r.model}
+    live.finish()
+    log(f"导入 {live.count} 页。" + (f"{len(live.errors)} 个文件未通过校验，详见 reports/识别结果导入问题.md" if live.errors else ""))
+    return {"done": r.done, "failed": len(r.failed), "imported": live.count, "task": str(task), "model": r.model}
 
 
 def recognize_claude(proj: Project, task: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
-                     tiles: int | None = None, workers: int = 4, log: Log = print, progress=None, client=None) -> dict:
+                     tiles: int | None = None, workers: int = 4, log: Log = print, progress=None, client=None,
+                     on_import=None) -> dict:
+    """on_import(已导入页数)：识别途中每导入一批调用一次。"""
     from .executors import claude
+    live = LiveImport(proj, task, progress, on_import)
     try:
-        r = claude.run(Path(task), tier, model, effort, tiles, workers, client=client, progress=progress, log_fn=log)
+        r = claude.run(Path(task), tier, model, effort, tiles, workers, client=client, progress=live, log_fn=log)
     except claude.FatalError as e:
-        raise OpError(f"{e}。任务包已保留，配置好后可以续跑") from e
+        raise live.stopped(e) from e
+    except BaseException:
+        live.finish()  # 意外出错、按了 Ctrl+C：已识别的先导入
+        raise
     cost = r.usage.cost(r.model)
     out = _finish_recognition(proj, task, r, f"实际用量 输入 {r.usage.input} / 输出 {r.usage.output} tokens"
-                              + (f"，约 ${cost:.4f}" if cost is not None else ""), log)
+                              + (f"，约 ${cost:.4f}" if cost is not None else ""), log, live)
     return {**out, "usd": cost}
 
 
 def recognize_codex(proj: Project, task: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
                     tiles: int | None = None, workers: int | None = None, log: Log = print, progress=None,
-                    runner=None) -> dict:
-    """用本机的 Codex（ChatGPT 账号）识别。runner 只在测试里用，代替真的 Codex。"""
+                    runner=None, on_import=None) -> dict:
+    """用本机的 Codex（ChatGPT 账号）识别。runner 只在测试里用，代替真的 Codex；on_import 同 recognize_claude。"""
     from .executors import claude, codex
+    live = LiveImport(proj, task, progress, on_import)
     try:
-        r = codex.run(Path(task), tier, model, effort, tiles, workers or codex.DEFAULT_WORKERS, progress=progress,
+        r = codex.run(Path(task), tier, model, effort, tiles, workers or codex.DEFAULT_WORKERS, progress=live,
                       log_fn=log, runner=runner)
     except claude.FatalError as e:
-        raise OpError(f"{e}。任务包已保留，可以续跑") from e
+        raise live.stopped(e) from e
+    except BaseException:
+        live.finish()
+        raise
     return _finish_recognition(proj, task, r, f"用量 输入 {r.usage.input} / 输出 {r.usage.output} tokens"
-                               "（ChatGPT 账号的 Codex 额度，不另外计费）", log)
+                               "（ChatGPT 账号的 Codex 额度，不另外计费）", log, live)
 
 
 def codex_status(refresh: bool = False) -> dict:

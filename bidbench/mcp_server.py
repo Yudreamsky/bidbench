@@ -156,9 +156,11 @@ def build_server(kit: Toolkit):
         return kit.list_baselines()
 
     @tool()
-    def estimate_recognition(scope: str = "new", tier: str = "economy") -> dict:
-        """估算一次真实识别的页数和花费，并给出命令。不会运行识别。scope：new/weak/conflict/unrecognized/all；tier：economy/strong。"""
-        return kit.estimate_recognition(scope, tier)
+    def estimate_recognition(scope: str = "new", tier: str = "economy", executor: str = "codex") -> dict:
+        """估算一次真实识别的页数、用时（Codex）或花费（Claude），以及识别的先后顺序 priority_order：
+        按优先级分档（图纸目录、设计说明、平面、立面剖面、其他、详图大样），每档页数和例子。不会运行识别。
+        scope：new/weak/conflict/unrecognized/all；tier：economy/strong；executor：codex/claude。"""
+        return kit.estimate_recognition(scope, tier, executor)
 
     @tool()
     def list_notes() -> list:

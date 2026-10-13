@@ -489,9 +489,16 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                 t = f"{pre}-{n:02d}"
                 if t not in missing:
                     missing[t] = {"no": t, "title": None, "evidence": [f"{pre} 编号断号"], "level": "中", "gap": True}
+    # 还没识别的页面：文件名里就有这个图号的，多半只是还没识别到，先不算缺图（识别途中、只识别了前几档时常见）
+    pending_names = "\n".join(sorted({x.split(" / ")[-1] for p in unrecognized for x in p.paths}))
+    pending: list[tuple[str, str]] = []
     for t, m in sorted(missing.items()):
         d = decisions.get(("missing", t))
         if d and d["value"] == "not_needed":
+            continue
+        hit = _in_pending(t, pending_names)
+        if hit:
+            pending.append((t, hit))
             continue
         if d and d["value"] == "ask":
             m["confirmed"] = True
@@ -503,6 +510,10 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
                               {"label": "确认不需要（作废或笔误）", "kind": "missing", "key": t, "value": "not_needed"}],
                              level_word=m["level"], confirmed=bool(m.get("confirmed")), sheets=m.get("related")))
     missing = {t: m for t, m in missing.items() if m.get("status") == "missing"}
+    if pending:
+        eg = "；".join(f"{t}（{name}）" for t, name in pending[:5]) + ("……" if len(pending) > 5 else "")
+        issues.append(_issue("info", "待识别", "pending_refs", f"{len(pending)} 个被引用或目录列出的图号还没识别",
+                             f"它们在还没识别的页面的文件名里：{eg}。识别完再判断是否缺图。", {}, []))
 
     # ---- 目录版次 ----
     _catalog_revisions(sheet_out, current_page, decisions, issues, live)
@@ -524,7 +535,8 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
     # ---- 未识别页面 ----
     if unrecognized:
         issues.append(_issue("info", "待识别", "unrecognized", f"{len(unrecognized)} 页尚未识别",
-                             "运行 bidbench tasks 生成识别任务包，跑完后 bidbench import。", {}, []))
+                             "点上方的「识别」，范围选“新页面”接着识别（命令行：bidbench recognize）。"
+                             "没识别的页面里的图，暂时不会出现在图谱和缺图检查里。", {}, []))
     reasons: dict[str, int] = defaultdict(int)  # 只数缺图号、字迹不清这类；“没写单位”之类的备注显示在图纸卡片上
     for p in pages:
         r = p.rec and weak_reason(p.rec)
@@ -581,6 +593,19 @@ def _compute(proj, batches, pages, decisions, ext_issues, baselines_rows, file_c
         "recognition": {"pages": len(pages), "recognized": sum(1 for p in pages if p.rec),
                         "borrowed": sum(1 for p in pages if p.rec_borrowed), "executors": dict(executors)},
     }
+
+
+def _in_pending(no: str, names: str) -> str | None:
+    """图号出现在还没识别的页面的文件名里时，返回那个文件名。"""
+    pre, n = no_parts(no)
+    if not names or n is None:
+        return None
+    m = re.search(rf"(?<![A-Za-z0-9\u4e00-\u9fff]){re.escape(pre)}\s*[-－—_]?\s*0*{n}(?![0-9])", names, re.I)
+    if not m:
+        return None
+    start = names.rfind("\n", 0, m.start()) + 1
+    end = names.find("\n", m.end())
+    return names[start:end if end >= 0 else None]
 
 
 def _rev_scheme(rev: str | None) -> str | None:

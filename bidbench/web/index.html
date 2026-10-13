@@ -195,6 +195,11 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
 .update-bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 8px 12px; border-radius: 8px;
   background: var(--accent-tint); border: 1px solid var(--accent); font-size: 13px; }
 .update-bar b { color: var(--accent); }
+.job-bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 6px 12px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--line); font-size: 13px; }
+.job-bar .bar { flex: 1 1 160px; max-width: 320px; }
+.prio li label { display: flex; gap: 8px; align-items: baseline; cursor: pointer; }
+.prio li small { display: block; margin-left: 24px; overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .launcher { width: 100%; max-width: 720px; margin: 24px auto; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
@@ -262,6 +267,7 @@ li.recent .linkbtn { flex: 1; }
     </div>
   </header>
   <div class="update-bar" id="update-bar" hidden></div>
+  <div class="job-bar" id="job-bar" role="status" hidden></div>
   <div class="launcher" id="launcher" hidden></div>
   <div class="work" id="work">
     <div>
@@ -321,7 +327,8 @@ const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '其他
 let S = null, APP = null;
 const TOKEN = document.querySelector('meta[name="bidbench-token"]').content;
 const ui = { view: 'graph', selD: null, selF: null, focusSet: null, backTo: null, collapsed: new Set(),
-  graphIssues: false, factIssues: false, asOf: null };
+  graphIssues: false, factIssues: false, asOf: null,
+  job: null, jobView: false, jobFirst: null };  // 后台任务：最新状态、右栏是否在看它的进度、进度面板的第一个元素
 let nodeEls = {}, edgeEls = [], sheetBy = {}, factBy = {}, factGroupOf = {};
 
 function el(tag, attrs, ...kids) {
@@ -1050,6 +1057,10 @@ function renderOverview() {
       el('div', { class: 'stat warn' }, el('b', {}, String(S.issues.filter(i => i.level === 'warn').length)), el('span', {}, '提醒'))),
   ];
   if (!latest()) parts.push(el('div', { class: 'note warn' }, '正在查看历史状态，只读。切回最新批次后才能做决定。'));
+  const left = (S.recognition?.pages || 0) - (S.recognition?.recognized || 0);
+  const recognizing = ui.job && ui.job.status === 'running' && ui.job.kind === 'recognize';
+  if (left > 0 && (recognizing || S.recognition.recognized)) parts.push(el('div', { class: 'note warn' },
+    `还有 ${left} 页没识别${recognizing ? '（正在识别，左边会跟着更新）' : ''}：缺图、楼层覆盖、编号断号这些结论要等识别完才准。`));
   if (!S.batches.length) parts.push(el('div', { class: 'note' }, '新项目还没有收图。每收到一批图纸（压缩包、文件或文件夹）就登记一次。',
     el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn primary', type: 'button', onclick: renderReceive }, '收图'))));
   const sec = S.security || { files: [], scans: [], pending: 0 };
@@ -1167,8 +1178,7 @@ function renderSheet(no) {
   const rel = S.edges.filter(e => e.from === no || e.to === no);
   if (rel.length) parts.push(section('引用关系', el('ul', { class: 'list' }, rel.map(e => {
     const other = e.from === no ? e.to : e.from;
-    return el('li', {}, el('button', { class: 'chip', type: 'button', onclick: () => { ui.focusSet = null; selectSheet(other); } }, other), ' ',
-      e.from === no ? e.label : `被引用：${e.label}`);
+    return el('li', {}, sheetChip(other), sheetBy[other] ? ' ' : '（还没识别） ', e.from === no ? e.label : `被引用：${e.label}`);
   }))));
   const around = sameFloor(no);
   if (around.near.length) parts.push(section(`同层图纸（${s.floors_text}，${around.near.length} 张）`, sheetRows(around.near)));
@@ -1228,7 +1238,7 @@ async function checkFresh() {
   if (!S || document.hidden) return;
   try {
     const v = await (await fetch('/api/state/version', { cache: 'no-store' })).json();
-    if (v.busy || !v.version || v.version === S.db_version) return;  // 后台任务跑完会自己刷新
+    if ((v.busy && v.job !== 'recognize') || !v.version || v.version === S.db_version) return;  // 识别途中分批导入，跟着刷新；其他任务跑完会自己刷新
     const r = await fetch('/api/state' + (latest() ? '' : `?as_of=${S.as_of}`), { cache: 'no-store' });
     if (!r.ok) return;
     const st = await r.json();
@@ -1571,7 +1581,7 @@ function mdBlock(text) {
   return box;
 }
 async function renderAssistant(refresh) {
-  clearTimeout(jobTimer); clearTimeout(chatTimer);
+  clearTimeout(chatTimer);
   const back = el('button', { class: 'btn', type: 'button', onclick: () => { clearTimeout(chatTimer); clearAll(); } }, '← 问题中心');
   const head = el('div', { class: 'ptitle' }, el('h2', {}, 'AI 助手'),
     el('p', { class: 'meta' }, '用 Codex 回答这个项目的问题。处理问题、确认事实只会生成提议，你确认后才生效。'));
@@ -1673,7 +1683,6 @@ const pad2 = n => String(n).padStart(2, '0');
 const dayOf = t => `${t.getFullYear()}-${pad2(t.getMonth() + 1)}-${pad2(t.getDate())}`;
 const secsText = s => s < 60 ? `${Math.round(s)} 秒` : `${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
 async function renderLog() {
-  clearTimeout(jobTimer);
   let data;
   try {
     const r = await fetch('/api/log?limit=300');
@@ -1717,30 +1726,48 @@ async function openFolder(path) {
 
 async function startJob(kind, body) {
   const r = await api('/api/job', { kind, ...body });
-  if (r.ok) watchJob();
+  if (r.ok) showJob();
 }
+function showJob() { ui.jobView = true; ui.jobFirst = null; watchJob(); }  // 右栏显示任务进度
 let jobTimer = null;
 async function watchJob() {
   clearTimeout(jobTimer);
   let j;
   try { j = await (await fetch('/api/job')).json(); } catch (e) { jobTimer = setTimeout(watchJob, 1500); return; }
+  ui.job = j;
+  if (ui.jobView && ui.jobFirst && panel.firstChild !== ui.jobFirst) ui.jobView = false;  // 右栏换成了图纸卡片等：不再把进度面板顶回来
+  paintJobBar(j);
   if (!j) return;
-  renderJob(j);
-  if (j.status === 'running') { jobTimer = setTimeout(watchJob, 700); return; }
+  if (ui.jobView) renderJob(j);
+  if (j.status === 'running') { jobTimer = setTimeout(watchJob, ui.jobView ? 700 : 2000); return; }
   await refreshApp();
   if (S || (APP && APP.project)) { try { await load(ui.asOf && S && ui.asOf !== Math.max(...S.batches.map(b => b.seq)) ? ui.asOf : null); } catch (e) { /* 忽略 */ } }
-  renderJob(j);
+  if (ui.jobView) renderJob(j);
+}
+const durText = m => m < 90 ? `约 ${Math.round(m)} 分钟` : `约 ${(m / 60).toFixed(1)} 小时`;
+const progText = (n, t) => t > 100000 ? `${(n / 1048576).toFixed(1)} / ${(t / 1048576).toFixed(1)} MB` : `${n} / ${t}`;
+function paintJobBar(j) {  // 顶部常驻：任务在跑时，右栏去看别的也能看到进度
+  const bar = document.getElementById('job-bar');
+  if (!j || j.status !== 'running') { bar.hidden = true; return; }
+  const p = j.progress && j.progress[1] ? j.progress : null;
+  bar.replaceChildren(...[el('b', {}, j.title),
+    el('span', { class: 'meta' }, [j.stage, p ? progText(p[0], p[1]) : '进行中…'].filter(Boolean).join(' ')),
+    p ? el('div', { class: 'bar' }, el('i', { style: `width:${Math.round(p[0] / p[1] * 100)}%` })) : null,
+    j.kind === 'recognize' && j.imported ? el('span', { class: 'meta' }, `已导入 ${j.imported} 页，左边跟着更新`) : null,
+    ui.jobView ? null : el('button', { class: 'btn', type: 'button', onclick: showJob }, '查看进度')].filter(Boolean));
+  bar.hidden = false;
 }
 function renderJob(j) {
-  const parts = [el('button', { class: 'btn', type: 'button', onclick: () => { clearTimeout(jobTimer); clearAll(); } }, '← 问题中心'),
+  const parts = [el('button', { class: 'btn', type: 'button', onclick: () => { ui.jobView = false; clearAll(); paintJobBar(ui.job); } }, '← 问题中心'),
     el('div', { class: 'ptitle' }, el('h2', {}, j.title),
-      el('p', { class: 'meta' }, j.status === 'running' ? '进行中…' : j.status === 'done' ? `完成（${j.finished.slice(11)}）` : '没有完成'))];
+      el('p', { class: 'meta' }, j.status === 'running' ? `进行中…${j.stage ? '（' + j.stage + '）' : ''}` : j.status === 'done' ? `完成（${j.finished.slice(11)}）` : '没有完成'))];
   if (j.progress && j.progress[1]) {
     const [n, t] = j.progress;
-    const big = t > 100000;
     parts.push(el('div', {}, el('div', { class: 'bar' }, el('i', { style: `width:${Math.round(n / t * 100)}%` })),
-      el('small', { class: 'meta' }, big ? `${(n / 1048576).toFixed(1)} / ${(t / 1048576).toFixed(1)} MB` : `${n} / ${t}`)));
+      el('small', { class: 'meta' }, progText(n, t))));
   }
+  if (j.kind === 'recognize' && j.imported && j.status === 'running') parts.push(el('p', { class: 'meta' },
+    `已导入 ${j.imported} 页：左边的图谱和问题中心跟着更新，可以先点开已识别的图纸看。中途停下，已识别的也都在。`));
   if (j.error) parts.push(el('div', { class: 'note crit' }, j.error));
   parts.push(el('pre', { class: 'joblog', 'aria-label': '运行记录' }, j.lines.join('\n') || '…'));
   const res = j.result;
@@ -1749,11 +1776,25 @@ function renderJob(j) {
     else {
       const ex = res.executor || 'claude';
       const ready = ex === 'codex' ? !RECOG || RECOG.codex.ready : APP.claude_ready;
-      const label = ex === 'codex' ? `开始识别（预计约 ${res.minutes} 分钟）`
-        : res.estimated_usd != null ? `开始识别（约 $${res.estimated_usd.toFixed(2)}）` : '开始识别';
-      parts.push(el('div', { class: 'opts' },
-        el('button', { class: 'btn primary', type: 'button', disabled: ready ? null : 'disabled',
-          onclick: () => startJob('recognize', { executor: ex, task: res.task, tier: res.tier, model: res.model }) }, label),
+      const groups = res.priorities || [];
+      const picked = new Set(groups.map(g => g.key));  // 默认全选，按从上到下的顺序识别
+      const cost = gs => ex === 'codex' ? durText(gs.reduce((a, g) => a + g.minutes, 0))
+        : gs.every(g => g.usd != null) ? `约 $${gs.reduce((a, g) => a + g.usd, 0).toFixed(2)}` : '';
+      const go = el('button', { class: 'btn primary', type: 'button',
+        onclick: () => startJob('recognize', { executor: ex, scope: res.scope, tier: res.tier, model: res.model, priorities: [...picked] }) });
+      const sum = () => {
+        const gs = groups.filter(g => picked.has(g.key)), n = gs.reduce((a, g) => a + g.pages, 0);
+        go.textContent = n ? `开始识别 ${n} 页（${cost(gs)}）` : '请至少选一档';
+        go.disabled = !ready || !n;
+      };
+      parts.push(section('识别顺序（从上到下）',
+        el('p', { class: 'meta' }, '先识别对判断最有用的图：目录、说明、平面在前，详图大样放最后。可以只勾前几档，剩下的以后再识别。'),
+        el('ul', { class: 'list prio' }, groups.map((g, i) => el('li', {},
+          el('label', {}, el('input', { type: 'checkbox', checked: '', onchange: e => { if (e.target.checked) picked.add(g.key); else picked.delete(g.key); sum(); } }),
+            el('span', {}, `${i + 1}. ${g.label} ${g.pages} 页 · ${cost([g])}`)),
+          el('small', { class: 'meta' }, '例如：' + g.examples.join('、')))))));
+      sum();
+      parts.push(el('div', { class: 'opts' }, go,
         ready ? null : ex === 'codex' ? el('button', { class: 'btn', type: 'button', onclick: () => renderRecognize(true) }, '查看 Codex 状态')
           : el('button', { class: 'btn', type: 'button', onclick: renderSettings }, '先设置 API 密钥')));
     }
@@ -1762,11 +1803,12 @@ function renderJob(j) {
     el('button', { class: 'btn primary', type: 'button', onclick: () => openFolder(res.path) }, '打开文件夹'), el('span', { class: 'mono' }, res.path)));
   if (j.status === 'done' && j.kind === 'receive') parts.push(el('div', { class: 'opts' },
     el('button', { class: 'btn primary', type: 'button', onclick: renderRecognize }, '识别新页面'),
-    el('button', { class: 'btn', type: 'button', onclick: () => { clearTimeout(jobTimer); clearAll(); } }, '查看问题中心')));
+    el('button', { class: 'btn', type: 'button', onclick: () => { ui.jobView = false; clearAll(); } }, '查看问题中心')));
   if (j.kind === 'update' || j.kind === 'rollback') {
     if (j.status === 'done') parts.push(el('div', { class: 'note' }, '正在安装新版本，窗口会自动关闭，装好后自动重新打开。'));
   }
   panel.replaceChildren(...parts);
+  ui.jobFirst = panel.firstChild;
   const log = panel.querySelector('.joblog');
   if (log) log.scrollTop = log.scrollHeight;
 }

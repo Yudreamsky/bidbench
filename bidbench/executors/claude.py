@@ -579,6 +579,22 @@ def _write_log(task_dir: Path, res: RunResult, tier: str, effort: str, tiles: in
         "estimated_usd": cost, "done": res.done, "failed": len(res.failed)}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def estimate_rows(rows, tier: str = "economy", model: str | None = None, tiles: int | None = None) -> dict:
+    """不生成任务包的粗略估算（按页面记录算）：口径同 estimate()。"""
+    cfg = TIERS[tier]
+    model = model or cfg["model"]
+    tiles = cfg["tiles"] if tiles is None else tiles
+    per_image = MAX_IMAGE_EDGE * MAX_IMAGE_EDGE * 0.7 / 750
+    images = len(rows) * (2 + (tiles * tiles if tiles > 1 else 0))
+    chars = sum(min(len(r["text"] or "") * 1.6, MAX_TEXT_CHARS) for r in rows)
+    tokens_in = images * per_image + chars / 1.5 + len(rows) * 1500
+    tokens_out = len(rows) * 2500
+    pin, pout = PRICES.get(model, (None, None))
+    usd = (tokens_in * pin + tokens_out * pout) / 1e6 if pin is not None else None
+    return {"images": images, "input_tokens": int(tokens_in), "output_tokens": int(tokens_out), "model": model,
+            "estimated_usd": usd}
+
+
 def estimate(task_dir: Path, tier: str = "economy", model: str | None = None, tiles: int | None = None) -> dict:
     """不调用 API 的粗略估算：图片按 宽×高/750 计 token，文字按 1.5 字符/token。"""
     cfg = TIERS[tier]
