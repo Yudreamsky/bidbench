@@ -152,7 +152,7 @@ def test_settings_never_echo_the_key(running, demo_copy, monkeypatch):
     c = running(demo_copy)
     est = c.job("estimate", scope="all", tier="economy")
     assert est["status"] == "done" and est["result"]["pages"] > 0
-    r = c.post("/api/job", {"kind": "recognize", "executor": "claude", "task": est["result"]["task"]})
+    r = c.post("/api/job", {"kind": "recognize", "executor": "claude", "scope": "all"})
     assert "API 密钥" in r["error"]
     info = c.post("/api/app/settings", {"api_key": "sk-ant-api03-abcdefghijklmnop"})
     assert info["settings"]["has_api_key"] and "abcdefghijklmnop" not in json.dumps(info)

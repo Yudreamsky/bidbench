@@ -44,7 +44,7 @@ def test_workbench_refreshes_after_outside_changes(demo_copy):
     try:
         st = c.get("/api/state")
         assert st["db_version"] and not st["proposals"]
-        assert c.get("/api/state/version") == {"version": st["db_version"], "busy": False}
+        assert c.get("/api/state/version") == {"version": st["db_version"], "busy": False, "job": None}
         Toolkit(demo_copy).propose_note("缺图", "建施-09 列入答疑", "外部 AI 助手提的")  # 另一个程序改了项目数据库
         v = c.get("/api/state/version")["version"]
         assert v != st["db_version"]

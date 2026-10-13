@@ -48,6 +48,8 @@ class Job:
         self.status = "running"
         self.lines: list[str] = []  # 全部输出；界面只取最后 400 行，操作日志里留头尾
         self.progress: tuple[int, int] | None = None
+        self.stage: str | None = None      # 分几步的任务现在在哪一步，如“准备页面图片”“识别”
+        self.imported: int | None = None   # 识别途中已导入的页数
         self.result = None
         self.error: str | None = None
         self.started = datetime.now().isoformat(timespec="seconds")
@@ -74,7 +76,8 @@ class Job:
         with self.lock:
             lines = self.lines[-400:]
         return {"id": self.id, "kind": self.kind, "title": self.title, "status": self.status, "lines": lines,
-                "progress": self.progress, "result": self.result, "error": self.error,
+                "progress": self.progress, "stage": self.stage, "imported": self.imported,
+                "result": self.result, "error": self.error,
                 "started": self.started, "finished": self.finished}
 
 
@@ -255,9 +258,7 @@ def _job_fn(app: _App, kind: str, body: dict):
         appconfig.remember("recognize", {"executor": executor, "scope": scope, "tier": tier, "model": model})
 
         def fn(job):
-            job.log("正在生成识别任务包（渲染页面图片）……")
-            prepare = ops.prepare_codex if executor == "codex" else ops.prepare_claude
-            est = prepare(need_proj(), scope, tier, model)
+            est = ops.plan_recognition(need_proj(), scope, executor, tier, model)  # 只估算，不渲染图片
             if est is None:
                 job.log(f"范围「{recognition.SCOPES[scope]}」内没有需要识别的页面。")
                 return None
@@ -275,10 +276,19 @@ def _job_fn(app: _App, kind: str, body: dict):
             return oplog.TITLES["simulated"], fn
         if executor not in EXECUTORS:
             raise ValueError("未知的识别方式")
-        task = Path(str(body.get("task") or ""))
-        tasks_root = need_proj().path("recognition", "tasks").resolve()
-        if not task.is_dir() or tasks_root not in task.resolve().parents:
-            raise ValueError("任务包不存在，请先估算")
+        task = None
+        if body.get("task"):  # 续跑已有的任务包
+            task = Path(str(body["task"]))
+            tasks_root = need_proj().path("recognition", "tasks").resolve()
+            if not task.is_dir() or tasks_root not in task.resolve().parents:
+                raise ValueError("任务包不存在，请先估算")
+        scope = body.get("scope") or "new"
+        if scope not in recognition.SCOPES:
+            raise ValueError("识别范围不对")
+        priorities = body.get("priorities")
+        if priorities is not None and (not isinstance(priorities, list) or not priorities
+                                       or any(k not in recognition.PRIORITY_RANK for k in priorities)):
+            raise ValueError("请至少选一档要识别的图纸")
         tier = body.get("tier") if body.get("tier") in ("economy", "strong") else "economy"
         model = _model(body)
         if executor == "claude" and not ops.has_claude_credentials():
@@ -291,8 +301,21 @@ def _job_fn(app: _App, kind: str, body: dict):
         def fn(job):
             def progress(n, total):
                 job.progress = (n, total)
+
+            def imported(n):
+                job.imported = n
+            t = task
+            if t is None:  # 按选中的几档准备页面图片：先目录、说明、平面，详图大样放最后
+                job.stage = "准备页面图片"
+                job.log("正在准备页面图片……")
+                t = recognition.make_task(need_proj(), scope=scope, priorities=priorities, progress=progress)
+                if t is None:
+                    job.log("没有需要识别的页面。")
+                    return None
+            job.stage, job.progress = "识别", None
             recognize = ops.recognize_codex if executor == "codex" else ops.recognize_claude
-            r = recognize(proj, task, tier, model, log=job.log, progress=progress)
+            r = recognize(proj, t, tier, model, log=job.log, progress=progress, on_import=imported)
+            job.stage = "计算台账"
             ops.build(proj, log=job.log)
             return r
         return f"{oplog.TITLES[executor]}（{'经济档' if tier == 'economy' else '强档'}）", fn
@@ -422,7 +445,8 @@ def make_handler(app: _App):
                                    "folder": str(oplog.folder(app.proj)), "debug_folder": str(debuglog.folder())})
             if u.path == "/api/state/version":  # 界面定时看一眼，变了再取整个状态
                 job = app.job
-                return self._json({"version": app.db_version_now(), "busy": bool(job and job.status == "running")})
+                running = bool(job and job.status == "running")
+                return self._json({"version": app.db_version_now(), "busy": running, "job": job.kind if running else None})
             if u.path == "/api/state":
                 if not self._need_project():
                     return None

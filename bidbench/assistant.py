@@ -262,27 +262,28 @@ class Toolkit:
     def list_baselines(self) -> list[dict]:
         return self._state()["baselines"]
 
-    def estimate_recognition(self, scope: str = "new", tier: str = "economy") -> dict:
-        """估算一次真实识别的规模和花费，不生成任务包、不调用 API。"""
-        from .executors import claude
+    def estimate_recognition(self, scope: str = "new", tier: str = "economy", executor: str = "codex") -> dict:
+        """估算一次真实识别的规模、用时或花费，以及识别的先后顺序（按优先级分档）。不生成任务包、不调用 API。"""
+        from . import ops
         if scope not in recognition.SCOPES:
             raise ToolError(f"scope 可选：{'、'.join(recognition.SCOPES)}")
-        if tier not in claude.TIERS:
+        if tier not in ("economy", "strong"):
             raise ToolError("tier 可选：economy、strong")
-        only = recognition._conflict_pages(self.proj) if scope == "conflict" else None
-        with self.proj.connect() as con:
-            rows = recognition.pages_to_recognize(con, scope=scope, only=only)
-        cfg = claude.TIERS[tier]
-        tiles = cfg["tiles"]
-        per_image = claude.MAX_IMAGE_EDGE ** 2 * 0.7 / 750
-        images = len(rows) * (2 + (tiles * tiles if tiles > 1 else 0))
-        chars = sum(min(len(r["text"]) * 1.6, claude.MAX_TEXT_CHARS) for r in rows)
-        tin = images * per_image + chars / 1.5 + len(rows) * 1500
-        tout = len(rows) * 2500
-        pin, pout = claude.PRICES[cfg["model"]]
-        return {"pages": len(rows), "model": cfg["model"], "estimated_usd": round((tin * pin + tout * pout) / 1e6, 4),
-                "command": f"bidbench recognize --executor claude --tier {tier} --scope {scope}",
-                "note": "识别会把图纸页面发送到 Anthropic API，并产生费用；请让用户自己决定是否运行上面的命令。"}
+        if executor not in ("codex", "claude"):
+            raise ToolError("executor 可选：codex、claude")
+        est = ops.plan_recognition(self.proj, scope, executor, tier)
+        if est is None:
+            return {"pages": 0, "note": f"范围「{recognition.SCOPES[scope]}」内没有需要识别的页面。"}
+        order = [{"order": i, "priority": g["label"], "pages": g["pages"], "examples": g["examples"],
+                  **({"minutes": g["minutes"]} if "minutes" in g else {"estimated_usd": g.get("usd")})}
+                 for i, g in enumerate(est["priorities"], 1)]
+        where = "OpenAI（Codex，占用 ChatGPT 账号的额度）" if executor == "codex" else "Anthropic API，并产生费用"
+        return {"pages": est["pages"], "executor": executor, "model": est["model"],
+                **({"minutes": est["minutes"]} if executor == "codex" else {"estimated_usd": est["estimated_usd"]}),
+                "priority_order": order,
+                "command": f"bidbench recognize --executor {executor} --tier {tier} --scope {scope}",
+                "note": f"按 priority_order 从上到下识别（先目录、说明、平面，详图大样放最后）；在工作台“识别”里估算后可以只勾前几档。"
+                        f"识别会把图纸页面发送到 {where}；请让用户自己决定是否开始。"}
 
     def list_notes(self) -> list[dict]:
         with self.proj.connect() as con:

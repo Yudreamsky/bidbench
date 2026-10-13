@@ -238,11 +238,14 @@ def test_workbench_codex_flow(demo_copy, monkeypatch):
         assert res["executor"] == "codex" and res["minutes"] >= 1 and "不另外花钱" in "\n".join(est["lines"])
         assert c.get("/api/recognizers")["prefs"] == {"executor": "codex", "scope": "conflict", "tier": "economy",
                                                      "model": "gpt-6.1-sol"}
-        j = c.job("recognize", executor="codex", task=res["task"], tier="economy", model=res["model"])
+        assert "task" not in res and res["priorities"]  # 估算不再生成任务包，只给出分档计划
+        assert "选一档" in c.post("/api/job", {"kind": "recognize", "executor": "codex", "priorities": []})["error"]
+        j = c.job("recognize", executor="codex", scope=res["scope"], tier="economy", model=res["model"],
+                  priorities=[g["key"] for g in res["priorities"]])
         assert j["status"] == "done" and j["title"] == "Codex 识别（经济档）", j
-        assert any("✓" in ln for ln in j["lines"]) and j["result"]["imported"] > 0
+        assert any("✓" in ln for ln in j["lines"]) and j["result"]["imported"] > 0 and j["imported"] > 0
         monkeypatch.setattr(ops, "codex_status", lambda refresh=False: _fake_status(ready=False))
-        assert "codex login" in c.post("/api/job", {"kind": "recognize", "executor": "codex", "task": res["task"]})["error"]
+        assert "codex login" in c.post("/api/job", {"kind": "recognize", "executor": "codex", "scope": "conflict"})["error"]
     finally:
         httpd.shutdown()
     assert [e["title"] for e in oplog.read(demo_copy)][:2] == ["Codex 识别（经济档）", "识别估算（Codex 经济档）"]

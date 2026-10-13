@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -59,6 +60,71 @@ def weak_reason(rec: dict) -> str | None:
 
 def _is_weak(rec: dict) -> bool:
     return rec["run"]["executor"] in PLACEHOLDER_EXECUTORS or weak_reason(rec) is not None
+
+
+# ---- 识别先后：先识别对后面判断最有用的图（目录、说明、平面），详图、大样这些边角放最后 ----
+PRIORITIES = [
+    ("catalog", "图纸目录、清单"),
+    ("notes", "设计说明"),
+    ("plans", "平面、布置、配筋"),
+    ("sections", "立面、剖面"),
+    ("other", "其他图纸"),
+    ("details", "详图、大样、表格"),
+]
+PRIORITY_LABEL = dict(PRIORITIES)
+PRIORITY_RANK = {k: i for i, (k, _) in enumerate(PRIORITIES)}
+# 按顺序匹配：先认目录、说明，再认详图（“楼梯平面详图”算详图），最后认剖面、平面
+_PRIORITY_RULES = [
+    ("catalog", re.compile(r"目录|图纸清单|封面|drawing (?:list|register|index|schedule)|document register|"
+                           r"issue sheet|transmittal|cover sheet", re.I)),
+    ("notes", re.compile(r"说明|图例|general notes?|\bnotes?\b|\bspecifications?\b|\blegends?\b|\babbreviations?\b", re.I)),
+    ("details", re.compile(r"详图|大样|节点|表(?!面)|\bdetails?\b|\bdetailing\b|\bschedules?\b|\btables?\b", re.I)),
+    ("sections", re.compile(r"立面|剖面|\belevations?\b|\bsections?\b", re.I)),
+    ("plans", re.compile(r"平面|布置|配筋|\bplans?\b|\bga\b|general arrangement|\blayouts?\b|setting out|"
+                         r"\bframing\b|\bfoundations?\b", re.I)),
+]
+
+
+def priority_of(path: str | None) -> str:
+    """一页图排第几档：先看文件名，认不出再看所在的文件夹（从里往外）；都认不出算“其他图纸”。"""
+    for seg in reversed([x for x in re.split(r"\s+/\s+", path or "") if x]):
+        if seg.startswith("批次#"):
+            continue
+        name = re.sub(r"\.(?:pdf|dwg|dxf|png|jpe?g|tiff?|zip|rar|7z)$", "", seg, flags=re.I)
+        name = re.sub(r"[_\-.]+", " ", name)  # Level_01-GA_Plan 这类文件名按词切开
+        for key, rx in _PRIORITY_RULES:
+            if rx.search(name):
+                return key
+    return "other"
+
+
+def priority_plan(rows) -> list[dict]:
+    """按档统计要识别的页面：每档几页，举几个文件名做例子。"""
+    groups: dict[str, list] = {}
+    for r in rows:
+        groups.setdefault(priority_of(r["first_path"]), []).append(r)
+    out = []
+    for key, label in PRIORITIES:
+        rs = groups.get(key)
+        if rs:
+            names = list(dict.fromkeys(r["first_path"].split(" / ")[-1] for r in rs))
+            out.append({"key": key, "label": label, "pages": len(rs), "examples": names[:3]})
+    return out
+
+
+def pick_pages(proj: Project, scope: str = "new", priorities: list[str] | None = None) -> list:
+    """按范围挑要识别的页面，按优先级排好；priorities 给了就只要这几档。"""
+    if scope not in SCOPES:
+        raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(SCOPES)}")
+    only = _conflict_pages(proj) if scope == "conflict" else None
+    with proj.connect() as con:
+        rows = pages_to_recognize(con, scope=scope, only=only)
+    if priorities is not None:
+        bad = [k for k in priorities if k not in PRIORITY_RANK]
+        if bad:
+            raise ValueError(f"未知的识别优先级：{'、'.join(bad)}")
+        rows = [r for r in rows if priority_of(r["first_path"]) in priorities]
+    return sorted(rows, key=lambda r: PRIORITY_RANK[priority_of(r["first_path"])])  # 同一档里保持文件顺序
 
 
 def _conflict_pages(proj: Project) -> set[str]:
@@ -116,12 +182,12 @@ def pages_to_recognize(con, include_done: bool = False, scope: str = "new", only
     return out
 
 
-def make_task(proj: Project, include_done: bool = False, render: bool = True, scope: str = "new") -> Path | None:
-    if scope not in SCOPES:
-        raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(SCOPES)}")
-    only = _conflict_pages(proj) if scope == "conflict" else None
-    with proj.connect() as con:
-        rows = pages_to_recognize(con, include_done, scope, only)
+def make_task(proj: Project, include_done: bool = False, render: bool = True, scope: str = "new",
+              priorities: list[str] | None = None, progress=None) -> Path | None:
+    """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档。
+
+    渲染页面图片较慢，progress(已完成, 总数) 用来报进度。"""
+    rows = pick_pages(proj, "all" if include_done else scope, priorities)
     if not rows:
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -148,6 +214,7 @@ def make_task(proj: Project, include_done: bool = False, render: bool = True, sc
                                  clip_frac=TITLEBLOCK_CLIP)
         items.append({
             "page_id": pid,
+            "priority": priority_of(r["first_path"]),
             "source": {
                 "file_path": r["first_path"],
                 "file_sha256": r["file_sha256"],
@@ -160,6 +227,8 @@ def make_task(proj: Project, include_done: bool = False, render: bool = True, sc
             "text": f"text/{pid}.txt",
             "text_lines": f"text/{pid}.json",
         })
+        if progress:
+            progress(len(items), len(rows))
     (task / "manifest_in.json").write_text(
         json.dumps({"created_at": now_iso(), "project": proj.meta["name"], "scope": scope, "pages": items},
                    ensure_ascii=False, indent=2),
@@ -176,16 +245,23 @@ class ImportResult:
     errors: list = field(default_factory=list)
 
 
-def import_results(proj: Project, results_dir: Path) -> ImportResult:
-    """校验并导入识别结果。不通过校验的文件一律不导入，列入问题清单。"""
+NOT_RESULTS = ("manifest.json", "manifest_in.json", "usage.json")
+
+
+def result_files(results_dir: Path) -> list[Path]:
+    return [f for f in sorted(Path(results_dir).rglob("*.json")) if f.name not in NOT_RESULTS]
+
+
+def import_results(proj: Project, results_dir: Path, files: list[Path] | None = None, report: bool = True) -> ImportResult:
+    """校验并导入识别结果。不通过校验的文件一律不导入，列入问题清单。
+
+    files 给了就只导这几个（识别途中分批导入用）；report=False 时不写问题清单，由调用方汇总后再写。"""
     v = _validator()
     res = ImportResult()
-    files = sorted(Path(results_dir).rglob("*.json"))
+    files = result_files(results_dir) if files is None else files
     with proj.connect() as con:
         known = {r[0] for r in con.execute("SELECT page_id FROM pages")}
         for f in files:
-            if f.name in ("manifest.json", "manifest_in.json", "usage.json"):
-                continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
             except json.JSONDecodeError as e:
@@ -213,13 +289,17 @@ def import_results(proj: Project, results_dir: Path) -> ImportResult:
                 (pid, run["executor"], run["model"], run["instruction_version"], run["finished_at"], now_iso(), payload),
             )
             res.imported += 1
-    if res.errors:
-        out = proj.path("reports", "识别结果导入问题.md")
-        lines = ["# 识别结果导入问题", "", f"共 {len(res.errors)} 个文件未导入，修正后重新运行 `bidbench import`。", "",
-                 "| 文件 | 问题 |", "| --- | --- |"]
-        lines += [f"| {e['file']} | {e['error']} |" for e in res.errors]
-        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if report and res.errors:
+        write_import_report(proj, res.errors)
     return res
+
+
+def write_import_report(proj: Project, errors: list[dict]) -> None:
+    out = proj.path("reports", "识别结果导入问题.md")
+    lines = ["# 识别结果导入问题", "", f"共 {len(errors)} 个文件未导入，修正后重新运行 `bidbench import`。", "",
+             "| 文件 | 问题 |", "| --- | --- |"]
+    lines += [f"| {e['file']} | {e['error']} |" for e in errors]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def latest_task(proj: Project) -> Path | None:
