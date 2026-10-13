@@ -156,7 +156,7 @@ def pending(st: dict, done: dict, redo: bool = False) -> tuple[list[dict], list[
     """要分类的图纸和事实类别：没分过的、图名变了的；redo 时全部重新分。"""
     sheets = []
     for s in st["sheets"]:
-        lab = done["sheet"].get(s["no"])
+        lab = done["sheet"].get(s["no"]) or done["sheet"].get(s.get("number") or s["no"])  # 加塔楼以前按光图号分的照样算数
         if redo or not isinstance(lab, dict) or lab.get("title") != (s["title"] or ""):
             sheets.append({"key": s["no"], "no": s["no"], "title": s["title"] or "", "folder": _folder(s["paths"])})
     fams: dict[str, dict] = {}
