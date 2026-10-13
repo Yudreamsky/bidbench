@@ -79,6 +79,12 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .hint { margin: 0; padding: 8px 14px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
 .empty { padding: 40px 16px; text-align: center; color: var(--muted); }
 .band { fill: var(--band); stroke: var(--line); }
+.subbox { fill: var(--surface); stroke: var(--line); stroke-dasharray: 4 3; }
+.boxhead { cursor: pointer; }
+.boxhead .hit { fill: transparent; }
+.boxhead:hover .band-label, .boxhead:focus-visible .band-label { fill: var(--accent); }
+.boxhead:focus:not(:focus-visible) { outline: none; }
+.node.dragging { transition: none; cursor: grabbing; opacity: .85; }
 .band-label { fill: var(--muted); font-size: 12px; letter-spacing: .08em; }
 .edge { stroke: var(--edge); stroke-width: 1.25; fill: none; }
 .edge.cross { stroke-dasharray: 6 4; }
@@ -291,11 +297,12 @@ li.recent .linkbtn { flex: 1; }
             <span><i class="ln cross"></i>跨专业</span><span><i class="ln catalog"></i>目录列出</span>
           </div>
           <span class="spacer"></span>
+          <button class="btn" id="g-reset" type="button" hidden title="展开所有收起的框，拖过的方块回到原来的位置">复原排版</button>
           <button class="btn" id="clear" type="button">清除选择</button>
         </div>
         <div class="canvas"><svg id="graph" role="group" aria-label="图纸知识图谱"></svg>
           <canvas id="net" hidden aria-label="图纸关系网：圆点是图纸，线是引用关系"></canvas></div>
-        <p class="hint" id="graph-hint">鼠标指向图纸看源文件和说明，点击看详情；选中后只突出它的直接关联。红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。</p>
+        <p class="hint" id="graph-hint">点框的标题收起或展开；按住方块拖动排版，松手吸附到格子。鼠标指向图纸看源文件和说明，点击看详情；红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。</p>
       </section>
       <section class="view" id="view-facts" role="tabpanel" aria-labelledby="tab-facts" hidden>
         <div class="toolbar">
@@ -328,6 +335,7 @@ const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '其他
 let S = null, APP = null;
 const TOKEN = document.querySelector('meta[name="bidbench-token"]').content;
 const ui = { view: 'graph', selD: null, selF: null, focusSet: null, backTo: null, collapsed: new Set(),
+  collapsedBoxes: new Set(), gridPos: {}, layoutFor: null,  // 图谱：收起的框、拖过的方块（按项目记在本机）
   graphIssues: false, factIssues: false, asOf: null,
   job: null, jobView: false, jobFirst: null };  // 后台任务：最新状态、右栏是否在看它的进度、进度面板的第一个元素
 let nodeEls = {}, edgeEls = [], sheetBy = {}, factBy = {}, factGroupOf = {};
@@ -521,36 +529,174 @@ function series(no) {  // 图号的百位段：建施-101~199 是一段，建施
   const m = no.match(/(\d+)\D*$/);
   return m && m[1].length >= 3 ? m[1].slice(0, -2) : '';
 }
+const GRID_GAP = 8, GRID_ROWH = NH + GRID_GAP;  // 方块之间的空隙、一行的高度（拖动时按这个格子吸附）
+const SUB_MIN = 10;  // 一个专业的图多于这么多、又不止一类时，按图类分小框
+let lastLayout = null;
+const layoutPrefsKey = () => `bidbench.graphLayout.${(S && S.project && S.project.name) || ''}`;
+function loadLayoutPrefs() {  // 每个项目各记各的：收起了哪些框、哪些方块拖到了哪里
+  if (ui.layoutFor === layoutPrefsKey()) return;
+  ui.layoutFor = layoutPrefsKey();
+  let v = {};
+  try { v = JSON.parse(localStorage.getItem(ui.layoutFor) || '{}') || {}; } catch (e) { v = {}; }
+  ui.collapsedBoxes = new Set(Array.isArray(v.collapsed) ? v.collapsed : []);
+  ui.gridPos = v.pos && typeof v.pos === 'object' ? v.pos : {};
+  updateResetBtn();
+}
+function saveLayoutPrefs() {
+  try { localStorage.setItem(layoutPrefsKey(), JSON.stringify({ collapsed: [...ui.collapsedBoxes], pos: ui.gridPos })); } catch (e) { /* 忽略 */ }
+  updateResetBtn();
+}
+function updateResetBtn() {
+  document.getElementById('g-reset').hidden = net.on || (!ui.collapsedBoxes.size && !Object.keys(ui.gridPos).length);
+}
+function boxCells(items, cols, key) {
+  // 格子位置：按图号顺序排、百位段换行；拖过的放到拖到的格子，占着那格的图换到它原来的位置
+  const cell = new Map();
+  let c = 0, r = 0, ser = null;
+  items.forEach(s => {
+    const k = series(s.no);
+    if (c > 0 && (c >= cols || k !== ser)) { c = 0; r++; }
+    cell.set(s.no, [c, r]); c++; ser = k;
+  });
+  const at = new Map([...cell].map(([no, p]) => [p.join(','), no]));
+  Object.entries(ui.gridPos).filter(([no, p]) => p.box === key && cell.has(no) && p.col < cols)
+    .sort((a, b) => a[1].t - b[1].t).forEach(([no, p]) => {
+      const from = cell.get(no), to = [p.col, p.row], kf = from.join(','), kt = to.join(',');
+      const other = at.get(kt);
+      if (other === no) return;
+      if (other) { cell.set(other, from); at.set(kf, other); } else at.delete(kf);
+      cell.set(no, to); at.set(kt, no);
+    });
+  return cell;
+}
 function layout() {
   laidOutAt = graphWidth();
   ALIAS = shortNames();
+  loadLayoutPrefs();
   const groups = {};
   S.sheets.forEach(s => (groups[s.discipline] ||= []).push(s));
   const discs = Object.keys(groups).sort((a, b) => DISC_ORDER.indexOf(a) - DISC_ORDER.indexOf(b));
-  const MAXW = laidOutAt, GAPX = 16, GAPY = 16, PAD = 12, GAP = 8, ROWH = NH + GAP, HEAD = 34;
+  const MAXW = laidOutAt, GAPX = 16, GAPY = 16, PAD = 12, GAP = GRID_GAP, ROWH = GRID_ROWH, HEAD = 34, SUBHEAD = 26, SUBPAD = 8;
   let x = 12, y = 12, rowH = 0, maxX = 0;
-  const bands = [], pos = {};
+  const bands = [], subs = [], drops = [], pos = {}, boxOf = {};
+  const place = (bw, bh) => {  // 大框从左往右排，放不下换行
+    if (x + bw > MAXW && x > 12) { x = 12; y += rowH + GAPY; rowH = 0; }
+    const at = [x, y];
+    x += bw + GAPX; rowH = Math.max(rowH, bh); maxX = Math.max(maxX, x);
+    return at;
+  };
   discs.forEach(d => {
     const items = groups[d];
+    const label = `${d}（${items.length}）`;
+    const minW = Math.max(150, Math.ceil(textW(label, 12, 400)) + 48);
+    if (ui.collapsedBoxes.has(d)) {  // 收起的大框只留标题
+      const [bx, by] = place(minW, HEAD);
+      bands.push({ key: d, label, x: bx, y: by, w: minW, h: HEAD, collapsed: true });
+      return;
+    }
     const cw = Math.max(60, ...items.map(s => Math.ceil(textW(ALIAS[s.no], 12.5, 600)) + 22));  // 同一专业的方块一样宽，排得整齐
-    const fit = Math.max(1, Math.floor((MAXW - 24 - PAD * 2 + GAP) / (cw + GAP)));
-    const cols = Math.min(fit, Math.max(1, Math.ceil(Math.sqrt(items.length * 2.2))));  // 少时接近方形，多时铺满一行
-    const rows = [];
-    let row = [], ser = null;
-    items.forEach(s => {
-      const k = series(s.no);
-      if (row.length && (row.length >= cols || k !== ser)) { rows.push(row); row = []; }
-      row.push(s); ser = k;
+    const types = {};
+    items.forEach(s => (types[sheetType(s)] ||= []).push(s));
+    const tkeys = Object.keys(types).sort((a, b) => TYPE_ORDER.indexOf(a) - TYPE_ORDER.indexOf(b));
+    const split = items.length >= SUB_MIN && tkeys.length > 1;
+    const parts = split ? tkeys.map(t => ({ key: `${d}|${t}`, label: `${t}（${types[t].length}）`, items: types[t] }))
+      : [{ key: d, label: null, items }];
+    const inner = split ? SUBPAD : 0, head = split ? SUBHEAD : 0;
+    const fit = Math.max(1, Math.floor((MAXW - 24 - PAD * 2 - inner * 2 + GAP) / (cw + GAP)));
+    const cols = Math.min(fit, Math.max(1, Math.ceil(Math.sqrt(Math.max(...parts.map(q => q.items.length)) * 2.2))));  // 少时接近方形，多时铺满一行
+    let top = HEAD, bw = minW;
+    const placed = parts.map(q => {
+      const collapsed = split && ui.collapsedBoxes.has(q.key);
+      const cell = collapsed ? new Map() : boxCells(q.items, cols, q.key);
+      const used = [...cell.values()];
+      const ncol = used.length ? Math.max(...used.map(c => c[0])) + 1 : 0;
+      const nrow = used.length ? Math.max(...used.map(c => c[1])) + 1 : 0;
+      const cellsW = ncol ? ncol * (cw + GAP) - GAP : 0;
+      const w = split ? Math.max(Math.ceil(textW(q.label, 12, 400)) + 40, cellsW + inner * 2) : cellsW;
+      const h = head + (nrow ? nrow * ROWH - GAP + inner : 0);
+      const r = { ...q, collapsed, cell, nrow, w, h, top };
+      top += h + (split ? GAP : 0);
+      bw = Math.max(bw, w + PAD * 2);
+      return r;
     });
-    if (row.length) rows.push(row);
-    const bw = Math.max(...rows.map(r => r.length)) * (cw + GAP) - GAP + PAD * 2;
-    const bh = HEAD + rows.length * ROWH - GAP + PAD;
-    if (x + bw > MAXW && x > 12) { x = 12; y += rowH + GAPY; rowH = 0; }
-    bands.push({ d, x, y, w: Math.max(bw, 120), h: bh, n: items.length });
-    rows.forEach((r, ri) => r.forEach((s, ci) => { pos[s.no] = { x: x + PAD + ci * (cw + GAP), y: y + HEAD + ri * ROWH, w: cw, h: NH }; }));
-    x += Math.max(bw, 120) + GAPX; rowH = Math.max(rowH, bh); maxX = Math.max(maxX, x);
+    const bh = (split ? top - GAP : top) + PAD;
+    const [bx, by] = place(bw, bh);
+    bands.push({ key: d, label, x: bx, y: by, w: bw, h: bh, collapsed: false });
+    placed.forEach(q => {
+      const qx = bx + PAD, qy = by + q.top, cx0 = qx + inner, cy0 = qy + head;
+      if (split) subs.push({ key: q.key, label: q.label, x: qx, y: qy, w: q.w, h: q.h, collapsed: q.collapsed });
+      if (q.collapsed) return;
+      drops.push({ key: q.key, x: qx, y: qy, w: split ? q.w : bw - PAD * 2, h: q.h, cx0, cy0, cols, rows: q.nrow, cw });
+      q.cell.forEach(([c, r], no) => {
+        pos[no] = { x: cx0 + c * (cw + GAP), y: cy0 + r * ROWH, w: cw, h: NH };
+        boxOf[no] = q.key;
+      });
+    });
   });
-  return { bands, pos, w: Math.max(maxX, 400), h: y + rowH + 12 };
+  return { bands, subs, drops, pos, boxOf, w: Math.max(maxX, 400), h: y + rowH + 12 };
+}
+function boxHead(key, label, x, y, w, h, collapsed) {  // 框的标题：点一下收起或展开
+  const g = sv('g', { class: 'boxhead', tabindex: 0, role: 'button', 'aria-expanded': String(!collapsed),
+    'aria-label': `${label}，${collapsed ? '点击展开' : '点击收起'}` });
+  g.append(sv('rect', { class: 'hit', x, y, width: w, height: h }));
+  g.append(sv('text', { class: 'band-label', x: x + 6, y: y + h / 2 + 4 }, `${collapsed ? '▸' : '▾'} ${label}`));
+  const toggle = () => {
+    if (ui.collapsedBoxes.has(key)) ui.collapsedBoxes.delete(key); else ui.collapsedBoxes.add(key);
+    saveLayoutPrefs(); buildGraph();
+  };
+  g.addEventListener('click', toggle);
+  g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
+  return g;
+}
+function revealSheet(no) {  // 图在收起的框里：把它所在的框展开
+  const s = sheetBy[no];
+  if (!s || nodeBox[no] || net.on) return;
+  const keys = [s.discipline, `${s.discipline}|${sheetType(s)}`].filter(k => ui.collapsedBoxes.has(k));
+  if (!keys.length) return;
+  keys.forEach(k => ui.collapsedBoxes.delete(k));
+  saveLayoutPrefs(); buildGraph();
+}
+/* 拖动方块排版：按住拖，松手吸附到最近的格子；拖到别的图上两张互换，拖出自己的框放回原处 */
+let gdrag = null, justDragged = false;
+function svgPoint(ev) {
+  const m = gsvg.getScreenCTM();
+  return m ? new DOMPoint(ev.clientX, ev.clientY).matrixTransform(m.inverse()) : { x: ev.clientX, y: ev.clientY };
+}
+function startDrag(ev, no, g) {
+  if (ev.button !== 0) return;
+  gdrag = { no, g, p0: svgPoint(ev), sx: ev.clientX, sy: ev.clientY, dx: 0, dy: 0, moved: false, id: ev.pointerId };
+  try { g.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+}
+gsvg.addEventListener('pointermove', ev => {
+  if (!gdrag || ev.pointerId !== gdrag.id) return;
+  if (!gdrag.moved && Math.hypot(ev.clientX - gdrag.sx, ev.clientY - gdrag.sy) < 5) return;  // 手抖不算拖
+  gdrag.moved = true;
+  const p = svgPoint(ev);
+  gdrag.dx = p.x - gdrag.p0.x; gdrag.dy = p.y - gdrag.p0.y;
+  gdrag.g.classList.add('dragging');
+  gdrag.g.style.transform = `translate(${gdrag.dx}px, ${gdrag.dy}px)`;
+  hideTip();
+});
+function endDrag(ev, cancel) {
+  if (!gdrag || ev.pointerId !== gdrag.id) return;
+  const d = gdrag;
+  gdrag = null;
+  d.g.classList.remove('dragging'); d.g.style.transform = '';
+  if (!d.moved || cancel) return;
+  justDragged = true; setTimeout(() => { justDragged = false; }, 0);  // 松手后紧跟的 click 不算点开
+  dropSheet(d.no, d.dx, d.dy);
+}
+gsvg.addEventListener('pointerup', ev => endDrag(ev));
+gsvg.addEventListener('pointercancel', ev => endDrag(ev, true));
+function dropSheet(no, dx, dy) {
+  const L = lastLayout, p = L && L.pos[no], b = L && L.drops.find(q => q.key === L.boxOf[no]);
+  if (!p || !b) return;
+  const cx = p.x + p.w / 2 + dx, cy = p.y + p.h / 2 + dy;
+  if (cx < b.x - 10 || cx > b.x + b.w + 10 || cy < b.y || cy > b.y + b.h + GRID_ROWH) return;  // 拖出了自己的框：放回原处
+  const col = Math.max(0, Math.min(b.cols - 1, Math.round((cx - b.cx0 - b.cw / 2) / (b.cw + GRID_GAP))));
+  const row = Math.max(0, Math.min(b.rows, Math.round((cy - b.cy0 - NH / 2) / GRID_ROWH)));  // 拖到最后一行下面就新起一行
+  ui.gridPos[no] = { box: b.key, col, row, t: Date.now() };
+  saveLayoutPrefs(); buildGraph();
 }
 function clip(cx, cy, tx, ty, w, h) {
   const dx = tx - cx, dy = ty - cy;
@@ -614,6 +760,7 @@ function buildGraph() {
     return;
   }
   const L = layout();
+  lastLayout = L;
   nodeBox = L.pos;
   if (net.on) { netBuild(); netKick(0.3); }  // 关系网也跟着新数据重建，已有的点留在原处
   gsvg.setAttribute('viewBox', `0 0 ${L.w} ${L.h}`);
@@ -626,12 +773,17 @@ function buildGraph() {
   gsvg.append(defs);
   L.bands.forEach(b => {
     gsvg.append(sv('rect', { class: 'band', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10 }));
-    gsvg.append(sv('text', { class: 'band-label', x: b.x + 12, y: b.y + 22 }, `${b.d}（${b.n}）`));
+    gsvg.append(boxHead(b.key, b.label, b.x + 6, b.y + 4, b.w - 12, 26, b.collapsed));
+  });
+  L.subs.forEach(q => {
+    gsvg.append(sv('rect', { class: 'subbox', x: q.x, y: q.y, width: q.w, height: q.h, rx: 8 }));
+    gsvg.append(boxHead(q.key, q.label, q.x + 2, q.y + 2, q.w - 4, 22, q.collapsed));
   });
   edgeLayer = sv('g');
   gsvg.append(edgeLayer);
   S.sheets.forEach(s => {
     const p = L.pos[s.no];
+    if (!p) return;  // 在收起的框里
     const g = sv('g', { class: `node st-${s.status}`, tabindex: 0, role: 'button',
       'aria-label': `${s.no} ${s.title || ''}，${STATUS[s.status]}${(s.versions || []).length > 1 ? `，${s.versions.length} 个版本` : ''}` });
     g.append(sv('rect', { class: 'ring', x: p.x - 3, y: p.y - 3, width: p.w + 6, height: p.h + 6, rx: 9 }));
@@ -643,7 +795,8 @@ function buildGraph() {
     const flag = s.status !== 'current' ? s.status : s.inner ? 'inner' : null;  // 右上角小圆点：升版、变更、冲突、缺失……
     if (flag) g.append(sv('circle', { class: `flag f-${flag}`, cx: p.x + p.w - 5, cy: p.y + 5, r: 3.5 }));
     const open = () => { ui.focusSet = null; ui.backTo = null; hideTip(); selectSheet(s.no); };
-    g.addEventListener('click', open);
+    g.addEventListener('click', () => { if (!justDragged) open(); });
+    g.addEventListener('pointerdown', ev => startDrag(ev, s.no, g));
     g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
     g.addEventListener('mouseenter', () => { showTip(s, g.getBoundingClientRect()); hoverSheet(s.no); });
     g.addEventListener('mouseleave', () => { hideTip(); hoverSheet(null); });
@@ -687,15 +840,15 @@ const net = { on: false, colorBy: 'type', nodes: [], byNo: {}, links: [], anchor
   k: 1, tx: 0, ty: 0, alpha: 0, raf: 0, hover: null, drag: null, userView: false };
 const TYPE_ORDER = ['目录说明', '平面图', '配筋图', '立面剖面', '详图大样', '系统图', '表格', '其他'];
 const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948', '#b07aa1', '#9c755f', '#ff9da7', '#bab0ac'];
-function sheetType(s) {
+function sheetType(s) {  // 图类：中文、英文图名都认
   const t = s.title || '';
-  if (/目录|说明/.test(t)) return '目录说明';
-  if (/系统/.test(t)) return '系统图';
-  if (/立面|剖面/.test(t)) return '立面剖面';
-  if (/详图|大样|节点/.test(t)) return '详图大样';
-  if (/配筋|梁|板|墙柱/.test(t)) return '配筋图';
-  if (/表/.test(t)) return '表格';
-  if (/平面|布置/.test(t)) return '平面图';
+  if (/目录|说明|图例|封面|cover|drawing (?:list|register|index|schedule)|document register|general notes|\bnotes?\b|legend|issue sheet/i.test(t)) return '目录说明';
+  if (/系统|schematic|riser|single line|one line/i.test(t)) return '系统图';
+  if (/立面|剖面|elevation|section/i.test(t)) return '立面剖面';
+  if (/详图|大样|节点|detail/i.test(t)) return '详图大样';
+  if (/配筋|梁|板|墙柱|reinforcement|rebar/i.test(t)) return '配筋图';
+  if (/表|schedule|table/i.test(t)) return '表格';
+  if (/平面|布置|\bplans?\b|layout|\bga\b|general arrangement|setting out/i.test(t)) return '平面图';
   return '其他';
 }
 const netGroup = s => net.colorBy === 'type' ? sheetType(s) : s.discipline;
@@ -907,9 +1060,10 @@ function setGraphMode(m) {
   document.getElementById('g-color').hidden = !net.on;
   document.getElementById('net-legend').hidden = !net.on;
   document.getElementById('grid-legend').hidden = net.on;
+  updateResetBtn();
   document.getElementById('graph-hint').textContent = net.on
     ? '滚轮缩放，拖动空白处平移，拖动圆点调整位置，双击空白处看全图；鼠标指向圆点看源文件和说明，点击打开图纸卡片。'
-    : '鼠标指向图纸看源文件和说明，点击看详情；选中后只突出它的直接关联。红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。';
+    : '点框的标题收起或展开；按住方块拖动排版，松手吸附到格子。鼠标指向图纸看源文件和说明，点击看详情；红色连线指向缺失的图纸；图纸很多时只画选中或指向的那张图的连线。';
   try { localStorage.setItem('bidbench.graphMode', m); } catch (e) { /* 忽略 */ }
   hideTip();
   if (!S) return;
@@ -1325,7 +1479,7 @@ function setView(v) {
   else if (Math.abs(graphWidth() - laidOutAt) > 40) buildGraph();  // 在思维导图页时改过窗口大小
   else paintGraph();
 }
-function selectSheet(no) { ui.selD = no; ui.selF = null; paintGraph(); renderMind(); renderSheet(no); }
+function selectSheet(no) { revealSheet(no); ui.selD = no; ui.selF = null; paintGraph(); renderMind(); renderSheet(no); }
 function selectFact(key) { ui.selF = key; ui.selD = null; ui.focusSet = null; ui.backTo = null; renderMind(); paintGraph(); renderFact(key); }
 function jumpSheet(no) { ui.focusSet = null; ui.backTo = null; setView('graph'); selectSheet(no); }
 function jumpFact(key) {
@@ -1819,6 +1973,7 @@ function renderJob(j) {
 document.getElementById('tab-graph').addEventListener('click', () => setView('graph'));
 document.getElementById('tab-facts').addEventListener('click', () => setView('facts'));
 document.getElementById('clear').addEventListener('click', clearAll);
+document.getElementById('g-reset').addEventListener('click', () => { ui.collapsedBoxes = new Set(); ui.gridPos = {}; saveLayoutPrefs(); buildGraph(); });
 document.getElementById('g-mode-grid').addEventListener('click', () => setGraphMode('grid'));
 document.getElementById('g-mode-net').addEventListener('click', () => setGraphMode('net'));
 document.getElementById('g-color').addEventListener('change', e => {
@@ -1829,6 +1984,7 @@ document.getElementById('g-search').addEventListener('input', e => {
   if (!S) return;
   const hits = searchSheets(e.target.value);
   ui.focusSet = e.target.value.trim() ? new Set(hits.map(s => s.no)) : null;
+  if (hits.length) revealSheet(hits[0].no);
   paintGraph();
   if (hits.length && net.on) netCenter(hits[0].no);
   else if (hits.length && nodeEls[hits[0].no]) nodeEls[hits[0].no].scrollIntoView({ block: 'nearest', inline: 'nearest' });
