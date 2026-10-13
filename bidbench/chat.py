@@ -203,6 +203,9 @@ class Chat:
     def state(self) -> dict:
         with self.lock:
             turns = [asdict(t) for t in self.turns[-SHOW_TURNS:]]
+        # “还在回答”取自同一份快照：下面读提议的工夫里回答可能刚好完成，
+        # 若另算，界面会拿到“不在回答、最后一轮却还在查”，停在“正在查”不再刷新
+        running = bool(turns) and turns[-1]["status"] == "running"
         ids = sorted({i for t in turns for i in t["proposals"]})
         info = {}
         if ids:
@@ -213,7 +216,7 @@ class Chat:
                                      "summary": _summary(r["kind"], json.loads(r["payload"])), "outcome": r["outcome"]}
         for t in turns:
             t["proposals"] = [info[i] for i in t["proposals"] if i in info]
-        return {"conversation": self.conversation, "running": self.running, "turns": turns}
+        return {"conversation": self.conversation, "running": running, "turns": turns}
 
     def _max_proposal(self) -> int:
         with self.proj.connect() as con:

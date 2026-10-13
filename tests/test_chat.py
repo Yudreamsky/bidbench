@@ -133,6 +133,23 @@ def test_stop_errors_and_guards(demo_copy):
         c3.ask("   ")
 
 
+def test_state_running_matches_last_turn(demo_copy, monkeypatch):
+    """“还在回答”和最后一轮的状态来自同一时刻：读提议的工夫里回答刚好完成，也不能出现
+    “不在回答、最后一轮却还在查”（界面会停止刷新，一直显示“正在查”）。"""
+    c = chat.Chat(demo_copy, runner=FakeCodex(demo_copy), find=lambda: FAKE)
+    turn = chat.Turn(id="t1", question="还缺哪些图？", model="m", started="2026-10-13T00:00:00", proposals=[1])
+    c.turns.append(turn)
+    real = demo_copy.connect
+
+    def connect_and_finish():  # 读提议时，后台线程正好把这一轮标成完成
+        turn.status = "done"
+        return real()
+    monkeypatch.setattr(demo_copy, "connect", connect_and_finish)
+    st = c.state()
+    assert st["running"] is True and st["turns"][-1]["status"] == "running"
+    assert c.state()["running"] is False  # 下一次就看到完成
+
+
 def test_step_text_hides_free_text():
     assert chat.step_text("get_sheet", {"no": "建施-05"}) == "图纸详情 建施-05"
     assert chat.step_text("propose_issue_resolution", {"issue_id": "void:建施-05", "option": "1", "reason": "很长的理由"}) == \
