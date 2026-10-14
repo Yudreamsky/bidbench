@@ -259,7 +259,8 @@ def next_steps(st: dict) -> dict:
         done = f"已识别 {rec['recognized']} 页。" if rec.get("recognized") else ""
         add("recognize", "recognize", f"看图识别：还有 {left} 页",
             done + "没识别的页是按文件名暂定的（图谱里的虚线框），不拿来判断缺图和版本；识别以后才能查缺图、比版本、对数字。"
-            "先在「识别」里估算要多久，可以只识别一部分（先目录、说明、平面）。识别会把图纸页面发到外部，涉密的先确认能不能发。",
+            "在「识别」里估算后分步来：先识别重点图（目录、变更单、清单和表），再平面、立面、剖面，详图和说明正文用到再识别。"
+            "识别会把图纸页面发到外部，涉密的先确认能不能发。",
             "recognize", [f"left:{left}"])
     props = [p for p in st.get("proposals") or [] if p["kind"] != "numbering"]
     if props:

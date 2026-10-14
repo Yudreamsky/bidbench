@@ -242,8 +242,10 @@ def test_workbench_codex_flow(demo_copy, monkeypatch):
                                                      "model": "gpt-6.1-sol"}
         assert "task" not in res and res["priorities"]  # 估算不再生成任务包，只给出分档计划
         assert "选一档" in c.post("/api/job", {"kind": "recognize", "executor": "codex", "priorities": []})["error"]
+        assert "选一步" in c.post("/api/job", {"kind": "recognize", "executor": "codex", "stages": ["xx"]})["error"]
+        assert res["stages"] and res["map"]["pages"] > 0  # 分步识别：工作台按步勾选
         j = c.job("recognize", executor="codex", scope=res["scope"], tier="economy", model=res["model"],
-                  priorities=[g["key"] for g in res["priorities"]])
+                  stages=[st["key"] for st in res["stages"] if st["left"]])
         assert j["status"] == "done" and j["title"] == "Codex 识别（经济档）", j
         assert any("✓" in ln for ln in j["lines"]) and j["result"]["imported"] > 0 and j["imported"] > 0
         monkeypatch.setattr(ops, "codex_status", lambda refresh=False: _fake_status(ready=False))
