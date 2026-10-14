@@ -12,8 +12,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import debuglog, numbering, oplog, ops, recognition, state
-from .store import Project, add_decision, now_iso
+from . import debuglog, guide, numbering, oplog, ops, recognition, state
+from .store import Project, add_decision, latest_decisions, now_iso, revoke_decision
 
 SOURCE = "命令行"
 log = logging.getLogger(__name__)
@@ -125,6 +125,16 @@ def cmd_decide(args):
             return 1
     add_decision(proj, args.kind, args.key, args.value, args.note)
     print(f"已记录决定：{args.kind} {args.key} = {args.value}")
+
+
+def cmd_revoke(args):
+    proj = _proj(args)
+    with proj.connect() as con:
+        d = latest_decisions(con).get((args.kind, args.key))
+    if not d:
+        sys.exit(f"错误：{args.kind} {args.key} 没有做过决定，或者已经撤回了")
+    revoke_decision(proj, args.kind, args.key, args.note)
+    print(f"已撤回：{guide.decision_text(args.kind, args.key, d['value'])}。问题会重新出现，可以重新决定。")
 
 
 def cmd_baseline(args):
@@ -510,13 +520,20 @@ def main(argv=None):
     s.add_argument("--as-of", type=int, help="还原到第几批的状态")
     s.set_defaults(fn=cmd_build)
 
+    kinds = ["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev",
+             "name_check", "file_tower", "tower_alias", "rev_check", "floor_base", "numbering"]
     s = sub.add_parser("decide", help="记录人工决定")
-    s.add_argument("kind", choices=["sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev",
-                                    "name_check", "file_tower", "tower_alias", "rev_check", "floor_base", "numbering"])
+    s.add_argument("kind", choices=kinds)
     s.add_argument("key")
     s.add_argument("value")
     s.add_argument("--note")
     s.set_defaults(fn=cmd_decide)
+
+    s = sub.add_parser("revoke", help="撤回一个人工决定（问题会重新出现）")
+    s.add_argument("kind", choices=kinds)
+    s.add_argument("key")
+    s.add_argument("--note")
+    s.set_defaults(fn=cmd_revoke)
 
     s = sub.add_parser("baseline", help="为建模等任务锁定图纸基线")
     s.add_argument("name")

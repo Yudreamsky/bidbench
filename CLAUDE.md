@@ -13,6 +13,7 @@
 - 楼层：`floors.parse_floors` 换算第几层，`floors.floor_names` 留原叫法（`state._set_floors` 写成 floors_name，如“Level 05（6F）”）；英文楼层数法由 `state._floor_bases` 决定（软件猜 + 人工决定 floor_base，键是 * 或塔楼）。
 - 识别结果的格式以 `bidbench/spec/schema.json` 为准；改格式要同步改 `spec/任务说明.md`、模拟执行器和测试。
 - 拿不准的判断（版本、作废、冲突）不要自动拍板，生成问题并给出决定选项。
+- 指引在 `bidbench/guide.py`：问题中心的“下一步”（`next_steps`）、每种问题的“怎么选？”（`HELP`，按问题编号冒号前那段找）、决定写成人话（`decision_text`，日志也用它）。加新问题时同时写 `HELP`（`tests/test_guide.py` 会查）。撤回决定是再记一条 kind 为 revoke 的决定（`store.revoke_decision`），`latest_decisions` 把那一项当作没决定过。
 - `bidbench/web/index.html` 是本地工具，不加载任何外部资源（字体、CDN），图纸不出电脑。
 - 新的到图情况先在 `samples/make_sample.py` 里加一个合成案例，再写对应测试。
 - 智能分类在 `bidbench/classify.py`：只发图号、图名、所在文件夹和事实的名称、示例数值，不发页面；AI 的回答存 `classifications` 表，`state.py` 套用。专业只在按图号认不出（“其他”）时用 AI 的，台账、缺图、冲突的判断不能依赖分类结果。测试用 FakeCodex 或假的 Claude 客户端（`tests/conftest.py` 不许测试调用真的 Codex、Claude）。

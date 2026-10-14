@@ -387,6 +387,8 @@ def build(proj: Project, as_of: int | None = None, log: Log = print) -> dict:
         if i["level"] != "info":
             log(f"  {'●' if i['level'] == 'crit' else '○'} [{i['kind']}] {i['title']}")
     log(("历史状态报告（reports/" + sub + "）：" if sub else "报告：") + "、".join(p.name for p in files))
+    if is_latest and st["guide"]["tasks"]:  # 和工作台问题中心最上面的“下一步”一样
+        log(f"下一步：{st['guide']['tasks'][0]['title']}")
     return {"as_of": st["as_of"], "crit": crit, "warn": warn, "reports": str(proj.root / "reports")}
 
 

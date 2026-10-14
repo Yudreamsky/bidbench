@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from . import appconfig, classify, numbering, recognition, reports, state
+from . import appconfig, classify, guide, numbering, recognition, reports, state
 from .recognition import page_markdown
 from .state import CONF_LABEL, STATUS_LABEL
 from .store import Project, add_decision, now_iso
@@ -89,7 +89,9 @@ class Toolkit:
             "risk_files_pending": st["security"]["pending"],
             "pending_proposals": len(st["proposals"]),
             "notes": [f"{n['topic']}：{n['text']}" for n in st["notes"]],
-            "hint": "逐层往下查：list_sheets / get_sheet 看图纸，list_facts / get_fact 看事实，list_issues 看问题。",
+            "next_steps": [f"{t['title']}：{t['text']}" for t in st["guide"]["tasks"]][:4],
+            "hint": "逐层往下查：list_sheets / get_sheet 看图纸，list_facts / get_fact 看事实，list_issues 看问题。"
+                    "用户问下一步做什么时，按 next_steps 的顺序说，第一条就是工作台问题中心最上面的“下一步”。",
         }
 
     def list_batches(self) -> list[dict]:
@@ -268,8 +270,9 @@ class Toolkit:
                          "kind": i["kind"], "title": i["title"], "detail": i["detail"],
                          "options": [] if i["kind"] == "风险文件" else [o["label"] for o in i["options"]],
                          "confirmed": i.get("confirmed", False)})
-        return {"total": len(rows), "issues": rows,
-                "hint": "要处理某个问题，用 propose_issue_resolution(issue_id, option) 提议，等用户确认。"}
+        return {"total": len(rows), "issues": rows, "how_to_choose": guide.help_for(rows),
+                "hint": "how_to_choose 按问题编号冒号前那段写着：是什么、怎么看、拿不准怎么选、选了以后，和工作台里的“怎么选？”是同一份；"
+                        "用户问怎么选时照它说。要处理某个问题，用 propose_issue_resolution(issue_id, option) 提议，等用户确认。"}
 
     def draft_qa(self) -> dict:
         return {"draft": reports.qa_report(self._state()),

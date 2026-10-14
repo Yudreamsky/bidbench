@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
-from . import classify, floors, names, numbering, pdfpages, risk, towers
+from . import classify, floors, guide, names, numbering, pdfpages, risk, towers
 from .ingest import FOLDER_MARK
 from .recognition import HIGH_SCORE, LOW_SCORE, weak_reason
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
@@ -548,15 +548,33 @@ def _assistant_rows(con) -> dict:
     return {"proposals": props, "notes": notes}
 
 
+def _guide(st: dict, decisions: dict, pages=(), cad=None) -> None:
+    """指引（bidbench/guide.py）：下一步、各种问题的“怎么选？”、现在起作用的人工决定（写上文件名，能撤回）。"""
+    names: dict[str, str] = {}
+    for p in pages:
+        name = p.paths[0].split(" / ")[-1]
+        names.setdefault(p.file_sha[:12], name)
+        names.setdefault(p.page_id, f"批次#{p.first_batch} 的 {name}")
+    for sha, paths in (cad or {}).items():
+        names.setdefault(sha[:12], paths[0].split(" / ")[-1])
+    for f in (st.get("security") or {}).get("files", []):
+        names.setdefault(f["key"], f["name"])
+    st["guide"] = guide.next_steps(st)
+    st["issue_help"] = guide.help_for(st["issues"])
+    st["decided"] = guide.decided(decisions, names)
+
+
 def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> dict:
     with proj.connect() as con:
         batches = [dict(b) for b in con.execute("SELECT * FROM batches ORDER BY seq")]
         assistant = _assistant_rows(con)
         if not batches:
-            return {"project": proj.meta, "generated_at": now_iso(), "as_of": 0, "batches": [], "sheets": [],
-                    "edges": [], "issues": [], "facts": {"groups": []}, "baselines": [], "notices": [],
-                    "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}},
-                    "security": {"files": [], "scans": [], "pending": 0}, "classification": None, **assistant}
+            st = {"project": proj.meta, "generated_at": now_iso(), "as_of": 0, "batches": [], "sheets": [],
+                  "edges": [], "issues": [], "facts": {"groups": []}, "baselines": [], "notices": [],
+                  "floor_coverage": [], "recognition": {"pages": 0, "recognized": 0, "executors": {}},
+                  "security": {"files": [], "scans": [], "pending": 0}, "classification": None, **assistant}
+            _guide(st, latest_decisions(con))
+            return st
         labels = classify.load_labels(con)
         as_of = as_of or batches[-1]["seq"]
         batches = [b for b in batches if b["seq"] <= as_of]
@@ -586,6 +604,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
     state["security"] = _security(risk_rows, scans, risk_paths, decisions, state["issues"])
     state["issues"].sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
     state.update(assistant)
+    _guide(state, decisions, pages, cad)
     if with_diff and as_of > 1:
         prev = build(proj, as_of - 1, with_diff=False)
         state["diff"] = diff_states(prev, state)
@@ -1372,8 +1391,7 @@ def _fact_int(facts: dict, key: str) -> tuple[int | None, str | None]:
     return None, None
 
 
-BASE_LABEL = {1: "Level 00（Ground）是首层，Level 01 是 2F", 0: "Level 01 是首层（1F）"}
-BASE_SHORT = {1: "按英式数：Level 00 是首层", 0: "Level 01 是首层"}
+BASE_LABEL, BASE_SHORT = floors.BASE_LABEL, floors.BASE_SHORT
 
 
 def _base_guess(sheets: list) -> tuple[int, str]:

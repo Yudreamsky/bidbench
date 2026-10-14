@@ -12,6 +12,9 @@ from __future__ import annotations
 import re
 
 ROOF = 1000  # 屋顶，排在所有地上楼层之后
+# 英文楼层的两种数法（人工决定 floor_base 的值）：1 是英式，Ground 是首层、Level 01 是 2F；0 是 Level 01 就是首层
+BASE_LABEL = {1: "Level 00（Ground）是首层，Level 01 是 2F", 0: "Level 01 是首层（1F）"}
+BASE_SHORT = {1: "按英式数：Level 00 是首层", 0: "Level 01 是首层"}
 
 _CN = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 NUM = r"(?:\d{1,3}|[零〇一二两三四五六七八九十]{1,4})"

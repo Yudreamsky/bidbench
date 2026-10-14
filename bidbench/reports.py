@@ -171,7 +171,8 @@ def floor_section(state: dict) -> list[str]:
 
 
 def qa_report(state: dict) -> str:
-    """答疑问题清单：高可靠的缺图、已确认要图的缺图、版本冲突、真实的事实矛盾、目录与收图版次不符。"""
+    """答疑问题清单：高可靠的缺图、已确认要图的缺图、版本冲突、真实的事实矛盾、目录与收图版次不符，
+    以及点了“列入答疑”的文件名不符、改图未升版、风险文件。"""
     items = []
     for s in state["sheets"]:
         if s["status"] == "missing" and (s.get("missing_level") == "高" or s.get("confirmed")):
@@ -186,7 +187,7 @@ def qa_report(state: dict) -> str:
             items.append(f"{i['title']}：{i['detail']}请澄清。")
         if i["kind"] == "目录版次" and (i["level"] == "crit" or i["confirmed"]):
             items.append(i["qa"])
-        if i["kind"] == "文件名不符" and i["confirmed"]:
+        if i["kind"] in ("文件名不符", "改图未升版") and i["confirmed"]:
             items.append(i["qa"])
     for f in (state.get("security") or {}).get("files", []):
         if f["decision"] == "dangerous":
