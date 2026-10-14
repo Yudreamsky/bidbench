@@ -134,6 +134,14 @@ CREATE TABLE IF NOT EXISTS baselines(
   snapshot TEXT NOT NULL,
   note TEXT
 );
+CREATE TABLE IF NOT EXISTS cad_reads(
+  sha256 TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  reader TEXT NOT NULL,
+  sheets INTEGER NOT NULL,
+  detail TEXT,
+  read_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS classifications(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,

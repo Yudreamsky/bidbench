@@ -1,9 +1,10 @@
-"""打包后的自检：用打出来的 bidbench.exe 跑一遍演示流水线，再连一次 MCP。
+"""打包后的自检：用打出来的 bidbench.exe 跑一遍演示流水线，再连一次 MCP，再读一批 DWG。
 
 python packaging/smoke.py <bidbench.exe 路径> <工作目录>
 """
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +38,20 @@ def main() -> None:
     run(exe, "-p", str(proj), "export", "current")
     run(exe, "-p", str(proj), "recognize", "--executor", "claude", "--dry-run")  # 只估算：确认 anthropic 和渲染都打包进来了
     asyncio.run(mcp_check(exe, proj))
+    dwg_check(exe, work)
     print("自检通过")
+
+
+def dwg_check(exe, work):
+    """安装包里带的 LibreDWG 要能读出 DWG 的图签：收两份合成的 DWG（tests/data/dwg），一份模型空间里两张图，一份三个布局。"""
+    folder = work / "dwg-in"
+    folder.mkdir()
+    for name in ("model.dwg", "layouts.dwg"):
+        shutil.copy(ROOT / "tests" / "data" / "dwg" / name, folder / name)
+    proj = work / "dwg-proj"
+    run(exe, "init", str(proj), "--name", "DWG 自检")
+    out = run(exe, "-p", str(proj), "receive", str(folder), "--date", "2026-10-01", "--no-av")
+    assert "认出 5 张图" in out, out
 
 
 async def mcp_check(exe, proj):

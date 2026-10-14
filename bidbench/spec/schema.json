@@ -585,8 +585,10 @@
       "enum": [
         "text_layer",
         "vision",
-        "both"
-      ]
+        "both",
+        "cad"
+      ],
+      "description": "cad 只由软件读 DWG、DXF 时使用（docs/图纸字段.md 9.6），看图识别不用"
     },
     "confidence": {
       "type": "number",

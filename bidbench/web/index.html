@@ -1648,6 +1648,7 @@ function taskButtons(t) {  // 每件事的按钮：第一个是主要的（“�
   const b = (text, fn) => ({ text, fn });
   if (t.action === 'receive') return [b('收图', renderReceive)];
   if (t.action === 'recognize') return [b('去识别', () => renderRecognize())];
+  if (t.action === 'read_dwg') return [b('读 DWG', () => startJob('read_dwg', {}))];
   if (t.action === 'export') return [b('导出', renderExport), b('打开报告文件夹', openReports), b('锁定基线', () => showBlock('baseline'))];
   if (t.action === 'proposals') return [b('去核对', () => showBlock('proposals'))];
   if (t.action === 'numbering') return S.numbering && S.numbering.status === 'guess'

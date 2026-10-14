@@ -50,6 +50,9 @@ jobs:
       - name: 生成图标
         run: python packaging/make_icon.py
 
+      - name: 取 LibreDWG（读 DWG）
+        run: python packaging/fetch_libredwg.py packaging/build/libredwg
+
       - name: 打包
         run: pyinstaller packaging/bidbench.spec --noconfirm --clean --distpath dist --workpath build
 

@@ -153,6 +153,7 @@ def pages_to_recognize(con, include_done: bool = False, scope: str = "new", only
                (SELECT MIN(o.path) FROM occurrences o WHERE o.sha256 = p.file_sha256) AS first_path,
                (SELECT COUNT(*) FROM pages p2 WHERE p2.file_sha256 = p.file_sha256) AS page_count
         FROM pages p JOIN files f ON f.sha256 = p.file_sha256
+        WHERE f.kind = 'pdf'
         ORDER BY first_path, p.page_index
         """
     ).fetchall()

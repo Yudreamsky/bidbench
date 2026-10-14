@@ -1,6 +1,7 @@
 # PyInstaller 打包配置：一个文件夹里放两个程序，共用同一套库。
 #   bidbench-desktop.exe  桌面工作台（无控制台窗口）
 #   bidbench.exe          命令行，AI 助手（MCP）也用它
+#   _internal/libredwg/   LibreDWG 的 dwgread.exe（读 DWG，GPLv3，附许可证），先运行 packaging/fetch_libredwg.py
 # 用法（仓库根目录）：pyinstaller packaging/bidbench.spec --noconfirm --clean
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -9,6 +10,9 @@ import os
 HERE = SPECPATH  # noqa: F821 - PyInstaller 提供
 ROOT = os.path.dirname(HERE)
 datas = collect_data_files("bidbench")
+LIBREDWG = os.path.join(HERE, "build", "libredwg")  # 读 DWG 用的 LibreDWG（packaging/fetch_libredwg.py 取来），单独的程序
+if os.path.isdir(LIBREDWG):
+    datas.append((LIBREDWG, "libredwg"))
 hidden = (collect_submodules("bidbench")
           + collect_submodules("anthropic", filter=lambda m: "httpx_aiohttp" not in m)
           + collect_submodules("mcp", filter=lambda m: not m.startswith("mcp.cli"))

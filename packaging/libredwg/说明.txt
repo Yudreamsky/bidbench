@@ -1,0 +1,10 @@
+LibreDWG 0.13.3（读 DWG 用）
+
+投标图纸工作台调用这里的 dwgread.exe 读 DWG 的图签和文字。它是单独的程序，工作台只是调用它，没有改动、也没有链接进工作台。
+
+LibreDWG 是 GNU 项目，按 GNU 通用公共许可证第 3 版（GPLv3）发布，许可证全文见同目录的 COPYING。
+- 官方网站：https://www.gnu.org/software/libredwg/
+- 这里的程序原样取自官方发布的 Windows 版：
+  https://github.com/LibreDWG/libredwg/releases/download/0.13.3/libredwg-0.13.3-win64.zip
+- 对应的源代码：
+  https://github.com/LibreDWG/libredwg/releases/download/0.13.3/libredwg-0.13.3.tar.xz

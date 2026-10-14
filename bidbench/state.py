@@ -10,9 +10,9 @@ import json
 import re
 from collections import Counter, defaultdict
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from . import classify, floors, guide, names, numbering, pdfpages, risk, towers
+from . import classify, dwg, floors, guide, names, numbering, pdfpages, risk, towers
 from .ingest import FOLDER_MARK
 from .recognition import HIGH_SCORE, LOW_SCORE, weak_reason
 from .store import PLACEHOLDER_EXECUTORS, Project, latest_decisions, now_iso
@@ -36,7 +36,8 @@ NAMELESS = "文件："  # 文件名里看不出图号的文件，先用文件名
 SEP = " · "  # 多栋楼的项目里，图纸身份写成“塔楼 · 图号”（docs/图纸字段.md 9.1）
 CONF_LABEL = {"confirmed": "人工确认", "high": "高置信", "mid": "中置信", "low": "低置信", "conflict": "冲突"}
 CONF_RANK = {"confirmed": 4, "high": 3, "mid": 2, "low": 1}
-REC_SRC = {"text_layer": "看图识别（PDF 文字层）", "vision": "看图识别", "both": "看图识别（图像和文字层一致）"}
+REC_SRC = {"text_layer": "看图识别（PDF 文字层）", "vision": "看图识别", "both": "看图识别（图像和文字层一致）",
+           "cad": "DWG 图签"}
 AI_SRC = "AI 推测（智能分类）"  # AI 看名字推的，一律算把握低
 # 这次计算用的图号格式（numbering.Numbering，docs/图纸字段.md 9.5）：确认了的才用来定楼栋、去掉版次后缀；没确认的只用来分组显示
 _NUMBERING: ContextVar = ContextVar("bidbench_numbering", default=None)
@@ -556,6 +557,30 @@ def _val(rec, key):
     return (rec["title_block"].get(key) or {}).get("value")
 
 
+def _is_cad(p: PageRec) -> bool:
+    """从 DWG、DXF 读出的页（docs/图纸字段.md 9.7）。"""
+    return bool(p.rec) and p.rec["run"]["executor"] == dwg.EXECUTOR
+
+
+def _fits(group: list, p: PageRec) -> bool:
+    """同一版次里，这一页和这一份是不是同一份：同是 PDF（或同是 DWG）的比内容；DWG 和 PDF 配成一份（DWG 转出的 PDF）。"""
+    same = [x for x in group if _is_cad(x) == _is_cad(p)]
+    return _same_content(same[0], p) if same else True
+
+
+def _with_cad_refs(cp: PageRec, pages: list) -> PageRec:
+    """DWG 转出的 PDF 常常只有图签文字，图上的引用、外部参照只在 DWG 里：配成一份时，把 DWG 读出的并到 PDF 这一页上。"""
+    if _is_cad(cp):
+        return cp
+    have = {norm_no(r["target_drawing_no"]) for r in cp.rec["references"]}
+    extra = [r for x in pages if _is_cad(x) for r in x.rec["references"] if norm_no(r["target_drawing_no"]) not in have]
+    content = cp.rec.get("content") or {}
+    xrefs = sorted({*(content.get("xrefs") or ()), *(n for x in pages if _is_cad(x) for n in x.rec["content"].get("xrefs") or ())})
+    if not extra and xrefs == sorted(content.get("xrefs") or ()):
+        return cp
+    return replace(cp, rec={**cp.rec, "references": cp.rec["references"] + extra, "content": {**content, "xrefs": xrefs}})
+
+
 def _same_content(a: PageRec, b: PageRec) -> bool:
     if a.render_hash == b.render_hash:
         return True
@@ -613,10 +638,13 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
         file_counts = {r["batch_seq"]: dict(r) for r in con.execute(
             "SELECT o.batch_seq, COUNT(*) AS n, SUM(f.kind='pdf') AS pdf, SUM(o.depth>1) AS nested"
             " FROM occurrences o JOIN files f ON f.sha256=o.sha256 WHERE f.kind!='archive' GROUP BY o.batch_seq")}
-        cad: dict[str, list] = defaultdict(list)  # CAD 文件不能看图识别，只按名字暂定
+        cad: dict[str, list] = defaultdict(list)  # 没读出图的 CAD 文件（没读、读不出、DWF 等），只按名字暂定
         for r in con.execute("SELECT o.sha256, o.path FROM occurrences o JOIN files f ON f.sha256 = o.sha256"
-                             " WHERE f.kind = 'cad' AND o.batch_seq <= ? ORDER BY o.batch_seq, o.id", (as_of,)):
+                             " WHERE f.kind = 'cad' AND o.batch_seq <= ?"
+                             " AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.file_sha256 = f.sha256)"
+                             " ORDER BY o.batch_seq, o.id", (as_of,)):
             cad[r["sha256"]].append(r["path"])
+        cad_unread = len(dwg.unread(con))  # 还没读过的 DWG、DXF（docs/图纸字段.md 9.7）
         risk_rows = [dict(r) for r in con.execute("SELECT * FROM risk_findings WHERE batch_seq<=? ORDER BY id", (as_of,))]
         risk_rows += risk.blocked_rows(ext_issues)  # 收图时被杀毒软件拦下的文件，也按高风险文件处理
         scans = [dict(r) for r in con.execute("SELECT * FROM av_scans WHERE batch_seq<=? ORDER BY id", (as_of,))]
@@ -631,6 +659,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
     state["security"] = _security(risk_rows, scans, risk_paths, decisions, state["issues"])
     state["issues"].sort(key=lambda i: (ISSUE_ORDER[i["level"]], i["kind"], i["title"]))
     state.update(assistant)
+    state["cad_read"] = {"unread": cad_unread, "tool": dwg.find_tool() is not None}
     _guide(state, decisions, pages, cad)
     if with_diff and as_of > 1:
         prev = build(proj, as_of - 1, with_diff=False)
@@ -842,13 +871,15 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
         for n, plist in by_rev.items():
             groups: list[dict] = []  # 同一版次里内容相同的文件算一份
             for p in sorted(plist, key=lambda x: x.first_batch):
-                g = next((g for g in groups if _same_content(g["pages"][0], p)), None)
+                g = next((g for g in groups if _fits(g["pages"], p)), None)
                 if g is None:
                     groups.append({"pages": [p], **_page_date(p, n)})
                 else:
                     g["pages"].append(p)
                     if not g.get("date"):
                         g.update(_page_date(p, n))
+            for g in groups:
+                g["pages"].sort(key=_is_cad)  # DWG 和 PDF 配成一份的，用 PDF 看图、导出
             revisions.append({"rev": raw_rev[n], "norm": n, "key": rev_key(n) if n != "?" else None,
                               "family": _rev_family(n), "date": max((g["date"] for g in groups if g.get("date")), default=None),
                               "first_batch": min(p.first_batch for p in plist), "groups": groups})
@@ -882,7 +913,7 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
                 chosen, same_unclear = groups[-1], True  # 先按最后收到的那份
         else:
             chosen = groups[0]
-        cp = chosen["pages"][0]
+        cp = _with_cad_refs(chosen["pages"][0], chosen["pages"])
         current_page[no] = cp
         title = _val(cp.rec, "drawing_title")
         s.title = title
@@ -1218,6 +1249,11 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
     for i in ext_issues:
         if i["kind"] == "blocked":
             continue  # 被杀毒软件拦下的文件在“风险文件”里处理
+        if i["kind"] == "cad_unreadable":
+            issues.append(_issue("info", "DWG 读不出", f"dwg:{i['id']}", f"读不出：{i['path'].split(' / ')[-1]}",
+                                 f"{i['detail'].rstrip('。')}。这个文件按文件名暂定，不参与缺图、版本判断。位置：{i['path']}。",
+                                 {"batch": i["batch_seq"]}, []))
+            continue
         label = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷",
                  "too_deep": "嵌套过深", "too_large": "超出上限", "symlink": "符号链接",
                  "unreadable": "读不出来"}.get(i["kind"], i["kind"])

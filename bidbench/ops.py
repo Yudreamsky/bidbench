@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 from collections.abc import Callable
 
-from . import antivirus, appconfig, export, ingest, recognition, reports, risk, state
-from .store import Project
+from . import antivirus, appconfig, dwg, export, ingest, recognition, reports, risk, state
+from .store import Project, now_iso
 
 Log = Callable[[str], None]
 logger = logging.getLogger(__name__)
@@ -50,10 +50,46 @@ def receive(proj: Project, sources, date: str, name: str | None = None, password
         log(f"  {mark} {reports.LEVEL[f['level']]}风险 [{f['sha'][:12]}] {f['path'].split(' / ')[-1]}——{f['details'][0]}")
     if any(f["level"] == "high" for f in sec["files"]):
         log("  不要双击运行这些文件，也不要和图纸放在同一个文件夹里用 CAD 打开。")
+    read_cad(proj, log=log, progress=progress)
     rep = reports.receive_report(proj, r, sec)
     log(f"解包报告：{rep}")
     return {"seq": r.seq, "files": r.files, "new_pages": r.new_pages, "report": str(rep),
             "issues": len(r.issues), "risky": len(sec["files"]), "blocked": blocked}
+
+
+def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None) -> dict:
+    """读 DWG、DXF 的图签属性和文字（docs/图纸字段.md 9.7）。收图后自动读新收的和以前没读过的；again 时全部重读。"""
+    with proj.connect() as con:
+        rows = dwg.unread(con, again)
+    out = {"files": 0, "sheets": 0, "failed": 0, "no_tool": 0}
+    if not rows:
+        return out
+    tool = dwg.find_tool()
+    if tool is None and any(ext == ".dwg" for _s, _p, ext, _o, _b in rows):
+        n = sum(1 for r in rows if r[2] == ".dwg")
+        out["no_tool"] = n
+        log(f"  没有找到 LibreDWG，{n} 个 DWG 只按文件名暂定。装好以后运行“读 DWG”补读。")
+        rows = [r for r in rows if r[2] != ".dwg"]
+    if rows:
+        log(f"读 DWG、DXF 的图签和文字：{len(rows)} 个文件……")
+    for i, (sha, stored, ext, path, batch) in enumerate(rows):
+        d = err = None
+        try:
+            d = dwg.read(proj.root / stored, ext) if ext == ".dxf" else dwg.read_dwg(proj.root / stored, tool)
+        except dwg.ReadError as e:
+            err = str(e)
+        with proj.connect() as con:
+            n = dwg.save(con, sha, path, batch, d, err, now_iso())
+        out["files"] += 1
+        out["sheets"] += n
+        if err:
+            out["failed"] += 1
+            log(f"  ⚠ 读不出：{path.split(' / ')[-1]}——{err}")
+        if progress:
+            progress(i + 1, len(rows))
+    if rows:
+        log(f"  读了 {out['files']} 个文件，认出 {out['sheets']} 张图" + (f"，{out['failed']} 个读不出（按文件名暂定）" if out["failed"] else "") + "。")
+    return out
 
 
 def _antivirus(proj, seq, skip: bool, log: Log) -> str | None:
