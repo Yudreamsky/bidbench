@@ -136,6 +136,17 @@ def render_page(path: Path, page_index: int, out: Path, dpi: int = 150, clip_fra
         doc.close()
 
 
+def page_png(path: Path, page_index: int, max_px: int = 2400) -> bytes:
+    """整页渲染成 PNG（工作台“看位置”用）：长边不超过 max_px 像素，大图幅也不会太大。"""
+    doc = pymupdf.open(path)
+    try:
+        page = doc[page_index - 1]
+        zoom = min(max_px / max(page.rect.width, page.rect.height), 3.0)
+        return page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).tobytes("png")
+    finally:
+        doc.close()
+
+
 def single_page_pdf(path: Path, page_index: int) -> bytes:
     """抽出单页另存为 PDF（合订本里的一张图也能单独打开、导出）。"""
     src = pymupdf.open(path)

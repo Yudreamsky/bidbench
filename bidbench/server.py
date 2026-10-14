@@ -23,7 +23,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import antivirus, appconfig, chat, debuglog, export, numbering, oplog, ops, recognition, release, state, updater
+from . import antivirus, appconfig, chat, debuglog, export, navigate, numbering, oplog, ops, recognition, release, state, updater
 from .store import Project, SchemaTooNew, add_decision, latest_decisions, now_iso, revoke_decision
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev", "name_check",
@@ -491,11 +491,24 @@ def make_handler(app: _App):
                 q = parse_qs(u.query)
                 as_of = int(q["as_of"][0]) if q.get("as_of") else None
                 return self._json(app.state(as_of))
-            m = re.match(r"^/api/page/([0-9a-f]{12}-p\d{3})\.pdf$", u.path)
+            if u.path == "/api/find":  # 按任务找图（和 MCP 的 find_sheets_for_task 同一套规则）
+                if not self._need_project():
+                    return None
+                q = parse_qs(u.query)
+                arg = lambda k: (q.get(k) or [""])[0].strip() or None  # noqa: E731
+                as_of = int(q["as_of"][0]) if q.get("as_of", [""])[0].isdigit() else None
+                try:
+                    return self._json(navigate.find_for_task(app.state(as_of), arg("floor"), arg("discipline"),
+                                                             arg("keyword"), arg("tower"), limit=200))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, 400)
+            m = re.match(r"^/api/page/([0-9a-f]{12}-p\d{3})\.(pdf|png)$", u.path)
             if m:
                 if not self._need_project():
                     return None
                 try:
+                    if m.group(2) == "png":  # “看位置”：整页图片，界面上再框出位置
+                        return self._send(200, export.page_png_bytes(app.proj, m.group(1)), "image/png")
                     data = export.page_pdf_bytes(app.proj, m.group(1))
                 except (TypeError, KeyError):
                     return self._json({"error": "没有这个页面"}, 404)
