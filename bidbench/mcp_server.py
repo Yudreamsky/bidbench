@@ -33,9 +33,11 @@ INSTRUCTIONS = """你是这个投标图纸项目的助手，工具集就是 bidb
 7. 认图号格式：先用 numbering_overview 看各段的取值和例图名；看不懂的代码先看例图名，再用 get_page
    （include_text_layer=true）看目录页和这个代码的例图的文字；还不懂，把要看图识别的页面编号写进 look_pages，
    不要自己开始识别；都找不到就写进 unsure。最后用 propose_numbering 提议，why 里写清每个代码是从哪看出来的。
-8. 用户不知道下一步做什么、不知道问题怎么选时：下一步看 project_overview 的 next_steps，问题怎么选看 list_issues 的
+8. 建模找图：先用 find_sheets_for_task（楼层、专业、构件）拿到该看的现行图，再用 related_sheets 顺着“详见”往外找，
+   用 locate(page_id, bbox) 跳到图上那句话、那个详图索引的位置。缺的图、改过它们的变更单、相关问题都要告诉用户。
+9. 用户不知道下一步做什么、不知道问题怎么选时：下一步看 project_overview 的 next_steps，问题怎么选看 list_issues 的
    how_to_choose，照着说，并告诉用户在工作台里点哪里（问题中心最上面的“下一步”、每个问题下面的“怎么选？”）。
-9. 用简体中文回答。"""
+10. 用简体中文回答。"""
 
 
 def _server_class():
@@ -129,6 +131,32 @@ def build_server(kit: Toolkit):
     def search(text: str, current_only: bool = True, limit: int = 20) -> dict:
         """在识别结果和 PDF 文字层里搜索关键词，返回图号、版次、page_id 和上下文片段。默认只搜现行版。"""
         return kit.search(text, current_only, limit)
+
+    # ---- 建模找图 ----
+    @tool()
+    def find_sheets_for_task(floor: str | None = None, discipline: str | None = None, keyword: str | None = None,
+                             tower: str | None = None, limit: int = 40) -> dict:
+        """按建模任务找图，例如建 3 层结构梁：floor="3F"、discipline="结构"、keyword="梁"。
+        floor 写 3F、3层、B1、屋面或项目图名里的写法（Level 03）；keyword 是构件或关键词，几个用空格隔开（“墙 门窗”）；
+        多栋楼的项目用 tower 限定楼栋。返回 sheets（role：主图、按图名找到、通用图、引用到的图、同层其他图；why 写为什么找到它；
+        每张带现行版次、page_id、楼层、PDF 和 CAD 文件出处），missing（引用到但没发来的图），notices（改过这些图的变更单），
+        issues（相关的问题）。只给现行版，已作废的不给。"""
+        return kit.find_sheets_for_task(floor, discipline, keyword, tower, limit)
+
+    @tool()
+    def related_sheets(no: str, depth: int = 1, types: list[str] | None = None, direction: str = "both") -> dict:
+        """从一张图（或一张变更单的编号）出发，顺着关系往外走 depth 步（最多 3）。
+        types 可选：引用、跨专业引用、目录列出、变更单、同层、通用图，不填为全部（同层、通用图只从起点算一步）。
+        direction：out 只看它写了“详见”的图，in 只看写了“详见”它的图，both 都看。
+        每张找到的图带 distance（几步）和 via（从哪张图来、关系本身“A → B”、原文、page_id、位置 bbox）。"""
+        return kit.related_sheets(no, depth, types, direction)
+
+    @tool()
+    def locate(page_id: str, bbox: list[float] | None = None) -> dict:
+        """跳到一页上的某个位置：这页属于哪张图哪一版（不是现行版会提醒）、本机文件路径和第几页、页面大小；
+        给了 bbox（[x0, y0, x1, y1]，相对整页 0~1，原点左上角，related_sheets 的 via、get_sheet 的引用里都有）
+        再读出那块地方的文字和画在那里的引用。references_on_page 是这页上全部的引用和位置。"""
+        return kit.locate(page_id, bbox)
 
     # ---- 事实、问题 ----
     @tool()
