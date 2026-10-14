@@ -180,11 +180,14 @@ def relations_doc(state: dict, around: dict | None = None) -> dict:
         "note": "关系种类见 relation_types；from、to 是图号（多栋楼写成“塔楼 · 图号”），变更单的 from 是变更单编号。"
                 "bbox 是 [x0, y0, x1, y1]，相对整页宽高 0~1，原点左上角；page_id 是关系画在哪一页。"
                 "楼层 floor_list：1 是 1F，负数是地下，1000 是屋顶。",
-        "relation_types": navigate.REL_NOTE,
+        "relation_types": navigate.REL_NOTE, "forms": navigate.FORM_NOTE,
         "sheets": sheets,
         "relations": navigate.relations(state),
         "notices": [{"id": n["id"], "title": n["title"], "kind": n["kind"], "page_id": n["page_id"], "batch": n["batch"],
                      "changes": n["affects"]} for n in state["notices"]],
+        "details": {s["no"]: [{k: d[k] for k in ("mark", "title", "scale", "page_id", "bbox")} for d in s["details"]]
+                    for s in state["sheets"] if s.get("details")},
         "same_floor": {no: [t["no"] for t in a["same_floor"]] for no, a in around.items() if a["same_floor"]},
         "general": {no: [t["no"] for t in a["general"]] for no, a in around.items() if a["general"]},
+        "shared_xrefs": navigate.shared_xrefs(state),
     }

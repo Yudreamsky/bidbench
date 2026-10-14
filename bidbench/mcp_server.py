@@ -116,7 +116,8 @@ def build_server(kit: Toolkit):
 
     @tool()
     def get_sheet(no: str) -> dict:
-        """一张图的卡片：状态、现行版次、版本链、出处、注意事项、改了这张图的变更单（notices，用 page_id 打开原件）、引用关系、
+        """一张图的卡片：状态、现行版次、版本链、出处、注意事项、改了这张图的变更单（notices，用 page_id 打开原件）、引用关系（references：form 是详图索引、剖切、文字引用等，
+        mark 是编号，jump_to 是被指那块详图的位置）、本图上的详图（details）、管哪一块（covers：分区、轴线范围）、
         同层图纸（same_floor：各专业管同一层的图，problems 是它们的严重问题）、通用图（general_sheets：设计说明、没写楼层的柱平面等）、
         只对本图有效的值（own_values，如本层结构标高、适用楼层）、来自它的事实（this_sheet 是本图原文，project_value 是全项目取值，
         changed_by 表示出处图被变更单改过、数值可能已变）、问题（relation：本图的问题，或它牵涉的相关问题）。no 为图号，如“结施-04”。"""
@@ -139,16 +140,19 @@ def build_server(kit: Toolkit):
         """按建模任务找图，例如建 3 层结构梁：floor="3F"、discipline="结构"、keyword="梁"。
         floor 写 3F、3层、B1、屋面或项目图名里的写法（Level 03）；keyword 是构件或关键词，几个用空格隔开（“墙 门窗”）；
         多栋楼的项目用 tower 限定楼栋。返回 sheets（role：主图、按图名找到、通用图、引用到的图、同层其他图；why 写为什么找到它；
-        每张带现行版次、page_id、楼层、PDF 和 CAD 文件出处），missing（引用到但没发来的图），notices（改过这些图的变更单），
+        每张带现行版次、page_id、楼层、covers（分区和轴线范围，如“1~12/A~F 轴”）、details（图上的详图编号和名称）、
+        PDF 和 CAD 文件出处；引用到的图有 jump_to 时，是被指的那块详图的 page_id 和 bbox，用 locate 直接跳过去），missing（引用到但没发来的图），notices（改过这些图的变更单），
         issues（相关的问题）。只给现行版，已作废的不给。"""
         return kit.find_sheets_for_task(floor, discipline, keyword, tower, limit)
 
     @tool()
     def related_sheets(no: str, depth: int = 1, types: list[str] | None = None, direction: str = "both") -> dict:
         """从一张图（或一张变更单的编号）出发，顺着关系往外走 depth 步（最多 3）。
-        types 可选：引用、跨专业引用、目录列出、变更单、同层、通用图，不填为全部（同层、通用图只从起点算一步）。
+        types 可选：引用、跨专业引用、目录列出、变更单、同层、通用图、共用参照（DWG 里用了同一个外部参照），
+        不填为全部（同层、通用图、共用参照只从起点算一步）。
         direction：out 只看它写了“详见”的图，in 只看写了“详见”它的图，both 都看。
-        每张找到的图带 distance（几步）和 via（从哪张图来、关系本身“A → B”、原文、page_id、位置 bbox）。"""
+        每张找到的图带 distance（几步）和 via（从哪张图来、关系本身“A → B”、form 引用的样子（详图索引、剖切、文字引用、
+        变更涉及、目录列出）、mark 详图或剖面编号、原文、page_id、位置 bbox；target 是被指那张图上同编号的详图位置）。"""
         return kit.related_sheets(no, depth, types, direction)
 
     @tool()

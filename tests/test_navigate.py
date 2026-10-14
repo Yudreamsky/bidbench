@@ -83,7 +83,10 @@ def test_find_errors_and_floor_words(kit, drill):
 
 def test_walk_relations(kit):
     out = kit.related_sheets("建施-02", types=["引用"], direction="out")
-    assert {r["no"] for r in out["sheets"]} == {"建施-05", "建施-06", "建施-08", "建施-09"}
+    assert {r["no"] for r in out["sheets"]} == {"建施-05", "建施-06", "建施-07", "建施-08", "建施-09"}
+    idx = next(r for r in out["sheets"] if r["no"] == "建施-07")["via"]  # 画的圆圈详图索引 ①、③
+    assert {(v["form"], v["mark"]) for v in idx} == {("详图索引", "1"), ("详图索引", "3")}
+    assert all(v["target"]["page_id"] and len(v["target"]["bbox"]) == 4 for v in idx)
     assert out["missing"] == ["建施-09"] and all(r["distance"] == 1 for r in out["sheets"])
     via = next(r for r in out["sheets"] if r["no"] == "建施-08")["via"][0]
     assert via["edge"] == "建施-02 → 建施-08" and via["text"] == "详见建施-08" and len(via["bbox"]) == 4
@@ -169,3 +172,85 @@ def test_mcp_navigation_tools(kit):
         content = r.content if hasattr(r, "content") else r[0] if isinstance(r, tuple) else r
         assert "关系种类可选" in content[0].text
     asyncio.run(go())
+
+
+# ---- 关联分种类、详图编号、分区和轴线范围（docs/图纸字段.md 9.6、第 7 步） ----
+
+def test_typed_relations_and_jump_to_detail(kit, drill):
+    """圆圈详图索引带编号，跳到合订本里那块详图；剖切带剖面编号；“详见”是文字引用。"""
+    st = state.build(drill)
+    forms = {(e["from"], e["to"], e["form"], e["mark"]) for e in st["edges"]}
+    assert ("建施-02", "建施-07", "详图索引", "1") in forms and ("建施-04", "建施-07", "详图索引", "2") in forms
+    assert ("建施-02", "建施-05", "剖切", "1-1") in forms and ("建施-02", "建施-05", "剖切", "2-2") in forms
+    assert ("建施-02", "建施-08", "文字引用", None) in forms
+    assert not any(e["to"] == "建施-05" and e["form"] == "文字引用" and e["from"] == "建施-02" for e in st["edges"])
+
+    card = kit.get_sheet("建施-04")
+    ref = next(r for r in card["references"] if r["sheet"] == "建施-07")
+    assert ref["form"] == "详图索引" and ref["mark"] == "2" and ref["jump_to"]["title"] == "女儿墙大样"
+    page = kit.locate(ref["jump_to"]["page_id"], ref["jump_to"]["bbox"])
+    assert "女儿墙大样" in json.dumps(page, ensure_ascii=False)
+    detail = kit.get_sheet("建施-07")["details"]
+    assert [(d["mark"], d["title"], d["scale"]) for d in detail] == [
+        ("1", "外墙墙身大样", "1:20"), ("2", "女儿墙大样", "1:20"), ("3", "窗台节点", "1:10")]
+
+    res = kit.find_sheets_for_task("屋面", "建筑")
+    jump = next(r for r in res["sheets"] if r["no"] == "建施-07")["jump_to"]
+    assert [j["mark"] for j in jump] == ["2"]
+
+
+def test_change_notice_lists_changed_sheets_and_details(kit, drill):
+    """变更单条文里写到的图号就是它改的图，写到 ② 就是改的哪块详图。"""
+    st = state.build(drill)
+    n = next(n for n in st["notices"] if n["id"] == "设计变更单-003")
+    assert n["affects"] == ["建施-07", "结施-03"]
+    assert {(r["to"], r["mark"]) for r in n["refs"]} == {("结施-03", None), ("建施-07", "2")}
+    assert kit.get_sheet("结施-03")["status"] == "有变更单"
+    out = kit.related_sheets("设计变更单-003")
+    via = next(r for r in out["sheets"] if r["no"] == "建施-07")["via"][0]
+    assert via["form"] == "变更涉及" and via["mark"] == "2" and "女儿墙" in via["text"]
+    assert via["target"]["title"] == "女儿墙大样"
+
+
+def test_coverage_axes(kit):
+    """平面图读出轴线范围；详图上的 ①②③、目录的版次栏不是轴网。"""
+    assert kit.get_sheet("建施-02")["covers"] == "1~5/A~D 轴"
+    assert kit.get_sheet("建施-02")["fields"]["axis_x"]["value"] == "1~5"
+    for no in ("建施-07", "建施-00", "结施-00"):
+        assert kit.get_sheet(no)["covers"] is None, no
+    row = next(r for r in kit.find_sheets_for_task("1F", "建筑")["sheets"] if r["no"] == "建施-02")
+    assert row["covers"] == "1~5/A~D 轴"
+
+
+def test_zone_and_stacked_index_from_text_layer():
+    """分区从图名读；圆圈详图索引上下两行（编号、图号）拼成一条；只有一个方向的数字不当轴网。"""
+    def ln(text, x0, y0, x1, y1):
+        return {"text": text, "bbox": [x0, y0, x1, y1]}
+    item = {"page_id": "0" * 12 + "-p001", "source": {"file_path": "a.pdf", "file_sha256": "0" * 64, "page_index": 1,
+                                                      "page_count": 1, "has_text_layer": True}}
+    lines = [ln("图名 A区一层平面图", 0.67, 0.76, 0.73, 0.77), ln("图号 建施-11", 0.67, 0.78, 0.73, 0.79)]
+    lines += [ln(str(i), 0.1 * i, 0.07, 0.1 * i + 0.01, 0.08) for i in range(1, 7)]
+    lines += [ln(c, 0.04, 0.1 * k + 0.1, 0.05, 0.1 * k + 0.11) for k, c in enumerate("ABCD")]
+    lines += [ln("⑤", 0.3, 0.5, 0.31, 0.51), ln("建施-12", 0.29, 0.52, 0.32, 0.53)]
+    rec = simulated.recognize_page(item, lines)
+    cov = {k: v["value"] for k, v in rec["content"]["coverage"].items()}
+    assert cov == {"zone": "A区", "axis_x": "1~6", "axis_y": "A~D"}
+    assert [(r["ref_type"], r["target_drawing_no"], r["mark"]) for r in rec["references"]] == [("详图索引", "建施-12", "5")]
+    assert rec["content"]["xrefs"] == []
+    recognition._validator().validate(rec)
+
+
+def test_shared_xref_relation(drill, monkeypatch):
+    """DWG 里共用同一个外部参照的图互相关联（共用参照），只从起点算一步。"""
+    real = state.build
+
+    def with_xrefs(*a, **kw):
+        st = real(*a, **kw)
+        for s in st["sheets"]:
+            if s["no"] in ("建施-02", "建施-03"):
+                s["xrefs"] = ["CORE - 1F~4F"]
+        return st
+    monkeypatch.setattr(state, "build", with_xrefs)
+    out = Toolkit(drill).related_sheets("建施-02", types=["共用参照"])
+    assert [(r["no"], r["via"][0]["text"]) for r in out["sheets"]] == [("建施-03", "CORE - 1F~4F")]
+    assert navigate.shared_xrefs(with_xrefs(drill)) == {"CORE - 1F~4F": ["建施-02", "建施-03"]}

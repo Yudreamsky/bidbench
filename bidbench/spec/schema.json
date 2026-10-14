@@ -195,6 +195,7 @@
           "raw_text",
           "target_drawing_no",
           "ref_type",
+          "mark",
           "bbox",
           "source",
           "confidence"
@@ -214,11 +215,21 @@
           "ref_type": {
             "enum": [
               "详图索引",
+              "剖切索引",
+              "立面索引",
               "大样引用",
               "文字引用",
               "图集引用",
+              "变更涉及",
               "其他"
             ]
+          },
+          "mark": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "详图编号或剖面编号：⑤/建施-12 写 5，1-1 剖面写 1-1，变更条文写到“② 女儿墙大样”写 2；没有为 null"
           },
           "bbox": {
             "$ref": "#/$defs/bbox_or_null"
@@ -281,7 +292,10 @@
         "notes",
         "tables",
         "key_values",
-        "standards"
+        "standards",
+        "details",
+        "coverage",
+        "xrefs"
       ],
       "properties": {
         "summary": {
@@ -461,6 +475,79 @@
               }
             }
           }
+        },
+        "details": {
+          "type": "array",
+          "description": "本图上画的详图、剖面：详图名称旁的编号（①外墙墙身大样）、剖面图名（1-1 剖面图）。没有为空数组",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "mark",
+              "title",
+              "scale",
+              "bbox",
+              "source",
+              "confidence"
+            ],
+            "properties": {
+              "mark": {
+                "type": "string",
+                "description": "编号，圆圈里的数字写阿拉伯数字（① 写 1），剖面写 1-1"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "详图名称，如 外墙墙身大样"
+              },
+              "scale": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "比例，如 1:20"
+              },
+              "bbox": {
+                "$ref": "#/$defs/bbox_or_null"
+              },
+              "source": {
+                "$ref": "#/$defs/source"
+              },
+              "confidence": {
+                "$ref": "#/$defs/confidence"
+              }
+            }
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "zone",
+            "axis_x",
+            "axis_y"
+          ],
+          "description": "这张图管哪一块。zone：分区，如 A区、塔楼、裙房，图上没写为 null；axis_x：数字轴从哪根到哪根，如 1~5（有附加轴照写，如 1/2~12）；axis_y：字母轴，如 A~D。读不到的 value 为 null，不猜",
+          "properties": {
+            "zone": {
+              "$ref": "#/$defs/field"
+            },
+            "axis_x": {
+              "$ref": "#/$defs/field"
+            },
+            "axis_y": {
+              "$ref": "#/$defs/field"
+            }
+          }
+        },
+        "xrefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "DWG 里绑定或附着的外部参照名（如 CORE - 1F~4F），几张图共用同一个参照说明画的是同一个核心筒、同一套柱子；PDF、图片填空数组"
         }
       }
     },

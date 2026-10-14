@@ -327,7 +327,13 @@ def page_markdown(r: dict) -> str:
            f"- 页面类型：{r['page_kind']}", f"- 版次：{v('revision')}　日期：{v('issue_date')}　比例：{v('scale')}",
            f"- 出处：{r['source']['file_path']} 第 {r['source']['page_index']} 页", "", r["content"]["summary"], ""]
     if r["references"]:
-        out += ["## 引用", ""] + [f"- {x['raw_text']}（{x['ref_type']}）" for x in r["references"]] + [""]
+        out += ["## 引用", ""] + [f"- {x['raw_text']}（{x['ref_type']}{'，编号 ' + x['mark'] if x.get('mark') else ''}）"
+                                  for x in r["references"]] + [""]
+    if r["content"].get("details"):
+        out += ["## 本图的详图", ""] + [f"- {x['mark']} {x['title'] or ''} {x['scale'] or ''}".rstrip() for x in r["content"]["details"]] + [""]
+    cov = {k: (v or {}).get("value") for k, v in (r["content"].get("coverage") or {}).items()}
+    if any(cov.values()):
+        out += [f"- 管哪一块：{'　'.join(f'{lab} {cov[k]}' for k, lab in (('zone', '分区'), ('axis_x', '数字轴'), ('axis_y', '字母轴')) if cov.get(k))}", ""]
     if r["catalog_entries"]:
         out += ["## 目录", "", "| 图号 | 图名 | 版次 |", "| --- | --- | --- |"]
         out += [f"| {x['drawing_no']} | {x['drawing_title']} | {x['revision']} |" for x in r["catalog_entries"]] + [""]
