@@ -1867,6 +1867,11 @@ function renderSheet(no) {
   const rel = relGroups(no);
   if (rel.out.size) parts.push(section(`这张图上写着要看（${rel.out.size}）`, relList(rel.out)));
   if (rel.inn.size) parts.push(section(`写着要看这张图的（${rel.inn.size}）`, relList(rel.inn)));
+  const dts = s.details || [];  // 本图的详图、剖面：别的图写“1/建施-07”指的就是这些
+  if (dts.length) parts.push(section(`本图的详图（${dts.length}）`, el('ul', { class: 'list' }, dts.map(d => el('li', { class: 'rquote' },
+    el('b', { class: 'mono' }, d.mark || '—'), el('span', {}, d.title || ''), d.scale ? el('small', {}, d.scale) : null,
+    d.page_id && d.bbox ? el('button', { class: 'textbtn', type: 'button',
+      onclick: () => showSpot({ from: no, label: d.title || d.mark, page_id: d.page_id, bbox: d.bbox }, `上的详图“${[d.mark, d.title].filter(Boolean).join(' ')}”`) }, '看位置') : null)))));
   if (real) {
     parts.push(section('图签信息', el('dl', { class: 'kv' }, ...fieldRows(s),
       el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n')))));
@@ -2085,7 +2090,10 @@ function fieldRows(s) {  // 图纸的每一项：值、把握、来源，原文�
     f.rev ? row(guess ? '版次' : '现行版次', f.rev) : guess ? null : [el('dt', {}, '现行版次'), el('dd', {}, '—')],
     row('出图日期', f.date), row('状态码', f.issue_status), row('专业', f.discipline),
     s.cls && s.cls.group ? [el('dt', {}, '小类'), el('dd', {}, s.cls.group, confPill('low'), el('small', { class: 'meta' }, ' AI 推测（智能分类）'))] : null,
-    row('楼层', f.floors), row(guess ? '可能的内容' : '内容', f.content)];
+    row('楼层', f.floors), row('区域', f.zone),
+    f.axis_x || f.axis_y ? [el('dt', {}, '轴线范围'), el('dd', {}, [f.axis_x && f.axis_x.value, f.axis_y && f.axis_y.value].filter(Boolean).join(' / ') + ' 轴',
+      confPill((f.axis_x || f.axis_y).conf), el('small', { class: 'meta' }, ` ${(f.axis_x || f.axis_y).src}`))] : null,
+    row(guess ? '可能的内容' : '内容', f.content)];
 }
 function guessCard(s) {  // 按文件名暂定的图：每项推测带把握，按需看图识别
   const out = [el('div', { class: 'note' },
