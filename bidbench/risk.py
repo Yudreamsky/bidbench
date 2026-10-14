@@ -6,7 +6,8 @@
 检查项：
 - CAD 自动加载脚本：acad.lsp、acaddoc.lsp、acad.fas、*.mnl 等（AutoCAD、中望、浩辰打开同目录图纸时会自动运行）
 - 其他 CAD 插件和脚本：.lsp .fas .vlx .dvb .arx 等；LISP 源码里有复制文件、写注册表、启动程序等操作时升为高风险
-- 可执行文件、双扩展名（图纸.pdf.exe）、文件名里的反向显示字符、扩展名和实际内容不符（.pdf 实为程序）
+- 可执行文件、双扩展名（图纸.pdf.exe）、文件名里的反向显示字符、扩展名和实际内容不符（.pdf 实为程序）；
+  反向显示字符出现在内容和扩展名对得上的图纸（DWG、PDF、图片）上时只算低风险：它没法运行，只是名字不干净
 - 带宏的 Office 文件、会从外部地址加载模板的 Office 文件
 - PDF 里的 JavaScript、启动外部程序（Launch）、多媒体（RichMedia / Flash）
 """
@@ -20,7 +21,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-RULES_VERSION = 1
+RULES_VERSION = 2
 LEVEL_WORD = {"high": "高", "medium": "中", "low": "低"}
 LEVEL_ORDER = {"high": 0, "medium": 1, "low": 2}
 BLOCKED_SOURCE = "本机杀毒软件"
@@ -34,6 +35,9 @@ CAD_AUTOLOAD = re.compile(r"^(acad|zwcad|gcad)\w*\.(lsp|fas|vlx|mnl|dvb|rx)$", r
 MACRO_EXTS = {".docm", ".dotm", ".xlsm", ".xltm", ".xlam", ".xla", ".pptm", ".potm", ".ppam", ".ppsm", ".sldm"}
 OOXML_EXTS = {".docx", ".xlsx", ".pptx", ".dotx", ".xltx", ".potx", ".ppsx", ".vsdx", ".vsdm"} | MACRO_EXTS - {".xla"}
 BIDI = re.compile("[‪-‮⁦-⁩‎‏]")
+# 这些格式本身不能运行，开头几个字节对得上就确实是这种文件
+BENIGN_MAGIC = {".dwg": (b"AC1",), ".pdf": (b"%PDF",), ".png": (b"\x89PNG",), ".jpg": (b"\xff\xd8\xff",),
+                ".jpeg": (b"\xff\xd8\xff",), ".tif": (b"II*\0", b"MM\0*"), ".tiff": (b"II*\0", b"MM\0*")}
 LISP_SIGNS = {
     "vl-file-copy": "复制文件", "vl-file-delete": "删除文件", "vl-file-rename": "改文件名",
     "vl-registry-write": "写注册表", "vl-registry-delete": "删注册表", "startapp": "启动外部程序",
@@ -75,12 +79,20 @@ def _content_type(head: bytes) -> str | None:
     return None
 
 
+def _matches_ext(ext: str, head: bytes) -> bool:
+    return any(head.startswith(m) for m in BENIGN_MAGIC.get(ext, ()))
+
+
 def check_name(name: str, head: bytes) -> list[Finding]:
     """按文件名和文件开头几个字节检查。同一份内容换个名字出现，要重新查一次。"""
     out: list[Finding] = []
     ext = _ext(name)
     if BIDI.search(name):
-        out.append(Finding("high", "bidi_name", "文件名里有反向显示字符，显示出来的扩展名是假的"))
+        if _matches_ext(ext, head) and _ext(BIDI.sub("", name)) == ext:
+            out.append(Finding("low", "bidi_name_benign", f"文件名里有看不见的方向控制字符，但内容确实是 {ext} 文件，"
+                                                          "不能运行；常见于外方系统导出的文件名，只是名字不干净"))
+        else:
+            out.append(Finding("high", "bidi_name", "文件名里有反向显示字符，显示出来的扩展名是假的"))
     stem_ext = _ext(os.path.splitext(name)[0])
     real = _content_type(head)
     if ext == ".scr" and real != "program":

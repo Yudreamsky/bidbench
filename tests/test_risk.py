@@ -35,6 +35,11 @@ def kinds(findings):
     ("报价.xlsm", b"PK\x03\x04", {("medium", "macro_format")}),
     ("建施-01.pdf", b"%PDF-1.7", set()),
     ("一层平面.dwg", b"AC1032", set()),
+    ("PRJ1-AR-0005\u200e-02 一层平面.dwg", b"AC1032", {("low", "bidi_name_benign")}),  # 外方系统导出的名字夹了方向字符
+    ("建施-01\u202b.pdf", b"%PDF-1.7", {("low", "bidi_name_benign")}),
+    ("一层平面\u202egwd.exe", MZ, {("high", "bidi_name"), ("high", "executable")}),  # 显示成“一层平面exe.dwg”
+    ("一层平面\u200e.dwg", MZ, {("high", "bidi_name"), ("high", "disguised")}),  # 名字是 .dwg，内容是程序
+    ("图纸\u202e.dwg", b"%PDF", {("high", "bidi_name")}),  # 内容和扩展名对不上
     ("lisp教程.txt", b"(defun c:x ()", set()),
 ])
 def test_check_name(name, head, expected):
