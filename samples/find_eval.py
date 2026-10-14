@@ -12,7 +12,8 @@
 分数一样时，多给得少、调用得少的更好。cautions 是给人看的提醒，不打分。
 
 找图方法放在 FINDERS 里，签名是 finder(tk, task) -> {"sheets": [...], "missing": [...], "notices": [...]}。
-现在只有 card：打开起点图的卡片（get_sheet），把卡片上列出的引用、同层图、通用图、变更单都算上。
+card：打开起点图的卡片（get_sheet），把卡片上列出的引用、同层图、通用图、变更单都算上；
+walk：card 再加顺着“详见”往外走两步（related_sheets），以及改过走到的这些图的变更单。
 以后加了“按任务找图”之类的新工具，在这里加一个找图方法，就能和 card 比分数。
 
 用法：
@@ -92,7 +93,20 @@ def find_by_card(tk, task: dict) -> dict:
             "notices": [n["id"] for n in card["notices"]]}
 
 
-FINDERS = {"card": find_by_card}
+def find_by_walk(tk, task: dict) -> dict:
+    """card 之外再顺着起点图写了“详见”的图往外走两步（related_sheets），并看走到的图有没有被变更单改过。"""
+    base = find_by_card(tk, task)
+    walk = tk.related_sheets(task["start_sheet"], depth=2, types=["引用", "跨专业引用"], direction="out")
+    rows = [r for r in walk["sheets"] if r.get("kind") == "图纸"]
+    missing = list(dict.fromkeys(base["missing"] + walk["missing"]))
+    sheets = list(dict.fromkeys(base["sheets"] + [r["no"] for r in rows if r["no"] not in missing]))
+    changed = tk.related_sheets(task["start_sheet"], depth=3, types=["引用", "跨专业引用", "变更单"], direction="both")
+    near = {r["no"] for r in rows} | {task["start_sheet"]}
+    notices = [r["no"] for r in changed["sheets"] if r.get("kind") != "图纸" and near & set(r.get("changes") or ())]
+    return {"sheets": sheets, "missing": missing, "notices": list(dict.fromkeys(base["notices"] + notices))}
+
+
+FINDERS = {"card": find_by_card, "walk": find_by_walk}
 
 
 # ---------------- 打分 ----------------

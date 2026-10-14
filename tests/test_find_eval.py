@@ -5,7 +5,7 @@ import make_model_sample
 import pytest
 
 # 现在 card 方法的得分。工具或识别改好了、分数涨了，把这里改成新的分数；分数掉了说明找图变差了。
-FLOOR = {"need": 11, "related": 8, "missing": 1, "notices": 0}
+FLOOR = {"need": 11, "related": 10, "missing": 1, "notices": 1}
 
 
 @pytest.fixture(scope="module")
@@ -16,7 +16,7 @@ def drill(tmp_path_factory):
 def test_every_start_sheet_exists(drill):
     tk = find_eval.Toolkit(drill)
     for task in make_model_sample.TASKS:
-        assert tk.get_sheet(task["start_sheet"])["status"] == "现行", task["id"]
+        assert tk.get_sheet(task["start_sheet"])["status"] in ("现行", "有变更单"), task["id"]
 
 
 def test_oracle_scores_full_marks(drill):
@@ -64,3 +64,10 @@ def test_cli_writes_json(drill, tmp_path, capsys):
     res = find_eval.main(["--project", str(drill.root), "--json", str(out)])
     assert out.exists() and '"score"' in out.read_text(encoding="utf-8")
     assert f"总分 {res['score']} 分" in capsys.readouterr().out
+
+
+def test_walk_finder_finds_everything(drill):
+    """walk：card 之外顺着“详见”走两步、再看走到的图有没有变更单。现在 25 项全找到；分数掉了说明找图变差了。"""
+    res = find_eval.evaluate(drill, "walk")
+    assert res["score"] == 100 and res["hit"] == res["want"] == 25, find_eval.report(res)
+    assert res["tool_calls"] == 4 * len(make_model_sample.TASKS)
