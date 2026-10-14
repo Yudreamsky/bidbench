@@ -195,8 +195,9 @@ def build_server(kit: Toolkit):
 
     @tool()
     def estimate_recognition(scope: str = "new", tier: str = "economy", executor: str = "codex") -> dict:
-        """估算一次真实识别的页数、用时（Codex）或花费（Claude），以及识别的先后顺序 priority_order：
-        按优先级分档（图纸目录、设计说明、平面、立面剖面、其他、详图大样），每档页数和例子。不会运行识别。
+        """估算一次真实识别的页数、用时（Codex）或花费（Claude），按分步识别排好：map 是第 1 步地图（文件名、PDF 文字、
+        DWG 已认出多少，不看图）；stages 是第 2~4 步（重点图、建模主图、按需深入），每步总页数、已识别、还剩几页、要多久、
+        分组和例子。第 4 步不用全识别，建模用到哪张再识别哪张。不会运行识别。
         scope：new/weak/conflict/unrecognized/all；tier：economy/strong；executor：codex/claude。"""
         return kit.estimate_recognition(scope, tier, executor)
 

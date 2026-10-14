@@ -16,7 +16,7 @@ from pathlib import Path
 
 import jsonschema
 
-from . import pdfpages
+from . import names, pdfpages
 from .store import PLACEHOLDER_EXECUTORS, Project, now_iso
 
 TITLEBLOCK_CLIP = (0.62, 0.70, 1.0, 1.0)  # 图签常见位置：右下角
@@ -78,7 +78,7 @@ PRIORITY_RANK = {k: i for i, (k, _) in enumerate(PRIORITIES)}
 _PRIORITY_RULES = [
     ("catalog", re.compile(r"目录|图纸清单|封面|drawing (?:list|register|index|schedule)|document register|"
                            r"issue sheet|transmittal|cover sheet", re.I)),
-    ("notes", re.compile(r"说明|图例|general notes?|\bnotes?\b|\bspecifications?\b|\blegends?\b|\babbreviations?\b", re.I)),
+    ("notes", re.compile(r"说明|图例|general notes?|\bnotes?\b|\bspecifications?\b|\bspec\b|\blegends?\b|\babbreviations?\b", re.I)),
     ("details", re.compile(r"详图|大样|节点|表(?!面)|\bdetails?\b|\bdetailing\b|\bschedules?\b|\btables?\b", re.I)),
     ("sections", re.compile(r"立面|剖面|\belevations?\b|\bsections?\b", re.I)),
     ("plans", re.compile(r"平面|布置|配筋|\bplans?\b|\bga\b|general arrangement|\blayouts?\b|setting out|"
@@ -92,11 +92,18 @@ def priority_of(path: str | None) -> str:
         if seg.startswith("批次#"):
             continue
         name = re.sub(r"\.(?:pdf|dwg|dxf|png|jpe?g|tiff?|zip|rar|7z)$", "", seg, flags=re.I)
-        name = re.sub(r"[_\-.]+", " ", name)  # Level_01-GA_Plan 这类文件名按词切开
-        for key, rx in _PRIORITY_RULES:
-            if rx.search(name):
-                return key
+        key = _kind_of(name, _PRIORITY_RULES)
+        if key:
+            return key
     return "other"
+
+
+def _kind_of(name: str | None, rules) -> str | None:
+    name = re.sub(r"[_\-.]+", " ", name or "")  # Level_01-GA_Plan 这类文件名按词切开
+    for key, rx in rules:
+        if rx.search(name):
+            return key
+    return None
 
 
 def priority_plan(rows) -> list[dict]:
@@ -113,14 +120,159 @@ def priority_plan(rows) -> list[dict]:
     return out
 
 
+# ---- 分步识别（渐进式）----
+# 第一步“地图”不看图：文件名、文件夹、PDF 自带的文字、DWG（收图时就读了），只在本机，不花钱。
+# 后面几步才看图识别，按用处一层层往下：重点图（目录、清单、表格、说明的头两页）读全，先把全局搭起来；
+# 再是建模要照着画的平面、立面、剖面；详图、说明正文、认不出种类的页按需（用到哪张识别哪张）。
+# 每页归哪一步，先看第一步认出的图号能不能对上目录、DWG 里读到的图名（地图带路），再看文件名、文件夹。
+# 识别过的页不再识别，所以每一步都可以随时停、下次接着来。
+STAGES = [
+    ("key", "重点图", "图纸目录、变更单答疑、各种清单和表，说明的头两页：读全，先把全局搭起来"),
+    ("main", "建模主图", "平面、立面、剖面：建模要照着画的图"),
+    ("deep", "按需深入", "详图大样、说明正文、认不出种类的页、DWG 已经读出内容的图：用到哪张再识别哪张"),
+]
+STAGE_LABEL = {k: v for k, v, _ in STAGES}
+STAGE_RANK = {k: i for i, (k, _, _) in enumerate(STAGES)}
+STAGE_GROUPS = [  # (分组, 属于哪一步, 名称)，同一步里按这个先后
+    ("catalog", "key", "图纸目录、清单"),
+    ("changes", "key", "变更单、答疑"),
+    ("lists", "key", "表格、一览表"),
+    ("notes_head", "key", "说明的头两页"),
+    ("plans", "main", "平面、布置、配筋"),
+    ("sections", "main", "立面、剖面"),
+    ("details", "deep", "详图、大样"),
+    ("notes_body", "deep", "说明正文"),
+    ("dwg", "deep", "DWG 已读出内容的图"),
+    ("other", "deep", "认不出种类的页"),
+]
+GROUP_STAGE = {g: st for g, st, _ in STAGE_GROUPS}
+GROUP_LABEL = {g: lb for g, _, lb in STAGE_GROUPS}
+GROUP_RANK = {g: i for i, (g, _, _) in enumerate(STAGE_GROUPS)}
+NOTES_HEAD = 2  # 说明、规范书这类多页文件，头两页（封面、目录）算重点图，其余是正文
+_LISTS = re.compile(r"一览|统计|清单|明细|表(?!面|示)|\bschedules?\b|\blists?\b|\bregisters?\b|\bsch\b|\btables?\b", re.I)
+_CHANGES = re.compile(r"变更|修改通知|答疑|澄清|补遗|\baddend(?:um|a)\b|\bvariations?\b|change (?:order|notice)|\bRFI\b|"
+                      r"\bbulletins?\b|\bclarifications?\b|\btender quer(?:y|ies)\b", re.I)
+_RULE = dict(_PRIORITY_RULES)
+_STAGE_RULES = [("catalog", _RULE["catalog"]), ("changes", _CHANGES), ("lists", _LISTS), ("notes", _RULE["notes"]), ("details", _RULE["details"]),
+                ("sections", _RULE["sections"]), ("plans", _RULE["plans"])]
+
+
+def map_hints(con) -> dict:
+    """地图给的线索：已经知道的图号 → 图名（DWG 读出的图签、已识别的图签和目录条目），以及 DWG 已读出的图号。"""
+    from .state import norm_no
+    titles: dict[str, str] = {}
+    dwg_nos: set[str] = set()
+    for r in con.execute("SELECT executor, data FROM recognitions"):
+        rec = json.loads(r["data"])
+        tb = rec.get("title_block") or {}
+        no = norm_no((tb.get("drawing_no") or {}).get("value"))
+        title = (tb.get("drawing_title") or {}).get("value")
+        if no and title:
+            titles.setdefault(no, title)
+        if no and r["executor"] == "dwg":
+            dwg_nos.add(no)
+        for e in rec.get("catalog_entries") or []:
+            n = norm_no(e.get("drawing_no"))
+            if n and e.get("drawing_title"):
+                titles[n] = e["drawing_title"]  # 目录上的图名优先
+    return {"titles": titles, "dwg": dwg_nos}
+
+
+def page_path(r) -> str:
+    """页面的出处：多页文件带“（第 n 页）”，和一级识别、图谱里的写法一样。"""
+    return r["first_path"] + (f"（第 {r['page_index']} 页）" if (r["page_count"] or 1) > 1 else "")
+
+
+def first_guess(r) -> dict | None:
+    """第一步（地图）对这一页的推测：只看文件名、文件夹和 PDF 文字（names.guess）。"""
+    return names.guess([page_path(r)], r["text"] or "")
+
+
+def stage_group(r, hints: dict | None = None, guess: dict | None = None) -> str:
+    """一页归哪一组（见 STAGE_GROUPS）：先看地图上这页的图名（目录、DWG 里读到的，或文件名里的），再看文件夹。"""
+    from .state import norm_no
+    hints = hints or {"titles": {}, "dwg": set()}
+    g = guess if guess is not None else first_guess(r)
+    no = norm_no(g["no"]["value"]) if g else None
+    multi = (r["page_count"] or 1) > 1
+    titles = [hints["titles"].get(no) if no else None, (g.get("title") or {}).get("value") if g else None]
+    kind = next((k for k in (_kind_of(t, _STAGE_RULES) for t in titles if t) if k), None)
+    if kind is None:
+        segs = [x for x in re.split(r"\s+/\s+", r["first_path"] or "") if x and not x.startswith("批次#")]
+        for seg in reversed(segs):
+            kind = _kind_of(re.sub(r"\.(?:pdf|dwg|dxf|png|jpe?g|tiff?|zip|rar|7z)$", "", seg, flags=re.I), _STAGE_RULES)
+            if kind:
+                break
+    if kind == "notes":
+        return "notes_head" if not multi or r["page_index"] <= NOTES_HEAD else "notes_body"
+    if kind in ("plans", "sections") and no in hints["dwg"]:
+        return "dwg"  # 同图号的 DWG 已经读出图签、文字和引用，PDF 这页用到时再看
+    if kind is None and multi and r["page_index"] <= NOTES_HEAD and _kind_of((r["text"] or "")[:400], _STAGE_RULES[:1]):
+        return "catalog"  # 认不出种类的合订本：开头一两页写着目录、清单的，多半是这本的目录
+    return kind or "other"
+
+
+def stage_plan(proj: Project, scope: str = "new") -> dict:
+    """分步识别的进度：第一步（地图）认出了多少，后面每一步有几页、识别了几页、还要识别哪些（按组举例）。
+
+    每一步的页数按像素去重；“还要识别”按 scope 算（默认是还没看图识别的页）。"""
+    left = {r["page_id"] for r in pick_pages(proj, scope)} if scope != "all" else None
+    with proj.connect() as con:
+        everything = pages_to_recognize(con, scope="all")
+        hints = map_hints(con)
+        cad = con.execute("SELECT COUNT(*) AS n, SUM(f.sha256 IN (SELECT sha256 FROM cad_reads)) AS done,"
+                          " SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE sheets > 0)) AS ok"
+                          " FROM files f WHERE f.kind = 'cad' AND f.ext IN ('.dwg', '.dxf')").fetchone()
+        dwg_sheets = con.execute("SELECT COUNT(*) FROM recognitions WHERE executor = 'dwg'").fetchone()[0]
+    stages = {k: {"key": k, "label": lb, "desc": d, "total": 0, "left": 0, "groups": {}} for k, lb, d in STAGES}
+    numbered = 0
+    rows_left = []
+    for r in everything:
+        g = first_guess(r)
+        numbered += g is not None
+        grp = stage_group(r, hints, g)
+        st = stages[GROUP_STAGE[grp]]
+        st["total"] += 1
+        if left is None or r["page_id"] in left:
+            st["left"] += 1
+            st["groups"].setdefault(grp, []).append(r)
+            rows_left.append(r)
+    out = []
+    for k, _lb, _d in STAGES:
+        st = stages[k]
+        groups = [{"key": g, "label": GROUP_LABEL[g], "pages": len(rs),
+                   "examples": list(dict.fromkeys(x["first_path"].split(" / ")[-1] for x in rs))[:3]}
+                  for g, rs in sorted(st["groups"].items(), key=lambda kv: GROUP_RANK[kv[0]])]
+        out.append({**st, "done": st["total"] - st["left"] if left is not None else 0, "groups": groups})
+    return {
+        "map": {"pages": len(everything), "numbered": numbered, "titles": len(hints["titles"]),
+                "dwg_files": cad["n"] or 0, "dwg_read": cad["done"] or 0, "dwg_ok": cad["ok"] or 0, "dwg_sheets": dwg_sheets},
+        "stages": out,
+        "_rows": rows_left,  # 给估算用：还要识别的页（不往外给）
+        "_hints": hints,
+    }
+
+
+def stage_rows(rows, stages: list[str], hints: dict) -> list:
+    """只留这几步的页，按步骤、组排好（同组保持文件顺序）。"""
+    bad = [k for k in stages if k not in STAGE_RANK]
+    if bad:
+        raise ValueError(f"未知的识别步骤：{'、'.join(bad)}")
+    keyed = [(GROUP_RANK[g], i, r) for i, r in enumerate(rows) for g in [stage_group(r, hints)] if GROUP_STAGE[g] in stages]
+    return [r for _g, _i, r in sorted(keyed, key=lambda x: (x[0], x[1]))]
+
+
 def pick_pages(proj: Project, scope: str = "new", priorities: list[str] | None = None,
-               pages: list[str] | None = None) -> list:
-    """按范围挑要识别的页面，按优先级排好；priorities 给了就只要这几档；pages 给了就只识别这几页（按需识别）。"""
+               pages: list[str] | None = None, stages: list[str] | None = None) -> list:
+    """按范围挑要识别的页面，按优先级排好；priorities 给了就只要这几档；stages 给了就只要分步识别的这几步，
+    按步骤排；pages 给了就只识别这几页（按需识别）。"""
     if scope not in SCOPES:
         raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(SCOPES)}")
     only = set(pages) if pages is not None else _conflict_pages(proj) if scope == "conflict" else None
     with proj.connect() as con:
         rows = pages_to_recognize(con, scope=scope, only=only)
+        if stages is not None:
+            return stage_rows(rows, stages, map_hints(con))
     if priorities is not None:
         bad = [k for k in priorities if k not in PRIORITY_RANK]
         if bad:
@@ -186,11 +338,12 @@ def pages_to_recognize(con, include_done: bool = False, scope: str = "new", only
 
 
 def make_task(proj: Project, include_done: bool = False, render: bool = True, scope: str = "new",
-              priorities: list[str] | None = None, progress=None, pages: list[str] | None = None) -> Path | None:
+              priorities: list[str] | None = None, progress=None, pages: list[str] | None = None,
+              stages: list[str] | None = None) -> Path | None:
     """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档，pages 给了就只放这几页。
 
     渲染页面图片较慢，progress(已完成, 总数) 用来报进度。"""
-    rows = pick_pages(proj, "all" if include_done else scope, priorities, pages)
+    rows = pick_pages(proj, "all" if include_done else scope, priorities, pages, stages)
     if not rows:
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

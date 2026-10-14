@@ -175,32 +175,47 @@ class LiveImport:
 
 def plan_recognition(proj: Project, scope: str = "new", executor: str = "codex", tier: str = "economy",
                      model: str | None = None, tiles: int | None = None, workers: int | None = None) -> dict | None:
-    """估算：要识别多少页、按优先级分几档（先目录、说明、平面，详图大样放最后）、各要多久或多少钱。
+    """估算：要识别多少页、分几步（第一步地图不看图；再重点图、建模主图、按需深入，见 recognition.STAGES），
+    每步、每组要多久或多少钱；也给旧的按优先级分档（priorities）。
 
-    不生成任务包、不渲染图片，几千页也很快；开始识别时才只为选中的几档准备图片。没有要识别的页面时返回 None。"""
+    不生成任务包、不渲染图片，几千页也很快；开始识别时才只为选中的几步准备图片。没有要识别的页面时返回 None。"""
     from .executors import claude, codex
-    rows = recognition.pick_pages(proj, scope)
+    sp = recognition.stage_plan(proj, scope)
+    rows = sp.pop("_rows")
+    hints = sp.pop("_hints")
     if not rows:
         return None
     plan = recognition.priority_plan(rows)
     by_key: dict[str, list] = {}
+    by_group: dict[str, list] = {}
     for r in rows:
         by_key.setdefault(recognition.priority_of(r["first_path"]), []).append(r)
+        by_group.setdefault(recognition.stage_group(r, hints), []).append(r)
+    by_stage = {k: [r for g in recognition.STAGE_GROUPS if g[1] == k for r in by_group.get(g[0], [])]
+                for k, _lb, _d in recognition.STAGES}
     if executor == "codex":
         cfg = codex.TIERS[tier]
         tiles = cfg["tiles"] if tiles is None else tiles
         workers = workers or codex.DEFAULT_WORKERS
         per_page = codex.SECONDS_PER_PAGE * (1.5 if tiles > 1 else 1) / max(1, workers) / 60  # 分钟
-        for g in plan:
-            g["minutes"] = max(1, round(g["pages"] * per_page))
-        return {"executor": "codex", "scope": scope, "tier": tier, "pages": len(rows),
+
+        def cost(rs):
+            return {"minutes": max(1, round(len(rs) * per_page))}
+        head = {"executor": "codex", "scope": scope, "tier": tier, "pages": len(rows),
                 "images": len(rows) * (2 + (tiles * tiles if tiles > 1 else 0)), "model": model or cfg["model"],
-                "effort": cfg["effort"], "workers": workers, "minutes": max(1, round(len(rows) * per_page)),
-                "priorities": plan}
-    total = claude.estimate_rows(rows, tier, model, tiles)
+                "effort": cfg["effort"], "workers": workers, "minutes": max(1, round(len(rows) * per_page))}
+    else:
+        def cost(rs):
+            return {"usd": claude.estimate_rows(rs, tier, model, tiles)["estimated_usd"]}
+        head = {"executor": "claude", "scope": scope, "tier": tier, "pages": len(rows), **claude.estimate_rows(rows, tier, model, tiles)}
     for g in plan:
-        g["usd"] = claude.estimate_rows(by_key[g["key"]], tier, model, tiles)["estimated_usd"]
-    return {"executor": "claude", "scope": scope, "tier": tier, "pages": len(rows), **total, "priorities": plan}
+        g.update(cost(by_key[g["key"]]))
+    for st in sp["stages"]:
+        if st["left"]:
+            st.update(cost(by_stage[st["key"]]))
+        for g in st["groups"]:
+            g.update(cost(by_group[g["key"]]))
+    return {**head, "priorities": plan, "map": sp["map"], "stages": sp["stages"]}
 
 
 def duration_text(minutes: float) -> str:
@@ -208,20 +223,21 @@ def duration_text(minutes: float) -> str:
 
 
 def prepare_claude(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
-                   tiles: int | None = None, task: Path | None = None) -> dict | None:
-    """生成任务包并估算花费（不调用 API）。没有要识别的页面时返回 None。"""
+                   tiles: int | None = None, task: Path | None = None, stages: list[str] | None = None) -> dict | None:
+    """生成任务包并估算花费（不调用 API）；stages 给了只放分步识别的这几步。没有要识别的页面时返回 None。"""
     from .executors import claude
-    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope)
+    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages)
     if task is None:
         return None
     return {"task": str(task), **claude.estimate(task, tier, model, tiles)}
 
 
 def prepare_codex(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
-                  tiles: int | None = None, task: Path | None = None, workers: int | None = None) -> dict | None:
-    """生成任务包并估算用时（不调用 Codex）。没有要识别的页面时返回 None。"""
+                  tiles: int | None = None, task: Path | None = None, workers: int | None = None,
+                  stages: list[str] | None = None) -> dict | None:
+    """生成任务包并估算用时（不调用 Codex）；stages 给了只放分步识别的这几步。没有要识别的页面时返回 None。"""
     from .executors import codex
-    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope)
+    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages)
     if task is None:
         return None
     return {"task": str(task), **codex.estimate(task, tier, model, tiles, workers or codex.DEFAULT_WORKERS)}
@@ -235,10 +251,42 @@ def estimate_text(est: dict) -> str:
         usd = f"约 ${est['estimated_usd']:.2f}" if est["estimated_usd"] is not None else "未知（模型不在价格表里）"
         text = (f"待识别 {est['pages']} 页，{est['images']} 张图片，模型 {est['model']}，粗略估算输入 {est['input_tokens']} tokens、"
                 f"输出 {est['output_tokens']} tokens，花费{usd}。")
+    if est.get("stages"):
+        return text + "\n" + stages_text(est)
     for i, g in enumerate(est.get("priorities") or [], 1):
-        cost = duration_text(g["minutes"]) if "minutes" in g else (f"约 ${g['usd']:.2f}" if g.get("usd") is not None else "")
-        text += f"\n  {i}. {g['label']} {g['pages']} 页（{cost}），例如：{'、'.join(g['examples'])}"
+        text += f"\n  {i}. {g['label']} {g['pages']} 页（{_cost_text(g)}），例如：{'、'.join(g['examples'])}"
     return text
+
+
+def _cost_text(g: dict) -> str:
+    return duration_text(g["minutes"]) if "minutes" in g else (f"约 ${g['usd']:.2f}" if g.get("usd") is not None else "")
+
+
+STEP_NAMES = ("第一步", "第二步", "第三步", "第四步", "第五步")
+
+
+def map_text(m: dict) -> str:
+    """第一步（地图）做到哪了：只靠文件名、PDF 文字、DWG，不看图。"""
+    text = f"{m['pages']} 页 PDF 里，{m['numbered']} 页从文件名或 PDF 文字认出了图号"
+    if m["dwg_files"]:
+        text += f"；DWG {m['dwg_files']} 个，读了 {m['dwg_read']} 个，读出 {m['dwg_sheets']} 张图"
+    return text + "。"
+
+
+def stages_text(est: dict) -> str:
+    """分步识别写成几行：每步几页、识别了几页、还要多久，举几个例子。"""
+    lines = [f"分步识别（一步一步来，随时可以停，下次接着识别没做完的）：",
+             f"  {STEP_NAMES[0]} 地图（不看图、不花钱）：{map_text(est['map'])}"]
+    for i, st in enumerate(est["stages"], 1):
+        done = f"，已识别 {st['done']} 页" if st["done"] else ""
+        if not st["left"]:
+            lines.append(f"  {STEP_NAMES[i]} {st['label']}：{st['total']} 页，都识别过了。" if st["total"] else
+                         f"  {STEP_NAMES[i]} {st['label']}：没有这类页面。")
+            continue
+        lines.append(f"  {STEP_NAMES[i]} {st['label']}：还要识别 {st['left']} 页（{_cost_text(st)}）{done}——{st['desc']}")
+        for g in st["groups"]:
+            lines.append(f"      {g['label']} {g['pages']} 页，例如：{'、'.join(g['examples'])}")
+    return "\n".join(lines)
 
 
 def _finish_recognition(proj: Project, task: Path, r, usage_text: str, log: Log, live: LiveImport) -> dict:

@@ -371,6 +371,48 @@ def build_numbering(out: Path) -> tuple[Path, str]:
     return root, "2026-09-01"
 
 
+# ---------------- 分步识别 ----------------
+
+STAGED_NAME = "分步识别"
+
+
+def build_staged(out: Path) -> tuple[Path, str]:
+    """一批几种页面混在一起的英文图（分步识别，docs/图纸字段.md 9.8），收图后每页该归哪一步：
+
+    - 重点图：A-001 图纸目录（列了 A-101~A-103、A-301、A-501）、A-601 门表（Schedule）、
+      投标答疑回复（Tender Query Response，没有图号）、5 页的照明规范书的头两页；
+    - 建模主图：A-101 一层平面、A-301 剖面；
+    - 按需深入：规范书第 3~5 页、A-501 楼梯详图、A-103 三层平面（同图号的 DXF 已读出内容）；
+    - 合订本 RIBA 4 BINDER.pdf：第 1 页写着“图纸目录”，第 2 页只在文字里认出 A-102，文件名看不出种类——
+      目录识别以前归按需深入，目录识别以后按目录上的图名（LEVEL 02 PLAN）归到建模主图。"""
+    root = out / STAGED_NAME
+    d = "2026-10-10"
+    listed = [("A-101", "LEVEL 01 PLAN", "A"), ("A-102", "LEVEL 02 PLAN", "A"), ("A-103", "LEVEL 03 PLAN", "A"),
+              ("A-301", "SECTION A-A", "A"), ("A-501", "STAIR DETAILS", "A")]
+    spec = [{"no": "", "title": f"SPECIFICATION LIGHTING {i}", "rev": "A", "date": d,
+             "body": [f"Section {i}: luminaires shall comply with the schedule"]} for i in range(1, 6)]
+    files = {
+        "A-001 图纸目录 DRAWING LIST.pdf": sheet_pdf("A-001", "图纸目录 DRAWING LIST", "A", d, [], catalog=listed),
+        "A-601 DOOR SCHEDULE.pdf": sheet_pdf("A-601", "DOOR SCHEDULE", "A", d, ["D1 900x2100", "D2 1200x2100"]),
+        "Tender Query Response 01.pdf": sheet_pdf("TQ-01", "TENDER QUERY RESPONSE", "A", d, ["Q1: door D1 width revised"]),
+        "Specification - Lighting.pdf": merged_pdf(spec),
+        "A-101 LEVEL 01 PLAN.pdf": sheet_pdf("A-101", "LEVEL 01 PLAN", "A", d, []),
+        "A-301 SECTION A-A.pdf": sheet_pdf("A-301", "SECTION A-A", "A", d, []),
+        "A-501 STAIR DETAILS.pdf": sheet_pdf("A-501", "STAIR DETAILS", "A", d, []),
+        "A-103 LEVEL 03 PLAN.pdf": sheet_pdf("A-103", "LEVEL 03 PLAN", "A", d, []),
+        "A-103 LEVEL 03 PLAN.dxf": cad_dxf([{"no": "A-103", "title": "LEVEL 03 PLAN", "rev": "A", "date": d,
+                                            "texts": [(50, 250, "LEVEL 03 PLAN")]}]),
+        "RIBA 4 BINDER.pdf": merged_pdf([
+            {"no": "A-000", "title": "图纸目录 BINDER CONTENTS", "rev": "A", "date": d, "body": []},
+            {"no": "A-102", "title": "SHEET 2", "rev": "A", "date": d, "body": []}]),
+    }
+    for name, data in files.items():
+        p = root / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return root, d
+
+
 # ---------------- CAD 图（DXF） ----------------
 
 TB_W, TB_H = 420, 297  # 图框（A3），图签属性在右下角

@@ -2760,7 +2760,7 @@ function renderJob(j) {
     `已导入 ${j.imported} 页：左边的图谱和问题中心跟着更新，可以先点开已识别的图纸看。中途停下，已识别的也都在。`));
   if (j.error) parts.push(el('div', { class: 'note crit' }, j.error));
   const logBox = el('pre', { class: 'joblog', 'aria-label': '运行记录' }, j.lines.join('\n') || '…');
-  // 估算完成后，运行记录和下面的分档列表重复：收起来，分档和“开始识别”直接排在标题下面
+  // 估算完成后，运行记录和下面的分步列表重复：收起来，分步和“开始识别”直接排在标题下面
   parts.push(j.kind === 'estimate' && j.status === 'done' && j.result ? el('details', {}, el('summary', {}, '运行记录'), logBox) : logBox);
   const res = j.result;
   if (j.status === 'done' && j.kind === 'estimate') {
@@ -2768,23 +2768,43 @@ function renderJob(j) {
     else {
       const ex = res.executor || 'claude';
       const ready = ex === 'codex' ? !RECOG || RECOG.codex.ready : APP.claude_ready;
-      const groups = res.priorities || [];
-      const picked = new Set(groups.map(g => g.key));  // 默认全选，按从上到下的顺序识别
+      // 分步识别：第一步地图（收图时就做了），后面几步看图识别；默认勾重点图和建模主图，按需深入用到再识别
+      const stages = res.stages || [];
+      const picked = new Set(stages.filter(st => st.left && st.key !== 'deep').map(st => st.key));
+      if (!picked.size) stages.filter(st => st.left).forEach(st => picked.add(st.key));
       const cost = gs => ex === 'codex' ? durText(gs.reduce((a, g) => a + g.minutes, 0))
         : gs.every(g => g.usd != null) ? `约 $${gs.reduce((a, g) => a + g.usd, 0).toFixed(2)}` : '';
       const go = el('button', { class: 'btn primary', type: 'button',
-        onclick: () => startJob('recognize', { executor: ex, scope: res.scope, tier: res.tier, model: res.model, priorities: [...picked] }) });
+        onclick: () => startJob('recognize', { executor: ex, scope: res.scope, tier: res.tier, model: res.model, stages: [...picked] }) });
       const sum = () => {
-        const gs = groups.filter(g => picked.has(g.key)), n = gs.reduce((a, g) => a + g.pages, 0);
-        go.textContent = n ? `开始识别 ${n} 页（${cost(gs)}）` : '请至少选一档';
+        const gs = stages.filter(st => picked.has(st.key) && st.left), n = gs.reduce((a, st) => a + st.left, 0);
+        go.textContent = n ? `开始识别 ${n} 页（${cost(gs)}）` : '请至少选一步';
         go.disabled = !ready || !n;
       };
-      parts.push(section('识别顺序（从上到下）',
-        el('p', { class: 'meta' }, '先识别对判断最有用的图：目录、说明、平面在前，详图大样放最后。可以只勾前几档，剩下的以后再识别。'),
-        el('ul', { class: 'list prio' }, groups.map((g, i) => el('li', {},
-          el('label', {}, el('input', { type: 'checkbox', checked: '', onchange: e => { if (e.target.checked) picked.add(g.key); else picked.delete(g.key); sum(); } }),
-            el('span', {}, `${i + 1}. ${g.label} ${g.pages} 页 · ${cost([g])}`)),
-          el('small', { class: 'meta' }, '例如：' + g.examples.join('、')))))));
+      const STEP = ['第一步', '第二步', '第三步', '第四步', '第五步'];
+      const m = res.map || {};
+      const mapLine = `${m.pages} 页 PDF 里，${m.numbered} 页从文件名或 PDF 文字认出了图号`
+        + (m.dwg_files ? `；DWG ${m.dwg_files} 个，读了 ${m.dwg_read} 个，读出 ${m.dwg_sheets} 张图` : '') + '。';
+      const stepItem = (st, i) => {
+        const pct = st.total ? Math.round(st.done / st.total * 100) : 0;
+        const head = st.left ? `${STEP[i + 1]} ${st.label} · 还要识别 ${st.left} 页 · ${cost([st])}`
+          : `${STEP[i + 1]} ${st.label} · ${st.total ? `${st.total} 页都识别过了` : '没有这类页面'}`;
+        const box = el('input', { type: 'checkbox', onchange: e => { if (e.target.checked) picked.add(st.key); else picked.delete(st.key); sum(); } });
+        if (picked.has(st.key)) box.checked = true;
+        if (!st.left) box.disabled = true;
+        return el('li', {},
+          el('label', {}, box, el('span', {}, head)),
+          el('small', { class: 'meta' }, st.desc + (st.key === 'deep' ? '。平时不用全识别：在“按任务找图”、图纸卡片里点“看图识别”。' : '')),
+          st.total ? el('small', {}, el('span', { class: 'bar', style: 'display:inline-block;width:160px;vertical-align:middle;margin-right:6px' },
+            el('i', { style: `width:${pct}%` })), `已识别 ${st.done} / ${st.total} 页`) : null,
+          ...st.groups.map(g => el('small', { class: 'meta' }, `${g.label} ${g.pages} 页，例如：${g.examples.join('、')}`)));
+      };
+      parts.push(section('分步识别（一步一步来，随时可以停）',
+        el('p', { class: 'meta' }, '先搭地图，再读重点图，然后是建模要照着画的图，详图和说明正文用到再识别。识别过的页不会再识别：停下以后再估算一次，接着识别没做完的。'),
+        el('ul', { class: 'list prio' },
+          el('li', {}, el('label', {}, el('input', { type: 'checkbox', checked: '', disabled: '' }), el('span', {}, '第一步 地图 · 不看图、不花钱（收图时就做了）')),
+            el('small', { class: 'meta' }, mapLine)),
+          stages.map(stepItem))));
       sum();
       parts.push(el('div', { class: 'opts' }, go,
         ready ? null : ex === 'codex' ? el('button', { class: 'btn', type: 'button', onclick: () => renderRecognize(true) }, '查看 Codex 状态')

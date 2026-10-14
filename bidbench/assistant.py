@@ -354,7 +354,7 @@ class Toolkit:
         return self._state()["baselines"]
 
     def estimate_recognition(self, scope: str = "new", tier: str = "economy", executor: str = "codex") -> dict:
-        """估算一次真实识别的规模、用时或花费，以及识别的先后顺序（按优先级分档）。不生成任务包、不调用 API。"""
+        """估算一次真实识别的规模、用时或花费，按分步识别（地图 → 重点图 → 建模主图 → 按需深入）分好。不生成任务包、不调用 API。"""
         from . import ops
         if scope not in recognition.SCOPES:
             raise ToolError(f"scope 可选：{'、'.join(recognition.SCOPES)}")
@@ -365,16 +365,20 @@ class Toolkit:
         est = ops.plan_recognition(self.proj, scope, executor, tier)
         if est is None:
             return {"pages": 0, "note": f"范围「{recognition.SCOPES[scope]}」内没有需要识别的页面。"}
-        order = [{"order": i, "priority": g["label"], "pages": g["pages"], "examples": g["examples"],
-                  **({"minutes": g["minutes"]} if "minutes" in g else {"estimated_usd": g.get("usd")})}
-                 for i, g in enumerate(est["priorities"], 1)]
+        steps = [{"step": i, "key": st["key"], "name": st["label"], "what": st["desc"], "pages_total": st["total"],
+                  "recognized": st["done"], "pages_left": st["left"],
+                  **({"minutes": st["minutes"]} if "minutes" in st else {"estimated_usd": st.get("usd")} if st["left"] else {}),
+                  "groups": [{"name": g["label"], "pages": g["pages"], "examples": g["examples"]} for g in st["groups"]]}
+                 for i, st in enumerate(est["stages"], 2)]
         where = "OpenAI（Codex，占用 ChatGPT 账号的额度）" if executor == "codex" else "Anthropic API，并产生费用"
         return {"pages": est["pages"], "executor": executor, "model": est["model"],
                 **({"minutes": est["minutes"]} if executor == "codex" else {"estimated_usd": est["estimated_usd"]}),
-                "priority_order": order,
-                "command": f"bidbench recognize --executor {executor} --tier {tier} --scope {scope}",
-                "note": f"按 priority_order 从上到下识别（先目录、说明、平面，详图大样放最后）；在工作台“识别”里估算后可以只勾前几档。"
-                        f"识别会把图纸页面发送到 {where}；请让用户自己决定是否开始。"}
+                "map": {"step": 1, "what": "地图：只看文件名、文件夹、PDF 文字和 DWG，不看图、不花钱", **est["map"]},
+                "stages": steps,
+                "command": f"bidbench recognize --executor {executor} --tier {tier} --scope {scope} --stage key",
+                "note": "分步识别：第 1 步地图已经有了（收图时就做了）；建议先识别第 2 步重点图（目录、变更单、清单和表、说明头两页），"
+                        "再第 3 步建模主图（平面、立面、剖面）；第 4 步按需深入不用全识别，建模用到哪张再识别哪张。"
+                        f"每一步可以随时停，下次接着识别没做完的。识别会把图纸页面发送到 {where}；请让用户自己决定是否开始、识别哪几步。"}
 
     def numbering_overview(self) -> dict:
         st = self._state()

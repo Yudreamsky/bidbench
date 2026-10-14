@@ -54,13 +54,23 @@ def cmd_read_dwg(args):
 
 def cmd_tasks(args):
     proj = _proj(args)
-    t = recognition.make_task(proj, include_done=args.all, render=not args.no_images, scope=args.scope)
+    t = recognition.make_task(proj, include_done=args.all, render=not args.no_images, scope=args.scope, stages=args.stage)
     if not t:
         print("没有需要识别的页面。")
         return
     n = len(json.loads((t / "manifest_in.json").read_text(encoding="utf-8"))["pages"])
     print(f"已生成识别任务包（{n} 页）：{t}")
     print("交给外部 agent 按 任务说明.md 执行，或运行 bidbench recognize 用内置模拟执行器。")
+
+
+def cmd_stages(args):
+    """分步识别进度：只读，不看图、不花钱。"""
+    proj = _proj(args)
+    sp = recognition.stage_plan(proj, args.scope)
+    sp.pop("_rows"), sp.pop("_hints")
+    print(ops.stages_text(sp))
+    print("识别某几步：bidbench recognize --executor codex --stage key（可写几次 --stage：key=重点图，main=建模主图，deep=按需深入）")
+    return sp
 
 
 def cmd_recognize(args):
@@ -71,9 +81,9 @@ def cmd_recognize(args):
         sys.exit("错误：思考强度 ultra 只有 Codex 能用")
     given = Path(args.task) if args.task else None
     if args.executor == "codex":
-        est = ops.prepare_codex(proj, args.scope, args.tier, args.model, args.tiles, given, args.workers)
+        est = ops.prepare_codex(proj, args.scope, args.tier, args.model, args.tiles, given, args.workers, args.stage)
     else:
-        est = ops.prepare_claude(proj, args.scope, args.tier, args.model, args.tiles, given)
+        est = ops.prepare_claude(proj, args.scope, args.tier, args.model, args.tiles, given, args.stage)
     if est is None:
         print(f"范围「{recognition.SCOPES[args.scope]}」内没有需要识别的页面。")
         return None
@@ -500,7 +510,13 @@ def main(argv=None):
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="挑选哪些页面（默认 new）")
     s.add_argument("--all", action="store_true", help="等同于 --scope all")
     s.add_argument("--no-images", action="store_true", help="不渲染页面图片（仅文字层）")
+    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
+                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES))
     s.set_defaults(fn=cmd_tasks)
+
+    s = sub.add_parser("stages", help="分步识别的进度：地图认出了多少，重点图、建模主图、按需深入各还剩几页")
+    s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="“还要识别”按哪个范围算（默认 new）")
+    s.set_defaults(fn=cmd_stages)
 
     s = sub.add_parser("recognize", help="用内置执行器识别并导入")
     s.add_argument("--executor", default="simulated", choices=["simulated", "claude", "codex"],
@@ -517,6 +533,8 @@ def main(argv=None):
     s.add_argument("--tiles", type=int, help="局部切片 N×N，0 表示不切")
     s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
     s.add_argument("--dry-run", action="store_true", help="只生成任务包并估算花费，不调用 API")
+    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
+                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES))
     s.set_defaults(fn=cmd_recognize)
 
     s = sub.add_parser("classify", help="智能分类：让 AI 给图纸分专业、分小类、起中文简称，给事实分多级目录")

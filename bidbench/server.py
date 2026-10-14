@@ -293,6 +293,10 @@ def _job_fn(app: _App, kind: str, body: dict):
         if priorities is not None and (not isinstance(priorities, list) or not priorities
                                        or any(k not in recognition.PRIORITY_RANK for k in priorities)):
             raise ValueError("请至少选一档要识别的图纸")
+        stages = body.get("stages")  # 分步识别：只识别选中的几步
+        if stages is not None and (not isinstance(stages, list) or not stages
+                                   or any(k not in recognition.STAGE_RANK for k in stages)):
+            raise ValueError("请至少选一步要识别的图纸")
         pages = body.get("pages")  # 按需识别：图谱里点的那张图、那一框
         if pages is not None and (not isinstance(pages, list) or not pages
                                   or any(not isinstance(x, str) or not PAGE_ID.fullmatch(x) for x in pages)):
@@ -315,10 +319,11 @@ def _job_fn(app: _App, kind: str, body: dict):
                 job.imported = n
                 along(n)
             t = task
-            if t is None:  # 按选中的几档准备页面图片：先目录、说明、平面，详图大样放最后
+            if t is None:  # 按选中的几步准备页面图片：先重点图，再建模主图，按需深入放最后
                 job.stage = "准备页面图片"
                 job.log("正在准备页面图片……")
-                t = recognition.make_task(need_proj(), scope=scope, priorities=priorities, progress=progress, pages=pages)
+                t = recognition.make_task(need_proj(), scope=scope, priorities=priorities, progress=progress, pages=pages,
+                                          stages=stages)
                 if t is None:
                     job.log("没有需要识别的页面。")
                     return None

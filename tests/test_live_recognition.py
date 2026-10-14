@@ -42,7 +42,7 @@ def test_plan_and_task_follow_priority(demo_copy):
     keys = [g["key"] for g in plan["priorities"]]
     assert keys == sorted(keys, key=recognition.PRIORITY_RANK.get) and len(keys) >= 3
     assert plan["pages"] == sum(g["pages"] for g in plan["priorities"]) and all(g["minutes"] >= 1 for g in plan["priorities"])
-    assert "1. " + plan["priorities"][0]["label"] in ops.estimate_text(plan)
+    assert "第二步 重点图" in ops.estimate_text(plan)
     seen = []
     task = recognition.make_task(demo_copy, scope="all", render=False, priorities=keys[:2], progress=lambda n, t: seen.append((n, t)))
     items = json.loads((task / "manifest_in.json").read_text(encoding="utf-8"))["pages"]
