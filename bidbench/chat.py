@@ -56,6 +56,7 @@ TOOL_LABEL = {
     "propose_issue_resolution": "提议处理问题", "propose_fact_confirmation": "提议确认事实", "propose_baseline": "提议锁定基线",
     "propose_note": "提议记笔记", "propose_improvement": "提改进建议",
     "numbering_overview": "图号汇总", "propose_numbering": "提议图号格式",
+    "find_sheets_for_task": "按任务找图", "related_sheets": "相关图纸", "locate": "定位到图上",
 }
 
 

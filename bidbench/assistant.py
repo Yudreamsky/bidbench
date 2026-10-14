@@ -13,7 +13,9 @@ import json
 import re
 from pathlib import Path
 
-from . import appconfig, classify, guide, numbering, recognition, reports, state
+import pymupdf
+
+from . import appconfig, classify, export, guide, navigate, numbering, recognition, reports, state
 from .recognition import page_markdown
 from .state import CONF_LABEL, STATUS_LABEL
 from .store import Project, add_decision, now_iso
@@ -223,6 +225,73 @@ class Toolkit:
                              "page_id": p["page_id"], "snippet": snippet})
         limit = max(1, min(limit, MAX_LIST))
         return {"query": q, "total": len(hits), "hits": hits[:limit]}
+
+    # ---------------- 查询：建模找图 ----------------
+
+    def find_sheets_for_task(self, floor: str | None = None, discipline: str | None = None, keyword: str | None = None,
+                             tower: str | None = None, limit: int = 40) -> dict:
+        try:
+            out = navigate.find_for_task(self._state(), floor, discipline, keyword, tower, limit)
+        except ValueError as e:
+            raise ToolError(str(e)) from None
+        out["hint"] = ("先看“主图”，再按需看“通用图”“引用到的图”；missing 里的图没发来，建模缺资料要告诉用户（可以列进答疑）。"
+                       "notices 里的变更单改过这些图，相关内容以变更单为准。要顺着某张图再往外找，用 related_sheets；"
+                       "要看图上某句话、某个详图索引在哪，用 locate(page_id, bbox)。")
+        return out
+
+    def related_sheets(self, no: str, depth: int = 1, types: list[str] | None = None, direction: str = "both") -> dict:
+        st = self._state()
+        n = (no or "").strip()
+        start = n if any(x["id"] == n for x in st["notices"]) else self._sheet(st, n)["no"]
+        try:
+            return navigate.walk(st, start, depth, types, direction)
+        except ValueError as e:
+            raise ToolError(str(e)) from None
+
+    def locate(self, page_id: str, bbox: list[float] | None = None) -> dict:
+        """一页在哪个文件第几页、属于哪张图哪一版；给了 bbox 再读出那块地方的文字、那里画的引用。"""
+        if not re.fullmatch(r"[0-9a-f]{12}-p\d{3}", page_id or ""):
+            raise ToolError("page_id 格式应为 12 位十六进制加 -p 和三位页码，例如 3fa9c01b77de-p001。")
+        if bbox is not None:
+            if (not isinstance(bbox, (list, tuple)) or len(bbox) != 4
+                    or not all(isinstance(x, (int, float)) and 0 <= x <= 1 for x in bbox)
+                    or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]):
+                raise ToolError("bbox 写成 [x0, y0, x1, y1]：相对整页宽高，取值 0~1，原点左上角，x0<x1、y0<y1。"
+                                "引用、事实的 bbox 可以直接拿来用。")
+        with self.proj.connect() as con:
+            if not con.execute("SELECT 1 FROM pages WHERE page_id=?", (page_id,)).fetchone():
+                raise ToolError(f"没有页面 {page_id}。")
+        st = self._state()
+        path, idx, count, unsafe = export._page_source(self.proj, page_id)
+        owner = navigate.page_owner(st, page_id) or {}
+        out = {"page_id": page_id, **owner, "page_number": idx, "page_count": count,
+               "workbench_pdf": f"/api/page/{page_id}.pdf"}
+        if owner.get("version_state") not in (None, "现行"):
+            out["warning"] = (f"这一页是 {owner['sheet']} 的 {owner['rev'] or '没写版次'} 版（{owner['version_state']}），"
+                              f"现行是 {owner['current_rev'] or '—'} 版（page_id {owner['current_page_id'] or '—'}），建模用现行版。")
+        if unsafe:
+            out["file_note"] = "原文件带脚本等风险内容，不给原文件路径；请在工作台里打开（会去掉脚本），或用导出的现行图纸。"
+        else:
+            out["file"] = str(path)
+        with pymupdf.open(path) as doc:
+            page = doc[idx - 1]
+            w, h = page.rect.width, page.rect.height
+            out["page_size_pt"] = [round(w, 1), round(h, 1)]
+            on_page = navigate.page_relations(st, page_id)
+            if bbox is not None:
+                pad = 0.01
+                box = [max(0, bbox[0] - pad), max(0, bbox[1] - pad), min(1, bbox[2] + pad), min(1, bbox[3] + pad)]
+                rect = pymupdf.Rect(box[0] * w, box[1] * h, box[2] * w, box[3] * h)
+                text = page.get_text("text", clip=rect).strip()
+                out["region"] = {"bbox": list(bbox), "bbox_pt": [round(v, 1) for v in rect],
+                                 "text": text[:2000] + ("……（已截断）" if len(text) > 2000 else "") if text else None,
+                                 "references_here": [r for r in on_page if navigate.overlaps(r["bbox"], box)]}
+                if not text:
+                    out["region"]["note"] = "这块地方没有文字层（扫描件、图块或只有线条），要看图形请打开原图。"
+        out["references_on_page"] = on_page
+        out["hint"] = ("file 是本机文件，page_number 从 1 数；bbox_pt 是 PDF 坐标（点，原点左上角）。"
+                       "这一页的识别内容用 get_page(page_id) 看。")
+        return out
 
     # ---------------- 查询：事实、问题 ----------------
 

@@ -8,7 +8,8 @@ import shutil
 from datetime import date
 from pathlib import Path
 
-from . import pdfpages, risk
+from . import navigate, pdfpages, risk
+from . import state as statemod
 from .recognition import page_markdown
 from .state import CONF_LABEL, STATUS_LABEL
 from .store import Project
@@ -85,7 +86,11 @@ def export_mirror(proj: Project, state: dict, target: Path | None = None) -> Pat
         "2. `L0-项目地图.md`：整套图纸概况、批次、问题。\n"
         "3. `L1-图纸卡片/<图号>.md`：每张图的图签、现行版次、版本链、关联图纸。\n"
         "4. `L2-图纸详情/<图号>-<版次>.md`：识别出的全部内容。\n"
-        "5. 需要核对原图时，用 L1 卡片里的页面编号回到原文件。\n\n"
+        "5. 需要核对原图时，用 L1 卡片里的页面编号回到原文件。\n"
+        "6. `relations.json`：图纸之间的全部关系，给程序读。`sheets` 是每张图（状态、现行版次、页面编号、楼层、文件），"
+        "`relations` 是有出处的关系（引用、跨专业引用、目录列出、变更单，带原文、页面编号和位置 bbox），"
+        "`same_floor`、`general` 是每张图的同层图纸、通用图。按任务找图时：先按楼层、专业挑出主图，"
+        "再顺着 relations 找它引用的图，最后看 general。\n\n"
         "规则：默认只用现行版。状态为冲突、待确认、缺失的内容不要当作确定事实使用。\n",
         encoding="utf-8")
     (target / "state.json").write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -110,6 +115,10 @@ def export_mirror(proj: Project, state: dict, target: Path | None = None) -> Pat
     l0 += ["", "## 待处理问题", ""] + [f"- [{i['kind']}] {i['title']}：{i['detail']}" for i in state["issues"]]
     (target / "L0-项目地图.md").write_text("\n".join(l0) + "\n", encoding="utf-8")
 
+    around = {s["no"]: statemod.same_floor(state, s["no"]) for s in state["sheets"]}
+    (target / "relations.json").write_text(json.dumps(relations_doc(state, around), ensure_ascii=False, indent=1),
+                                           encoding="utf-8")
+
     edges_from: dict[str, list] = {}
     for e in state["edges"]:
         edges_from.setdefault(e["from"], []).append(e)
@@ -132,6 +141,18 @@ def export_mirror(proj: Project, state: dict, target: Path | None = None) -> Pat
         if rel:
             card += ["", "## 关联图纸", ""] + [
                 f"- {'→ ' + e['to'] if e['from'] == s['no'] else '← ' + e['from']}：{e['label']}" for e in rel]
+        near = around[s["no"]]
+        if near["same_floor"]:
+            card += ["", f"## 同层图纸（{near['floors']}）", ""] + [
+                f"- {t['no']} {t['title'] or ''}（{t['discipline']}，{t['floors']}，{t['status']}）"
+                + (f"：{'；'.join(t['problems'])}" if t["problems"] else "") for t in near["same_floor"][:30]]
+            if len(near["same_floor"]) > 30:
+                card.append(f"- 还有 {len(near['same_floor']) - 30} 张，见 relations.json")
+        if near["general"]:
+            card += ["", "## 通用图（设计说明等，建哪一层都要看）", ""] + [
+                f"- {t['no']} {t['title'] or ''}（{t['discipline']}，{t['status']}）" for t in near["general"]]
+        if s.get("cad"):
+            card += ["", "## CAD 文件", ""] + [f"- {p}" for p in s["cad"]]
         fs = facts_by_sheet.get(s["no"], [])
         if fs:
             card += ["", "## 来自此图的事实", ""] + [f"- {f['name']}：{f['value']}（{CONF_LABEL[f['conf']]}）" for f in fs]
@@ -143,3 +164,27 @@ def export_mirror(proj: Project, state: dict, target: Path | None = None) -> Pat
             (target / "L2-图纸详情" / f"{_safe(s['no'])}-{_safe(v['rev'])}-批次{v['batch']}.md").write_text(
                 f"> 版本状态：{v['state']}\n\n" + page_markdown(rec), encoding="utf-8")
     return target
+
+
+def relations_doc(state: dict, around: dict | None = None) -> dict:
+    """relations.json：图纸之间的全部关系，给程序读（和 MCP 的 related_sheets 是同一份）。"""
+    around = around or {s["no"]: statemod.same_floor(state, s["no"]) for s in state["sheets"]}
+    sheets = {}
+    for s in state["sheets"]:
+        row = navigate.sheet_row(s)
+        row.pop("no")
+        row.update({"floor_list": s.get("floors") or [], "general": bool(s.get("general"))})
+        sheets[s["no"]] = row
+    return {
+        "as_of_batch": state["as_of"],
+        "note": "关系种类见 relation_types；from、to 是图号（多栋楼写成“塔楼 · 图号”），变更单的 from 是变更单编号。"
+                "bbox 是 [x0, y0, x1, y1]，相对整页宽高 0~1，原点左上角；page_id 是关系画在哪一页。"
+                "楼层 floor_list：1 是 1F，负数是地下，1000 是屋顶。",
+        "relation_types": navigate.REL_NOTE,
+        "sheets": sheets,
+        "relations": navigate.relations(state),
+        "notices": [{"id": n["id"], "title": n["title"], "kind": n["kind"], "page_id": n["page_id"], "batch": n["batch"],
+                     "changes": n["affects"]} for n in state["notices"]],
+        "same_floor": {no: [t["no"] for t in a["same_floor"]] for no, a in around.items() if a["same_floor"]},
+        "general": {no: [t["no"] for t in a["general"]] for no, a in around.items() if a["general"]},
+    }
