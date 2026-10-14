@@ -303,8 +303,8 @@ li.recent .linkbtn { flex: 1; }
 ul.list li.frow, ul.list li.rel { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--band); }
 .frow .rhead, .rel .rhead { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .frow small, .rel small { color: var(--muted); font-size: 12px; }
-.rel .rquote { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12.5px; color: var(--muted); }
-.rel .rquote q { color: var(--ink); quotes: "“" "”"; }
+.rquote { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12.5px; color: var(--muted); }
+.rquote q { color: var(--ink); quotes: "“" "”"; }
 .role-note { font-size: 12px; color: var(--muted); margin: -2px 0 6px; }
 .btn-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 dialog.spot { width: min(1200px, 94vw); height: min(880px, 92vh); max-width: none; max-height: none; padding: 0;
@@ -1856,7 +1856,10 @@ function renderSheet(no) {
   s.notes.filter(t => !myNotices.some(n => t.startsWith(n.id + '（'))).forEach(n => parts.push(el('div', { class: 'note' }, n)));
   myNotices.forEach(n => {  // 改了这张图的变更单：能打开原件，看得到它还改了哪些图
     const others = n.affects.filter(x => x !== no);
+    const mine = (n.refs || []).filter(r => r.to === no);
     parts.push(el('div', { class: 'note warn' }, `${n.id}（批次#${n.batch}）修改了此图的局部，相关内容以变更文件为准。`,
+      mine.map(r => el('div', { class: 'rquote' }, el('q', {}, r.text),
+        r.bbox ? el('button', { class: 'textbtn', type: 'button', onclick: () => showSpot({ from: n.id, label: r.text, page_id: n.page_id, bbox: r.bbox }, '里的这一条') }, '看位置') : null)),
       el('div', { class: 'row' }, el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.kind === '变更单' ? '变更单' : '答疑'}原图`),
         others.length ? el('span', { class: 'meta' }, '它还改了') : null, others.map(sheetChip))));
   });
@@ -1922,12 +1925,20 @@ function relList(m) {
     return el('li', { class: 'rel' },
       el('div', { class: 'rhead' }, sheetChip(other), el('span', {}, t ? t.title || '（图名未知）' : '（还没识别）'), statusPill(t),
         es.some(e => e.type === 'cross') ? el('span', { class: 'pill' }, '跨专业') : null),
-      es.map(e => el('div', { class: 'rquote' }, el('span', {}, `${e.from} 上${e.type === 'catalog' ? '的目录' : ''}写`), el('q', {}, e.label),
-        e.page_id && e.bbox ? el('button', { class: 'textbtn', type: 'button', onclick: () => showSpot(e) }, '看位置') : null)));
+      es.map(e => el('div', { class: 'rquote' },
+        e.form && e.form !== '文字引用' ? el('span', { class: 'pill' }, e.form) : null,
+        el('span', {}, `${e.from} 上${e.type === 'catalog' ? '的目录' : ''}写`), el('q', {}, e.label),
+        e.page_id && e.bbox ? el('button', { class: 'textbtn', type: 'button', onclick: () => showSpot(e) }, '看位置') : null,
+        e.target ? jumpBtn(e.to, { ...e.target, mark: e.mark }) : null)));
   }));
 }
+function jumpBtn(no, t) {  // 跳到被指的那张图上的详图、剖面（t：page_id、bbox、title、mark）
+  const name = t.mark && !(t.title || '').startsWith(t.mark) ? [t.mark, t.title].filter(Boolean).join(' ') : t.title || t.mark;
+  return el('button', { class: 'textbtn', type: 'button',
+    onclick: () => showSpot({ from: no, label: name, page_id: t.page_id, bbox: t.bbox }, `上的详图“${name}”`) }, `跳到 ${no} 的“${name}”`);
+}
 /* 看位置：弹出那一页的图，把引用符号、“详见……”那句话框出来（bbox 是相对整页的 0~1） */
-function showSpot(e) {
+function showSpot(e, caption) {  // caption：弹窗标题，默认是“某图上写的‘……’”
   const [x0, y0, x1, y1] = e.bbox;
   const box = el('div', { class: 'spot-box', style: `left:calc(${x0 * 100}% - 8px);top:calc(${y0 * 100}% - 8px);width:calc(${(x1 - x0) * 100}% + 16px);height:calc(${(y1 - y0) * 100}% + 16px)` });
   const img = el('img', { src: `/api/page/${e.page_id}.png`, alt: `${e.from} 原图` });
@@ -1942,9 +1953,9 @@ function showSpot(e) {
     fit = !fit; wrap.classList.toggle('fit', fit); zoom.textContent = fit ? '放大到这里' : '看整张图'; if (!fit) center();
   } }, '看整张图');
   const owner = sheetBy[e.from];
-  const dlg = el('dialog', { class: 'spot', 'aria-label': `${e.from} 上的“${e.label}”` },
+  const dlg = el('dialog', { class: 'spot', 'aria-label': `${e.from} ${caption || `上的“${e.label}”`}` },
     el('div', { class: 'spot-head' }, el('b', { class: 'mono' }, e.from), el('span', {}, owner && owner.title ? owner.title : ''),
-      el('span', {}, `上写的“${e.label}”`), el('span', { class: 'spacer' }), zoom,
+      el('span', {}, caption || `上写的“${e.label}”`), el('span', { class: 'spacer' }), zoom,
       el('a', { class: 'btn', href: `/api/page/${e.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '打开原图 PDF'),
       el('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, '关闭')),
     scroller, el('p', { class: 'spot-foot' }, '红框是看图识别时记下的位置，可能略有偏差。'));
@@ -1962,6 +1973,9 @@ function saveFindRecent(q) {
   const same = r => r.floor === q.floor && r.discipline === q.discipline && r.keyword === q.keyword && r.tower === q.tower;
   try { localStorage.setItem(FIND_RECENT_KEY(), JSON.stringify([q, ...findRecent().filter(r => !same(r))].slice(0, 6))); } catch (e) { /* 忽略 */ }
 }
+const FIND_ROLE_NOTE = { '主图': '楼层、专业、构件都对得上，先看', '按图名找到': '没写楼层、图名里有要找的构件',
+  '通用图': '设计说明、没写楼层的柱平面等，建哪一层都要看', '引用到的图': '上面这些图里写了“详见”的图',
+  '引用它的图': '写了“详见”这些图的图，看详图用在哪', '同层其他图': '楼层、专业对得上，按需看' };
 const findText = q => [q.tower, q.floor, q.discipline, q.keyword].filter(Boolean).join(' · ');
 function renderFind() {
   const q = ui.findQ || {};
@@ -2046,11 +2060,13 @@ function paintFind(data, out) {
         : el('span', { class: `pill ${x.status === '缺失' ? 'st-missing' : 'st-changed'}` }, x.status),
       x.current_rev ? el('small', {}, `${x.current_rev} 版`) : null,
       x.page_id ? el('a', { class: 'textbtn', href: `/api/page/${x.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '打开原图') : null),
-    (x.why || []).length ? el('small', {}, x.why.join('；')) : null);
+    (x.why || []).length ? el('small', {}, x.why.join('；')) : null,
+    x.covers || (x.details || []).length ? el('small', {}, [x.covers ? `范围 ${x.covers}` : '', (x.details || []).length ? `详图：${x.details.join('、')}` : ''].filter(Boolean).join('；')) : null,
+    (x.jump_to || []).length ? el('div', { class: 'rquote' }, x.jump_to.map(t => jumpBtn(x.no, t))) : null);
   const roles = [...new Set(data.sheets.map(x => x.role))];
   roles.forEach(role => {
     const rows = data.sheets.filter(x => x.role === role);
-    const body = [el('p', { class: 'role-note' }, (data.roles || {})[role] || '')];
+    const body = [el('p', { class: 'role-note' }, FIND_ROLE_NOTE[role] || '')];
     if (role === '同层其他图' && rows.length > 4) body.push(el('details', {}, el('summary', {}, `展开 ${rows.length} 张`), el('ul', { class: 'list' }, rows.map(row))));
     else body.push(el('ul', { class: 'list' }, rows.map(row)));
     parts.push(section(`${role}（${rows.length}）`, ...body));
