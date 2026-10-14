@@ -138,6 +138,11 @@ HELP: dict[str, dict[str, str]] = {
         "look": "看“位置”写的是哪个压缩包。要密码的问发图方要；损坏、分卷不全的请发图方重发。",
         "effect": "这条不用选。拿到密码或新文件后重新「收图」（密码填在“压缩包密码”里），里面的图会收进新的一批。",
     },
+    "dwg": {
+        "what": "有个 DWG（或 DXF）读不出图签和文字：文件可能损坏、版本太新，或者太大读超时了。",
+        "look": "用 CAD 打开看看能不能打开。打不开的请发图方重发；能打开的，可以另存为 2018 或更早的格式再收一次。",
+        "effect": "这条不用选。读不出的文件按文件名暂定，不参与缺图、版本判断；有同图号的 PDF 时照样以 PDF 为准。",
+    },
     "baseline": {
         "what": "锁定基线以后，基线里有图升版或者作废了：照这份基线建模，可能用的是旧图。",
         "look": "看哪些图从哪一版升到了哪一版，告诉做模型的人换图。",
@@ -243,6 +248,11 @@ def next_steps(st: dict) -> dict:
         add("setup", "floor_base", "确认英文楼层怎么数" if len(fb) == 1 else f"确认 {len(fb)} 栋楼的英文楼层怎么数",
             "图名里有 Level 01 这样的写法：Level 01 是首层还是二层，各国习惯不一样。"
             "定下来以后，同层图纸和楼层覆盖才准；不影响缺图、版本。", "issue", fb)
+    cad = st.get("cad_read") or {}
+    if cad.get("unread") and cad.get("tool"):
+        add("recognize", "read_dwg", f"读 DWG：还有 {cad['unread']} 个",
+            "这些 DWG、DXF 是以前收的，还没读图签和文字。读的时候只在本机，图纸不出电脑；读出图号的 DWG 和看过图的 PDF 一样参与缺图、版本判断。",
+            "read_dwg", [f"dwg:{cad['unread']}"])
     rec = st.get("recognition") or {}
     left = (rec.get("pages") or 0) - (rec.get("recognized") or 0)
     if left > 0:

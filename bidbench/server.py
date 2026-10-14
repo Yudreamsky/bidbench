@@ -30,7 +30,7 @@ DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact"
                   "file_tower", "tower_alias", "rev_check", "floor_base", "numbering"}
 PAGE_ID = re.compile(r"[0-9a-f]{12}-p\d{3}")
 TOKEN_META = '<meta name="bidbench-token" content="">'
-PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan"}  # 记进项目操作日志的任务
+PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan", "read_dwg"}  # 记进项目操作日志的任务
 SOURCE = "工作台"
 
 log = logging.getLogger(__name__)
@@ -370,6 +370,17 @@ def _job_fn(app: _App, kind: str, body: dict):
     if kind == "scan":
         return oplog.TITLES["scan"], lambda job: ops.scan(need_proj(), av=bool(body.get("av", True)), log=job.log)
 
+    if kind == "read_dwg":
+        def fn(job):
+            def progress(n, total):
+                job.progress = (n, total)
+            job.stage = "读 DWG"
+            r = ops.read_cad(need_proj(), log=job.log, progress=progress)
+            job.stage, job.progress = "计算台账", None
+            ops.build(need_proj(), log=job.log)
+            return r
+        return oplog.TITLES["read_dwg"], fn
+
     if kind in ("update", "rollback"):
         if not release.is_installed():
             raise ValueError("只有安装版用这种方式更新")
@@ -423,9 +434,11 @@ def make_handler(app: _App):
         def log_message(self, fmt, *args):  # 安静一点
             pass
 
-        def _send(self, code: int, body: bytes, ctype: str) -> None:
+        def _send(self, code: int, body: bytes, ctype: str, headers: dict | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -496,9 +509,12 @@ def make_handler(app: _App):
                 if not self._need_project():
                     return None
                 try:
-                    data = export.page_pdf_bytes(app.proj, m.group(1))
+                    data, ext = export.page_file(app.proj, m.group(1))
                 except (TypeError, KeyError):
                     return self._json({"error": "没有这个页面"}, 404)
+                if ext != ".pdf":  # DWG、DXF：浏览器打不开，下载下来用 CAD 看
+                    return self._send(200, data, "application/octet-stream",
+                                      {"Content-Disposition": f"attachment; filename=\"{m.group(1)}{ext}\""})
                 return self._send(200, data, "application/pdf")
             return self._json({"error": "未找到"}, 404)
 

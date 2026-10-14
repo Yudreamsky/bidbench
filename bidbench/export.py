@@ -28,6 +28,14 @@ def _page_source(proj: Project, page_id: str) -> tuple[Path, int, int, bool]:
     return proj.root / r["stored_path"], r["page_index"], r["page_count"], unsafe
 
 
+def page_file(proj: Project, page_id: str) -> tuple[bytes, str]:
+    """一页的原图：(内容, 扩展名)。PDF 给单页 PDF；DWG、DXF 读出的图给整个原文件（一个 DWG 里可能有几张图）。"""
+    path = _page_source(proj, page_id)[0]
+    if path.suffix.lower() in (".dwg", ".dxf"):
+        return path.read_bytes(), path.suffix.lower()
+    return page_pdf_bytes(proj, page_id), ".pdf"
+
+
 def page_pdf_bytes(proj: Project, page_id: str) -> bytes:
     """单页 PDF。原文件带脚本等风险内容时，给出去掉这些内容的副本。"""
     path, idx, count, unsafe = _page_source(proj, page_id)
@@ -48,10 +56,11 @@ def export_current(proj: Project, state: dict, target: Path | None = None) -> Pa
         if s["status"] in ("missing", "voided", "guess") or not s["current_page"]:
             continue  # 按文件名暂定的图还没看图识别，不算现行图纸
         flag = "" if s["status"] in ("current", "updated", "new") else f"【{STATUS_LABEL[s['status']]}】"
-        name = _safe(f"{flag}{s['no']} {s['title'] or ''} {s['current_rev']}版") + ".pdf"
+        data, ext = page_file(proj, s["current_page"])  # 现行版只有 DWG 的，导出 DWG 原文件
+        name = _safe(f"{flag}{s['no']} {s['title'] or ''} {s['current_rev']}版") + ext
         d = target / s["discipline"]
         d.mkdir(exist_ok=True)
-        (d / name).write_bytes(page_pdf_bytes(proj, s["current_page"]))
+        (d / name).write_bytes(data)
         cleaned = "（原文件带脚本，已去除）" if _page_source(proj, s["current_page"])[3] else ""
         rows.append(f"| {s['discipline']} | {s['no']} | {s['title'] or ''} | {s['current_rev']} | {STATUS_LABEL[s['status']]} | {s['discipline']}/{name}{cleaned} |")
     missing = [s for s in state["sheets"] if s["status"] == "missing"]

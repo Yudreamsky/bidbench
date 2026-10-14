@@ -44,6 +44,14 @@ def cmd_scan(args):
     return ops.scan(_proj(args), av=not args.no_av)
 
 
+def cmd_read_dwg(args):
+    proj = _proj(args)
+    r = ops.read_cad(proj, again=args.again)
+    if not r["files"] and not r["no_tool"]:
+        print("没有要读的 DWG、DXF。" + ("" if args.again else "要按新规则全部重读，加 --again。"))
+    return r
+
+
 def cmd_tasks(args):
     proj = _proj(args)
     t = recognition.make_task(proj, include_done=args.all, render=not args.no_images, scope=args.scope)
@@ -387,6 +395,8 @@ def _op(args) -> tuple[str, str, str] | None:
         return "build", oplog.TITLES["build"] + (f"（截至批次 #{args.as_of}）" if args.as_of else ""), args.project
     if c == "export":
         return "export", oplog.TITLES[args.what], args.project
+    if c == "read-dwg":
+        return "read_dwg", oplog.TITLES["read_dwg"] + ("（全部重读）" if args.again else ""), args.project
     if c in ("scan", "tasks", "import"):
         return c, oplog.TITLES[c], args.project
     return None
@@ -481,6 +491,10 @@ def main(argv=None):
     s = sub.add_parser("scan", help="风险文件检查：按最新规则重查全部文件，并用本机杀毒软件扫描")
     s.add_argument("--no-av", action="store_true", help="只做静态检查")
     s.set_defaults(fn=cmd_scan)
+
+    s = sub.add_parser("read-dwg", help="读 DWG、DXF 的图签和文字（收图后会自动读；装好 LibreDWG 后补读以前收的）")
+    s.add_argument("--again", action="store_true", help="全部重读（认图签的规则更新以后用）")
+    s.set_defaults(fn=cmd_read_dwg)
 
     s = sub.add_parser("tasks", help="生成识别任务包，交给外部 agent 执行")
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="挑选哪些页面（默认 new）")
