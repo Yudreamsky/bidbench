@@ -296,6 +296,29 @@ li.recent .linkbtn { flex: 1; }
 .sheetlink { font: inherit; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chips button { font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 2px 10px; cursor: pointer; color: var(--ink); }
+/* 按任务找图、图纸卡片里的相关图纸、看位置 */
+.findform { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; align-items: end; }
+.findform .btn { justify-self: start; padding: 5px 16px; }
+.findres { display: flex; flex-direction: column; gap: 14px; }
+ul.list li.frow, ul.list li.rel { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--band); }
+.frow .rhead, .rel .rhead { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.frow small, .rel small { color: var(--muted); font-size: 12px; }
+.rquote { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12.5px; color: var(--muted); }
+.rquote q { color: var(--ink); quotes: "“" "”"; }
+.role-note { font-size: 12px; color: var(--muted); margin: -2px 0 6px; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+dialog.spot { width: min(1200px, 94vw); height: min(880px, 92vh); max-width: none; max-height: none; padding: 0;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); }
+dialog.spot[open] { display: flex; flex-direction: column; }
+dialog.spot::backdrop { background: rgba(0, 0, 0, .45); }
+.spot-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.spot-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--band); }
+.spot-img { position: relative; width: max-content; }
+.spot-img img { display: block; max-width: none; background: #fff; }
+.spot-img.fit { width: 100%; }
+.spot-img.fit img { width: 100%; height: auto; }
+.spot-box { position: absolute; border: 3px solid #e0301e; border-radius: 4px; box-shadow: 0 0 0 4px rgba(224, 48, 30, .25); pointer-events: none; }
+.spot-foot { margin: 0; padding: 6px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--surface); padding: 8px 16px; border-radius: 6px; font-size: 13px; }
 </style>
 </head>
@@ -332,6 +355,7 @@ li.recent .linkbtn { flex: 1; }
             <option value="type">按图类着色</option><option value="disc">按专业着色</option>
           </select>
           <input type="search" class="gsearch" id="g-search" placeholder="搜图号、图名" aria-label="搜图号、图名">
+          <button class="btn primary" id="g-find" type="button" title="填楼层、专业、构件，列出建模要看的图">按任务找图</button>
           <button class="btn" id="g-recog-hits" type="button" hidden></button>
           <label for="f-graph-issues"><input type="checkbox" id="f-graph-issues"> 只看有问题的图纸</label>
           <div class="legend" id="net-legend" hidden></div>
@@ -385,6 +409,7 @@ const DISC_ORDER = ['建筑', '结构', '给排水', '暖通', '电气', '消防
 let S = null, APP = null;
 const TOKEN = document.querySelector('meta[name="bidbench-token"]').content;
 const ui = { view: 'graph', selD: null, selF: null, focusSet: null, backTo: null,
+  find: null, findQ: null,  // 按任务找图：最近一次的结果、填过的条件
   mmOpen: new Set(), mmShut: new Set(), mmMore: new Set(), mmFor: null, mmFresh: false, mmScroll: false,  // 思维导图：展开的分组（按项目记在本机）、临时收起的、全部列出的
   collapsedBoxes: new Set(), gridPos: {}, layoutFor: null,  // 图谱：收起的框、拖过的方块（按项目记在本机）
   graphIssues: false, factIssues: false, asOf: null,
@@ -1813,6 +1838,8 @@ function renderSheet(no) {
   const s = sheetBy[no];
   const parts = [];
   if (ui.backTo && factBy[ui.backTo]) parts.push(el('button', { class: 'btn', type: 'button', onclick: () => jumpFact(ui.backTo) }, `← 返回事实：${factBy[ui.backTo].name}`));
+  else if (ui.find) parts.push(el('div', { class: 'btn-row' }, el('button', { class: 'btn', type: 'button', onclick: renderFind }, '← 返回找图结果'),
+    el('button', { class: 'btn', type: 'button', onclick: clearAll }, '问题中心')));
   else parts.push(el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'));
   parts.push(el('div', { class: 'ptitle' }, el('span', { class: 'pnum' }, s.no.startsWith(NAMELESS) ? '（文件名里看不出图号）' : s.no),
     el('h2', {}, s.title || '（图名未知）'), el('span', { class: `pill st-${s.status}` }, STATUS[s.status])));
@@ -1822,12 +1849,28 @@ function renderSheet(no) {
   if (related.length) parts.push(section(`牵涉这张图的问题（${related.length}）`, el('ul', { class: 'list' }, related.map(i => el('li', {},
     el('button', { class: 'linkbtn', type: 'button', onclick: () => goTarget(i.target) },
       el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : 'c-low'}` }), el('span', {}, `${i.kind}：${i.title}`)))))));
-  if (s.status !== 'missing' && s.status !== 'guess') {
-    parts.push(el('dl', { class: 'kv' }, ...fieldRows(s),
-      el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n'))));
-    if (s.current_page) parts.push(el('a', { class: 'btn', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, '打开现行版原图'));
+  const real = s.status !== 'missing' && s.status !== 'guess';
+  if (real && s.current_page) parts.push(el('div', { class: 'btn-row' },  // 建模最常用的一步放最上面
+    el('a', { class: 'btn primary', href: `/api/page/${s.current_page}.pdf`, target: '_blank', rel: 'noopener' }, `打开现行版原图${s.current_rev ? `（${s.current_rev} 版）` : ''}`),
+    (s.cad || []).length ? el('span', { class: 'meta' }, `另有 CAD：${s.cad.map(x => x.split(' / ').pop()).join('、')}`) : null));
+  const myNotices = (S.notices || []).filter(n => n.affects.includes(no));
+  s.notes.filter(t => !myNotices.some(n => t.startsWith(n.id + '（'))).forEach(n => parts.push(el('div', { class: 'note' }, n)));
+  myNotices.forEach(n => {  // 改了这张图的变更单：能打开原件，看得到它还改了哪些图
+    const others = n.affects.filter(x => x !== no);
+    const mine = (n.refs || []).filter(r => r.to === no);
+    parts.push(el('div', { class: 'note warn' }, `${n.id}（批次#${n.batch}）修改了此图的局部，相关内容以变更文件为准。`,
+      mine.map(r => el('div', { class: 'rquote' }, el('q', {}, r.text),
+        r.bbox ? el('button', { class: 'textbtn', type: 'button', onclick: () => showSpot({ from: n.id, label: r.text, page_id: n.page_id, bbox: r.bbox }, '里的这一条') }, '看位置') : null)),
+      el('div', { class: 'row' }, el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.kind === '变更单' ? '变更单' : '答疑'}原图`),
+        others.length ? el('span', { class: 'meta' }, '它还改了') : null, others.map(sheetChip))));
+  });
+  const rel = relGroups(no);
+  if (rel.out.size) parts.push(section(`这张图上写着要看（${rel.out.size}）`, relList(rel.out)));
+  if (rel.inn.size) parts.push(section(`写着要看这张图的（${rel.inn.size}）`, relList(rel.inn)));
+  if (real) {
+    parts.push(section('图签信息', el('dl', { class: 'kv' }, ...fieldRows(s),
+      el('dt', {}, '出处'), el('dd', { class: 'mono' }, (s.paths || []).join('\n')))));
     if (s.borrowed) parts.push(el('p', { class: 'meta' }, '这一页与已识别过的页面像素完全相同，直接复用了识别结果。'));
-    if ((s.cad || []).length) parts.push(el('p', { class: 'meta' }, `另有 CAD 文件：${s.cad.map(x => x.split(' / ').pop()).join('、')}`));
   }
   const pf = s.pending_files || [];  // 同图号、还没看图识别的文件（比如刚收到的新版）
   if (pf.length) parts.push(section(`还没看图识别的同图号文件（${pf.length}）`,
@@ -1835,22 +1878,9 @@ function renderSheet(no) {
       f.rev ? el('small', {}, ` 文件名 ${f.rev} 版${f.newer ? '，比现行版新' : ''}`) : null))),
     latest() ? el('div', { class: 'opts' }, el('button', { class: `btn${pf.some(f => f.newer) ? ' primary' : ''}`, type: 'button',
       onclick: () => renderRecognizePick(`${s.no} 还没识别的同图号文件`, pf.map(f => f.page_id)) }, `看图识别这 ${pf.length} 页`)) : null));
-  const myNotices = (S.notices || []).filter(n => n.affects.includes(no));
-  s.notes.filter(t => !myNotices.some(n => t.startsWith(n.id + '（'))).forEach(n => parts.push(el('div', { class: 'note' }, n)));
-  myNotices.forEach(n => {  // 改了这张图的变更单：能打开原件，看得到它还改了哪些图
-    const others = n.affects.filter(x => x !== no);
-    parts.push(el('div', { class: 'note warn' }, `${n.id}（批次#${n.batch}）修改了此图的局部，相关内容以变更文件为准。`,
-      el('div', { class: 'row' }, el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.kind === '变更单' ? '变更单' : '答疑'}原图`),
-        others.length ? el('span', { class: 'meta' }, '它还改了') : null, others.map(sheetChip))));
-  });
   if (s.versions.length && s.status !== 'guess') parts.push(section('版本链', el('ul', { class: 'list versions' }, s.versions.map(v =>
     el('li', { class: v.state === '现行' ? '' : 'old' }, el('b', { class: 'mono' }, v.rev), el('span', { class: 'mono' }, v.date || '—'),
       el('span', {}, `批次#${v.batch} ${v.state}`), el('a', { href: `/api/page/${v.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '原图'))))));
-  const rel = S.edges.filter(e => e.from === no || e.to === no);
-  if (rel.length) parts.push(section('引用关系', el('ul', { class: 'list' }, rel.map(e => {
-    const other = e.from === no ? e.to : e.from;
-    return el('li', {}, sheetChip(other), sheetBy[other] ? ' ' : '（还没识别） ', e.from === no ? e.label : `被引用：${e.label}`);
-  }))));
   const around = sameFloor(no);
   if (around.near.length) parts.push(section(`同层图纸（${s.floors_text}，${around.near.length} 张）`, sheetRows(around.near)));
   if (around.general.length) parts.push(section(`通用图（${around.general.length}）`,
@@ -1875,6 +1905,174 @@ function renderSheet(no) {
     el('ul', { class: 'list' }, minor.map(x => el('li', { class: 'meta' }, x.text)))));
   panel.replaceChildren(...parts);
   ui.statePanel = panel.firstChild;
+}
+
+/* 相关图纸：图上写了“详见”、详图索引、目录条目（S.edges）。同一张图写了几处的并成一行，每处能“看位置” */
+function relGroups(no) {
+  const out = new Map(), inn = new Map();
+  const add = (m, k, e) => { if (!m.has(k)) m.set(k, []); if (!m.get(k).some(x => x.label === e.label && x.page_id === e.page_id)) m.get(k).push(e); };
+  S.edges.forEach(e => { if (e.from === no && e.to !== no) add(out, e.to, e); else if (e.to === no && e.from !== no) add(inn, e.from, e); });
+  return { out, inn };
+}
+function statusPill(t) {
+  if (!t) return el('span', { class: 'pill st-missing' }, '没发来');
+  return ['current', 'new', 'updated'].includes(t.status) ? null : el('span', { class: `pill st-${t.status}` }, STATUS[t.status]);
+}
+function relList(m) {
+  const order = new Map(S.sheets.map((t, i) => [t.no, i]));
+  const keys = [...m.keys()].sort((a, b) => (order.get(a) ?? 1e9) - (order.get(b) ?? 1e9));
+  return el('ul', { class: 'list' }, keys.map(other => {
+    const t = sheetBy[other], es = m.get(other);
+    return el('li', { class: 'rel' },
+      el('div', { class: 'rhead' }, sheetChip(other), el('span', {}, t ? t.title || '（图名未知）' : '（还没识别）'), statusPill(t),
+        es.some(e => e.type === 'cross') ? el('span', { class: 'pill' }, '跨专业') : null),
+      es.map(e => el('div', { class: 'rquote' },
+        e.form && e.form !== '文字引用' ? el('span', { class: 'pill' }, e.form) : null,
+        el('span', {}, `${e.from} 上${e.type === 'catalog' ? '的目录' : ''}写`), el('q', {}, e.label),
+        e.page_id && e.bbox ? el('button', { class: 'textbtn', type: 'button', onclick: () => showSpot(e) }, '看位置') : null,
+        e.target ? jumpBtn(e.to, { ...e.target, mark: e.mark }) : null)));
+  }));
+}
+function jumpBtn(no, t) {  // 跳到被指的那张图上的详图、剖面（t：page_id、bbox、title、mark）
+  const name = t.mark && !(t.title || '').startsWith(t.mark) ? [t.mark, t.title].filter(Boolean).join(' ') : t.title || t.mark;
+  return el('button', { class: 'textbtn', type: 'button',
+    onclick: () => showSpot({ from: no, label: name, page_id: t.page_id, bbox: t.bbox }, `上的详图“${name}”`) }, `跳到 ${no} 的“${name}”`);
+}
+/* 看位置：弹出那一页的图，把引用符号、“详见……”那句话框出来（bbox 是相对整页的 0~1） */
+function showSpot(e, caption) {  // caption：弹窗标题，默认是“某图上写的‘……’”
+  const [x0, y0, x1, y1] = e.bbox;
+  const box = el('div', { class: 'spot-box', style: `left:calc(${x0 * 100}% - 8px);top:calc(${y0 * 100}% - 8px);width:calc(${(x1 - x0) * 100}% + 16px);height:calc(${(y1 - y0) * 100}% + 16px)` });
+  const img = el('img', { src: `/api/page/${e.page_id}.png`, alt: `${e.from} 原图` });
+  const wrap = el('div', { class: 'spot-img' }, img, box);
+  const scroller = el('div', { class: 'spot-scroll' }, wrap);
+  const center = () => {
+    scroller.scrollLeft = (x0 + x1) / 2 * wrap.clientWidth - scroller.clientWidth / 2;
+    scroller.scrollTop = (y0 + y1) / 2 * wrap.clientHeight - scroller.clientHeight / 2;
+  };
+  let fit = false;
+  const zoom = el('button', { class: 'btn', type: 'button', onclick: () => {
+    fit = !fit; wrap.classList.toggle('fit', fit); zoom.textContent = fit ? '放大到这里' : '看整张图'; if (!fit) center();
+  } }, '看整张图');
+  const owner = sheetBy[e.from];
+  const dlg = el('dialog', { class: 'spot', 'aria-label': `${e.from} ${caption || `上的“${e.label}”`}` },
+    el('div', { class: 'spot-head' }, el('b', { class: 'mono' }, e.from), el('span', {}, owner && owner.title ? owner.title : ''),
+      el('span', {}, caption || `上写的“${e.label}”`), el('span', { class: 'spacer' }), zoom,
+      el('a', { class: 'btn', href: `/api/page/${e.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '打开原图 PDF'),
+      el('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, '关闭')),
+    scroller, el('p', { class: 'spot-foot' }, '红框是看图识别时记下的位置，可能略有偏差。'));
+  dlg.addEventListener('close', () => dlg.remove());
+  img.addEventListener('load', center);
+  img.addEventListener('error', () => scroller.replaceChildren(el('p', { class: 'note warn' }, '这一页的图片出不来，请点“打开原图 PDF”。')));
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+/* 按任务找图：和 AI 用的 find_sheets_for_task 同一套规则（bidbench/navigate.py），结果在图谱上标出来 */
+const FIND_RECENT_KEY = () => `bidbench.find.${S.project.name}`;
+function findRecent() { try { return JSON.parse(localStorage.getItem(FIND_RECENT_KEY()) || '[]'); } catch (e) { return []; } }
+function saveFindRecent(q) {
+  const same = r => r.floor === q.floor && r.discipline === q.discipline && r.keyword === q.keyword && r.tower === q.tower;
+  try { localStorage.setItem(FIND_RECENT_KEY(), JSON.stringify([q, ...findRecent().filter(r => !same(r))].slice(0, 6))); } catch (e) { /* 忽略 */ }
+}
+const FIND_ROLE_NOTE = { '主图': '楼层、专业、构件都对得上，先看', '按图名找到': '没写楼层、图名里有要找的构件',
+  '通用图': '设计说明、没写楼层的柱平面等，建哪一层都要看', '引用到的图': '上面这些图里写了“详见”的图',
+  '引用它的图': '写了“详见”这些图的图，看详图用在哪', '同层其他图': '楼层、专业对得上，按需看' };
+const findText = q => [q.tower, q.floor, q.discipline, q.keyword].filter(Boolean).join(' · ');
+function renderFind() {
+  const q = ui.findQ || {};
+  const discs = [...new Set(S.sheets.filter(t => t.status !== 'guess').map(t => t.discipline))]
+    .sort((a, b) => (DISC_ORDER.indexOf(a) + 1 || 99) - (DISC_ORDER.indexOf(b) + 1 || 99));
+  const fl = input({ value: q.floor || '', placeholder: '如 2F、3层、B1、屋面' });
+  const dc = el('select', {}, el('option', { value: '' }, '全部专业'), discs.map(d => el('option', { value: d }, d)));
+  dc.value = q.discipline || '';
+  const kw = input({ value: q.keyword || '', placeholder: '如 梁、墙 门窗、楼梯' });
+  const towers = S.towers && S.towers.multi ? S.towers.list.map(t => t.name) : [];
+  const tw = towers.length ? el('select', {}, el('option', { value: '' }, '全部楼栋'), towers.map(t => el('option', { value: t }, t))) : null;
+  if (tw) tw.value = q.tower || '';
+  const out = el('div', { class: 'findres' });
+  const go = query => runFind(query, out);
+  const form = el('form', { class: 'findform', onsubmit: ev => {
+    ev.preventDefault();
+    go({ floor: fl.value.trim(), discipline: dc.value, keyword: kw.value.trim(), tower: tw ? tw.value : '' });
+  } }, tw ? field('楼栋', tw) : null, field('楼层', fl), field('专业', dc), field('构件或关键词', kw),
+    el('button', { class: 'btn primary', type: 'submit' }, '找图'));
+  const recent = findRecent();
+  panel.replaceChildren(
+    el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心'),
+    el('div', { class: 'ptitle' }, el('h2', {}, '按任务找图'),
+      el('p', { class: 'meta' }, '要建哪一层、哪个专业、什么构件，填一两样就行。会列出该看的现行图、设计说明，以及图上写了“详见”的图；没发来的图、改过它们的变更单也会提醒。AI 助手用的是同一套找法。')),
+    form,
+    recent.length ? el('div', { class: 'chips' }, el('span', { class: 'meta' }, '最近找过：'),
+      recent.map(r => el('button', { type: 'button', onclick: () => { ui.findQ = r; renderFind(); go(r); } }, findText(r)))) : '',
+    out);
+  ui.statePanel = panel.firstChild;
+  if (ui.find) paintFind(ui.find.data, out);
+  else fl.focus();
+}
+async function runFind(q, out) {
+  ui.findQ = q;
+  const params = new URLSearchParams(Object.entries(q).filter(([, v]) => v));
+  if (!latest()) params.set('as_of', S.as_of);
+  out.replaceChildren(el('p', { class: 'meta' }, '正在找…'));
+  let r, data;
+  try { r = await fetch('/api/find?' + params); data = await r.json(); } catch (e) { data = { error: '连接本地服务失败' }; }
+  if (!r || !r.ok) { out.replaceChildren(el('div', { class: 'note warn' }, data.error || '找图失败')); return; }
+  saveFindRecent(q);
+  ui.find = { q, data };
+  ui.selD = null; ui.selF = null; ui.backTo = null;
+  ui.focusSet = new Set(data.sheets.map(x => x.no).filter(no => sheetBy[no]));
+  const first = data.sheets.find(x => sheetBy[x.no]);
+  if (first) revealSheet(first.no);
+  paintGraph();
+  if (first && net.on) netCenter(first.no);
+  else if (first && nodeEls[first.no]) nodeEls[first.no].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  paintFind(data, out);
+}
+function openFromFind(no) {  // 从找图结果点进一张图：图谱上的标记留着，卡片上能回到结果
+  if (!sheetBy[no]) return;
+  ui.focusSet = new Set(ui.find.data.sheets.map(x => x.no).filter(n => sheetBy[n]));
+  ui.backTo = null;
+  selectSheet(no);
+}
+function paintFind(data, out) {
+  if (!data.total) {
+    out.replaceChildren(el('div', { class: 'note' }, '没找到对得上的图。可以少填一样（比如不填构件），或换个说法（“墙”“墙体”“砌体”）。'));
+    return;
+  }
+  const parts = [];
+  const counts = {};
+  data.sheets.forEach(x => { counts[x.role] = (counts[x.role] || 0) + 1; });
+  parts.push(el('p', { class: 'meta' }, `找到 ${data.total} 张：`, Object.entries(counts).map(([k, v]) => `${k} ${v}`).join('，'),
+    `。图谱上已经标出来了，先看“主图”。${data.truncated ? `（只列出前 ${data.sheets.length} 张）` : ''}`));
+  if (data.missing.length) parts.push(el('div', { class: 'note crit' }, `缺 ${data.missing.length} 张没发来：`,
+    el('div', { class: 'row' }, data.missing.map(no => el('button', { class: 'chip', type: 'button', onclick: () => openFromFind(no) }, no))),
+    el('p', { class: 'meta', style: 'margin-top:6px' }, '目录列了或别的图写了“详见”，手上却没有。建模到这里先缺着，可以在问题中心列入答疑。')));
+  data.notices.forEach(n => parts.push(el('div', { class: 'note warn' },
+    `${n.id}${n.title && n.title !== n.id ? `（${n.title}）` : ''}改过 ${n.changes.join('、')}，相关内容以${n.kind}为准。`,
+    el('div', { class: 'row' }, el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.kind}原图`)))));
+  if (data.issues.length) parts.push(section(`相关问题（${data.issues.length}）`, el('ul', { class: 'list' }, data.issues.map(i => el('li', {},
+    el('button', { class: 'linkbtn', type: 'button', onclick: () => showIssue(i.id) },
+      el('i', { class: `dot ${i.kind === '缺图' || /冲突/.test(i.kind) ? 'c-conflict' : 'c-low'}` }), el('span', {}, `${i.kind}：${i.title}`)))))));
+  const row = x => el('li', { class: 'frow' },
+    el('div', { class: 'rhead' },
+      sheetBy[x.no] ? el('button', { class: 'chip', type: 'button', onclick: () => openFromFind(x.no) }, x.no) : el('span', { class: 'mono' }, x.no),
+      el('span', {}, x.title || '（图名未知）'),
+      x.status === '现行' || x.status === '本批新增' || x.status === '本批升版' ? null
+        : el('span', { class: `pill ${x.status === '缺失' ? 'st-missing' : 'st-changed'}` }, x.status),
+      x.current_rev ? el('small', {}, `${x.current_rev} 版`) : null,
+      x.page_id ? el('a', { class: 'textbtn', href: `/api/page/${x.page_id}.pdf`, target: '_blank', rel: 'noopener' }, '打开原图') : null),
+    (x.why || []).length ? el('small', {}, x.why.join('；')) : null,
+    x.covers || (x.details || []).length ? el('small', {}, [x.covers ? `范围 ${x.covers}` : '', (x.details || []).length ? `详图：${x.details.join('、')}` : ''].filter(Boolean).join('；')) : null,
+    (x.jump_to || []).length ? el('div', { class: 'rquote' }, x.jump_to.map(t => jumpBtn(x.no, t))) : null);
+  const roles = [...new Set(data.sheets.map(x => x.role))];
+  roles.forEach(role => {
+    const rows = data.sheets.filter(x => x.role === role);
+    const body = [el('p', { class: 'role-note' }, FIND_ROLE_NOTE[role] || '')];
+    if (role === '同层其他图' && rows.length > 4) body.push(el('details', {}, el('summary', {}, `展开 ${rows.length} 张`), el('ul', { class: 'list' }, rows.map(row))));
+    else body.push(el('ul', { class: 'list' }, rows.map(row)));
+    parts.push(section(`${role}（${rows.length}）`, ...body));
+  });
+  out.replaceChildren(...parts);
 }
 
 const confPill = c => el('span', { class: `pill conf-${c}` }, c === 'confirmed' ? '人工确认' : `把握${CONFW[c] || '低'}`);
@@ -2072,7 +2270,7 @@ function showSources(key, no) {
   setView('graph'); ui.selD = no; ui.selF = key; paintGraph(); renderSheet(no);
 }
 function clearAll() {
-  ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null;
+  ui.selD = null; ui.selF = null; ui.focusSet = null; ui.backTo = null; ui.find = null;
   document.getElementById('g-search').value = '';
   updateRecogHits();
   paintGraph(); renderMind(); renderOverview();
@@ -2639,6 +2837,7 @@ document.getElementById('mm-collapse').addEventListener('click', () => {
 });
 document.getElementById('mm-classify').addEventListener('click', () => { if (S) renderClassify(); });
 document.getElementById('g-classify').addEventListener('click', () => { if (S) renderClassify(); });
+document.getElementById('g-find').addEventListener('click', () => { if (S) { if (ui.view !== 'graph') setView('graph'); renderFind(); } });
 document.getElementById('as-of').addEventListener('change', e => { const v = Number(e.target.value); ui.asOf = v; load(v === Math.max(...S.batches.map(b => b.seq)) ? null : v); });
 
 setView((location.hash || '').replace('#', '') === 'facts' ? 'facts' : 'graph');

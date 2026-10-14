@@ -58,7 +58,7 @@ def receive(proj: Project, sources, date: str, name: str | None = None, password
 
 
 def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None) -> dict:
-    """读 DWG、DXF 的图签属性和文字（docs/图纸字段.md 9.6）。收图后自动读新收的和以前没读过的；again 时全部重读。"""
+    """读 DWG、DXF 的图签属性和文字（docs/图纸字段.md 9.7）。收图后自动读新收的和以前没读过的；again 时全部重读。"""
     with proj.connect() as con:
         rows = dwg.unread(con, again)
     out = {"files": 0, "sheets": 0, "failed": 0, "no_tool": 0}

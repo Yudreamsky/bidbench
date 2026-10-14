@@ -17,7 +17,7 @@ from ..recognition import page_markdown as to_markdown
 
 EXECUTOR = "simulated"
 MODEL = "rules-text-layer"
-VERSION = "0.2"
+VERSION = "0.3"
 
 DRAWING_NO = r"(?:[一-龥]{0,3}施|[A-Z]{1,3})\s*[-－—_]\s*\d{1,3}[A-Za-z]?"
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
@@ -53,6 +53,16 @@ REF_INDEX = re.compile(rf"([{CIRCLED}]|\d{{1,2}})\s*/\s*({DRAWING_NO})")
 REF_TEXT = re.compile(rf"(?:详见|见|参见|对应|修改)\s*({DRAWING_NO})")
 REF_ATLAS = re.compile(r"(?:详见|见|参见)\s*(\d{2}[A-Z]{1,3}\d{2,4}(?:-\d)?)\s*(?:图集)?")
 CATALOG_ROW = re.compile(rf"^\s*({DRAWING_NO})\s+(\S.*?)\s+([A-Z]|\d{{1,2}})\s*$")
+REF_SECTION = re.compile(rf"(\w{{1,3}})\s*[-－—]\s*\1\s*剖面图?\s*(?:详见|见)\s*({DRAWING_NO})")
+ONLY_NO = re.compile(rf"^\s*({DRAWING_NO})\s*$")
+ONLY_MARK = re.compile(rf"^\s*([{CIRCLED}]|\d{{1,2}})\s*$")
+DETAIL_TITLE = re.compile(r"^\s*(\S.*?)\s+(1\s*[:：]\s*\d+)\s*$")
+SECTION_TITLE = re.compile(r"^\s*((\w{1,3})\s*[-－—]\s*\2\s*剖面图?)\s+(1\s*[:：]\s*\d+)\s*$")
+AXIS_NUM = re.compile(r"^\s*(\d{1,2}(?:/\d{1,2})?)\s*$")
+AXIS_LETTER = re.compile(r"^\s*((?:\d/)?[A-Z](?:/[A-Z])?)\s*$")
+ZONE = re.compile(r"([A-Z一二三四五六七八九十\d]{1,3}区)")
+NOTICE_KINDS = ("变更单", "答疑或澄清")
+LEAD_WORDS = re.compile(r"^(?:修改|详见|参见|对应|改为|见|及|和|与|将|把|对)+")  # “修改建施-08”里图号前面粘着的字
 
 
 def _f(value, conf=0.9):
@@ -72,6 +82,69 @@ def _discipline(no: str | None) -> str | None:
         if no.upper().startswith(prefix.upper()):
             return name
     return None
+
+
+def mark_of(s: str | None) -> str | None:
+    """详图、剖面编号统一写法：① 写 1，1—1 写 1-1。"""
+    if not s:
+        return None
+    s = re.sub(r"\s+", "", s).replace("－", "-").replace("—", "-")
+    return "".join(str(CIRCLED.index(c) + 1) if c in CIRCLED else c for c in s) or None
+
+
+def _above(lines, ln, pat):
+    """紧挨在这一行上方、左右对齐的一行（详图索引符号：圆圈上半是编号，下半是图号）。"""
+    x = (ln["bbox"][0] + ln["bbox"][2]) / 2
+    for o in lines:
+        b = o["bbox"]
+        if o is not ln and abs((b[0] + b[2]) / 2 - x) < 0.02 and 0 <= ln["bbox"][1] - b[3] < 0.03:
+            m = pat.match(o["text"])
+            if m:
+                return m, b
+    return None, None
+
+
+def _left(lines, ln, pat):
+    """紧挨在这一行左边、同一高度的一行（详图名称左边圆圈里的编号）。"""
+    for o in lines:
+        b = o["bbox"]
+        if o is not ln and abs(b[1] - ln["bbox"][1]) < 0.01 and 0 <= ln["bbox"][0] - b[2] < 0.03:
+            m = pat.match(o["text"])
+            if m:
+                return m, b
+    return None, None
+
+
+def _union(a, b):
+    return [round(min(a[0], b[0]), 4), round(min(a[1], b[1]), 4), round(max(a[2], b[2]), 4), round(max(a[3], b[3]), 4)]
+
+
+def _axis_range(lines, pat, key, along):
+    """轴号：同一行（横向的数字轴）或同一列（纵向的字母轴）上至少 3 个单独的轴号，取最小到最大。"""
+    groups = {}
+    for ln in lines:
+        m = pat.match(ln["text"])
+        if m:
+            groups.setdefault(round(ln["bbox"][along], 2), []).append(m.group(1))
+    best = max((sorted(set(g), key=key) for g in groups.values()), key=len, default=[])
+    return f"{best[0]}~{best[-1]}" if len(best) >= 3 else None
+
+
+def _num_key(a: str):
+    return [int(x) for x in a.split("/")]
+
+
+def _letter_key(a: str):
+    return a.split("/")[-1] if a[0].isdigit() else a
+
+
+def _coverage(lines, title):
+    zone = ZONE.search(title or "")
+    ax = _axis_range(lines, AXIS_NUM, _num_key, 1)
+    ay = _axis_range(lines, AXIS_LETTER, _letter_key, 0)
+    if not (ax and ay):  # 只有一个方向的，多半是详图编号、目录的版次栏，不是轴网
+        ax = ay = None
+    return {"zone": _f(zone.group(1) if zone else None, 0.8), "axis_x": _f(ax, 0.8), "axis_y": _f(ay, 0.8)}
 
 
 def _labelled(lines, label: str) -> tuple[str | None, list | None]:
@@ -123,26 +196,67 @@ def recognize_page(item: dict, lines: list[dict]) -> dict:
         kind = "图纸"
 
     refs, seen = [], set()
+
+    def ref(raw, target, rtype, mark, bbox, conf=0.85):
+        refs.append({"raw_text": raw, "target_drawing_no": target, "ref_type": rtype, "mark": mark_of(mark),
+                     "bbox": bbox, "source": "text_layer", "confidence": conf})
+
     for ln in lines:
         t = ln["text"]
         if re.match(r"^\s*图号", t):
             continue
+        if kind in NOTICE_KINDS:  # 变更单、答疑：条文里写到的图号都是它改的图，紧跟着的圈号是改的哪个详图
+            for m in re.finditer(DRAWING_NO, t):
+                target = LEAD_WORDS.sub("", _clean_no(m.group(0)))
+                if target != no and ("chg", target, t) not in seen:
+                    seen.add(("chg", target, t))
+                    after = re.match(rf"[^：:，,。]*?([{CIRCLED}])", t[m.end():])
+                    ref(t.strip(), target, "变更涉及", after.group(1) if after else None, ln["bbox"])
+            continue
+        mi, _ = (None, None) if kind == "图纸目录" else (ONLY_NO.match(t), None)
+        if mi:  # 详图索引符号：圆圈下半是图号，上半是编号
+            num, nb = _above(lines, ln, ONLY_MARK)
+            target = _clean_no(mi.group(1))
+            if num and target != no:
+                ref(f"{num.group(1)}/{target}", target, "详图索引", num.group(1), _union(nb, ln["bbox"]))
+            continue
+        spans = []
+        for m in REF_SECTION.finditer(t):
+            target = _clean_no(m.group(2))
+            spans.append(m.span())
+            if target != no:
+                ref(m.group(0), target, "剖切索引", f"{m.group(1)}-{m.group(1)}", ln["bbox"])
         for m in REF_INDEX.finditer(t):
             target = _clean_no(m.group(2))
             if target != no and ("idx", m.group(0)) not in seen:
                 seen.add(("idx", m.group(0)))
-                refs.append({"raw_text": m.group(0), "target_drawing_no": target, "ref_type": "详图索引",
-                             "bbox": ln["bbox"], "source": "text_layer", "confidence": 0.85})
+                ref(m.group(0), target, "详图索引", m.group(1), ln["bbox"])
         for m in REF_TEXT.finditer(t):
             target = _clean_no(m.group(1))
+            if any(a <= m.start() < b for a, b in spans):
+                continue
             if target != no and ("txt", target, t) not in seen and kind != "图纸目录":
                 seen.add(("txt", target, t))
-                refs.append({"raw_text": m.group(0), "target_drawing_no": target,
-                             "ref_type": "大样引用" if "大样" in t else "文字引用",
-                             "bbox": ln["bbox"], "source": "text_layer", "confidence": 0.85})
+                ref(m.group(0), target, "大样引用" if "大样" in t else "文字引用", None, ln["bbox"])
         for m in REF_ATLAS.finditer(t):
-            refs.append({"raw_text": m.group(0), "target_drawing_no": None, "ref_type": "图集引用",
-                         "bbox": ln["bbox"], "source": "text_layer", "confidence": 0.8})
+            ref(m.group(0), None, "图集引用", None, ln["bbox"], 0.8)
+
+    details = []
+    for ln in lines:
+        t = ln["text"]
+        if re.match(r"^\s*(比例|图名|图号)", t):
+            continue
+        m = SECTION_TITLE.match(t)
+        if m:
+            details.append({"mark": mark_of(f"{m.group(2)}-{m.group(2)}"), "title": m.group(1), "scale": re.sub(r"\s+", "", m.group(3)),
+                            "bbox": ln["bbox"], "source": "text_layer", "confidence": 0.85})
+            continue
+        m = DETAIL_TITLE.match(t)
+        if m:
+            num, nb = _left(lines, ln, ONLY_MARK)
+            if num:
+                details.append({"mark": mark_of(num.group(1)), "title": m.group(1), "scale": re.sub(r"\s+", "", m.group(2)),
+                                "bbox": _union(nb, ln["bbox"]), "source": "text_layer", "confidence": 0.85})
 
     catalog = []
     if kind == "图纸目录":
@@ -214,7 +328,8 @@ def recognize_page(item: dict, lines: list[dict]) -> dict:
         },
         "references": refs,
         "catalog_entries": catalog,
-        "content": {"summary": summary, "notes": notes, "tables": [], "key_values": kvs, "standards": standards},
+        "content": {"summary": summary, "notes": notes, "tables": [], "key_values": kvs, "standards": standards,
+                    "details": details, "coverage": _coverage(lines, title), "xrefs": []},
         "issues": issues,
     }
 

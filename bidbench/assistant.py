@@ -142,7 +142,9 @@ class Toolkit:
         st = self._state()
         s = self._sheet(st, no)
         refs = [{"direction": "引用" if e["from"] == s["no"] else "被引用",
-                 "sheet": e["to"] if e["from"] == s["no"] else e["from"], "text": e["label"]}
+                 "sheet": e["to"] if e["from"] == s["no"] else e["from"], "text": e["label"], "form": e.get("form"),
+                 **({"mark": e["mark"]} if e.get("mark") else {}),
+                 **({"jump_to": e["target"]} if e.get("target") and e["from"] == s["no"] else {})}
                 for e in st["edges"] if s["no"] in (e["from"], e["to"])]
         facts = []
         for f in self._facts(st):
@@ -165,7 +167,8 @@ class Toolkit:
                 "notes": s["notes"], "notices": notices,
                 "versions": [{"rev": v["rev"], "date": v["date"], "batch": v["batch"], "state": v["state"],
                               "page_id": v["page_id"]} for v in s["versions"]],
-                "references": refs, "floors": s["floors_text"], "same_floor": around["same_floor"],
+                "references": refs, "floors": s["floors_text"], "covers": navigate.coverage_text(s),
+                "details": [{k: d[k] for k in ("mark", "title", "scale", "page_id", "bbox")} for d in s.get("details") or ()], "same_floor": around["same_floor"],
                 **({"more_same_floor": around["more_same_floor"]} if "more_same_floor" in around else {}),
                 "general_sheets": around["general"], "own_values": s["own_values"],
                 "recognition_notes": s["rec_notes"], "facts": facts, "issues": issues,

@@ -243,6 +243,33 @@ def _rec_field(p, key: str, value=None) -> dict | None:
                conf_of(f.get("confidence")) or "mid", f.get("raw_text") or f.get("value"), _where(p))
 
 
+def _coverage_field(p, key: str) -> dict | None:
+    """看图识别读出的分区、轴线范围（docs/图纸字段.md 第 5 节）。老的识别结果没有这一项。"""
+    f = (p.rec["content"].get("coverage") or {}).get(key) or {}
+    return fld(f.get("value"), REC_SRC.get(f.get("source"), "看图识别"), conf_of(f.get("confidence")) or "mid", where=_where(p))
+
+
+# 引用的种类（docs/图纸字段.md 9.6）：识别结果的 ref_type → 关联的种类
+REF_FORM = {"详图索引": "详图索引", "剖切索引": "剖切", "立面索引": "立面", "变更涉及": "变更涉及"}
+
+
+def ref_form(ref_type: str) -> str:
+    return REF_FORM.get(ref_type, "文字引用")
+
+
+def _details(p) -> list[dict]:
+    return [{"mark": d["mark"], "title": d["title"], "scale": d["scale"], "bbox": d["bbox"], "page_id": p.page_id}
+            for d in p.rec["content"].get("details") or () if d.get("mark")]
+
+
+def _detail_at(s: dict | None, mark: str | None) -> dict | None:
+    """引用带编号时，被指的图上同编号的详图或剖面（在合订本里也能直接跳过去）。"""
+    if not (s and mark):
+        return None
+    d = next((d for d in s.get("details") or () if d["mark"] == mark), None)
+    return d and {"page_id": d["page_id"], "bbox": d["bbox"], "title": d["title"]}
+
+
 def _rule_disc_src(no: str) -> tuple[str, str]:
     """按图号认出专业时的来源和把握：ISO 角色代码、中文前缀算高；只凭英文首字母（A、S……）算中。"""
     no = bare(no)
@@ -531,7 +558,7 @@ def _val(rec, key):
 
 
 def _is_cad(p: PageRec) -> bool:
-    """从 DWG、DXF 读出的页（docs/图纸字段.md 9.6）。"""
+    """从 DWG、DXF 读出的页（docs/图纸字段.md 9.7）。"""
     return bool(p.rec) and p.rec["run"]["executor"] == dwg.EXECUTOR
 
 
@@ -542,12 +569,16 @@ def _fits(group: list, p: PageRec) -> bool:
 
 
 def _with_cad_refs(cp: PageRec, pages: list) -> PageRec:
-    """DWG 转出的 PDF 常常只有图签文字，图上的引用只在 DWG 里：配成一份时，把 DWG 读出的引用并到 PDF 这一页上。"""
+    """DWG 转出的 PDF 常常只有图签文字，图上的引用、外部参照只在 DWG 里：配成一份时，把 DWG 读出的并到 PDF 这一页上。"""
     if _is_cad(cp):
         return cp
     have = {norm_no(r["target_drawing_no"]) for r in cp.rec["references"]}
     extra = [r for x in pages if _is_cad(x) for r in x.rec["references"] if norm_no(r["target_drawing_no"]) not in have]
-    return replace(cp, rec={**cp.rec, "references": cp.rec["references"] + extra}) if extra else cp
+    content = cp.rec.get("content") or {}
+    xrefs = sorted({*(content.get("xrefs") or ()), *(n for x in pages if _is_cad(x) for n in x.rec["content"].get("xrefs") or ())})
+    if not extra and xrefs == sorted(content.get("xrefs") or ()):
+        return cp
+    return replace(cp, rec={**cp.rec, "references": cp.rec["references"] + extra, "content": {**content, "xrefs": xrefs}})
 
 
 def _same_content(a: PageRec, b: PageRec) -> bool:
@@ -613,7 +644,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
                              " AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.file_sha256 = f.sha256)"
                              " ORDER BY o.batch_seq, o.id", (as_of,)):
             cad[r["sha256"]].append(r["path"])
-        cad_unread = len(dwg.unread(con))  # 还没读过的 DWG、DXF（docs/图纸字段.md 9.6）
+        cad_unread = len(dwg.unread(con))  # 还没读过的 DWG、DXF（docs/图纸字段.md 9.7）
         risk_rows = [dict(r) for r in con.execute("SELECT * FROM risk_findings WHERE batch_seq<=? ORDER BY id", (as_of,))]
         risk_rows += risk.blocked_rows(ext_issues)  # 收图时被杀毒软件拦下的文件，也按高风险文件处理
         scans = [dict(r) for r in con.execute("SELECT * FROM av_scans WHERE batch_seq<=? ORDER BY id", (as_of,))]
@@ -966,7 +997,8 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
                   if chosen.get("date") else _rec_field(cp, "issue_date"),
                   "discipline": fld(d, dsrc, dconf, where=None if dsrc == AI_SRC else _where(cp)),
                   "content": fld(cp.rec["content"]["summary"], "看图识别", "mid", where=_where(cp))
-                  or fld((cls or {}).get("content"), AI_SRC, "low")}
+                  or fld((cls or {}).get("content"), AI_SRC, "low"),
+                  **{k: _coverage_field(cp, k) for k in ("zone", "axis_x", "axis_y")}}
         if override and cur["rev"] == override["value"]:  # 人工定的现行版
             fields["rev"] = fld(cur["rev"], f"人工确认（{override['created_at'][:10]}）", "confirmed", where=_where(cp))
         sheet_out[no] = {
@@ -975,7 +1007,8 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
             "paths": cp.paths, "inner": all(_in_nested_archive(x) for x in cp.paths),
             "notes": notes, "borrowed": cp.rec_borrowed, "own_values": [],
             "rec_notes": [{"type": x["type"], "text": x["description"]} for x in cp.rec["issues"]],
-            "cls": cls, "fields": fields, "type_kind": _type_kind(no),
+            "cls": cls, "fields": fields, "type_kind": _type_kind(no), "details": _details(cp),
+            "xrefs": sorted(set(cp.rec["content"].get("xrefs") or ())),
         }
 
     # ---- 变更单 ----
@@ -986,8 +1019,12 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
                            for k in (keys.candidates(norm_no(r["target_drawing_no"]), ft)
                                      or [keys.missing_key(norm_no(r["target_drawing_no"]), ft)])})
         nid = re.sub(r"\s+", "", _val(p.rec, "drawing_no") or "") or p.page_id
+        refs = [{"to": k, "text": r["raw_text"], "mark": r.get("mark"), "bbox": r["bbox"]}
+                for r in p.rec["references"] if norm_no(r["target_drawing_no"])
+                for k in (keys.candidates(norm_no(r["target_drawing_no"]), ft)
+                          or [keys.missing_key(norm_no(r["target_drawing_no"]), ft)])]
         notice_out.append({"id": nid, "title": _val(p.rec, "drawing_title"), "kind": p.rec["page_kind"],
-                           "page_id": p.page_id, "batch": p.first_batch, "affects": affected, "paths": p.paths})
+                           "page_id": p.page_id, "batch": p.first_batch, "affects": affected, "refs": refs, "paths": p.paths})
         for no in affected:
             if no in sheet_out:
                 sheet_out[no]["notes"].append(f"{nid}（批次#{p.first_batch}）修改了此图的局部，相关内容以变更文件为准。")
@@ -1120,8 +1157,10 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
             if t == no:
                 continue
             etype = "cross" if disc(t) != disc(no) else "ref"
+            mark = r.get("mark")
             edges.append({"from": no, "to": t, "type": etype, "label": r["raw_text"], "bbox": r["bbox"],
-                          "page_id": p.page_id})
+                          "page_id": p.page_id, "form": ref_form(r["ref_type"]), "mark": mark,
+                          "target": _detail_at(sheet_out.get(t), mark)})
             if t not in live:
                 dangling[t].append(no)
 
@@ -1142,7 +1181,7 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
             missing[t]["evidence"].append(f"目录 {info['catalog']} 列出")
             missing[t]["related"].add(info["catalog"])
             edges.append({"from": info["catalog"], "to": t, "type": "catalog", "label": "目录列出", "bbox": None,
-                          "page_id": current_page[info["catalog"]].page_id})
+                          "page_id": current_page[info["catalog"]].page_id, "form": "目录列出", "mark": None, "target": None})
     for t, froms in dangling.items():
         if t in sheet_out:
             continue  # 已作废的图仍被引用：在下面单独提示

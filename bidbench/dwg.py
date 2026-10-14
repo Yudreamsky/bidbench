@@ -1,4 +1,4 @@
-"""读 DWG、DXF：图签、布局、图上的文字（docs/图纸字段.md 9.6）。
+"""读 DWG、DXF：图签、布局、图上的文字（docs/图纸字段.md 9.7）。
 
 DWG 用 LibreDWG 的 dwgread 读成 JSON（单独的程序，随安装包附带，软件只调用它，不链接）。JSON 很大（几 MB 的 DWG
 出来上百 MB），边读边筛，只留文字、块属性、布局、视口和块定义里的线；文字里夹着的坏字节照样容错读。DXF 软件自己读。
@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,6 +58,7 @@ class Text:
     h: float = 0.0
     tag: str | None = None      # 块属性的属性名；单行、多行文字为 None
     callout: bool = False       # 来自不是图签的块属性（详图索引符号之类）
+    mark: str | None = None     # 索引符号里的详图编号（同一个块的另一个属性，⑤/建施-12 的 5）
 
 
 @dataclass
@@ -100,6 +101,7 @@ class Drawing:
     inserts: list = field(default_factory=list)     # [Insert]
     viewports: list = field(default_factory=list)   # [Viewport]
     blocks: dict = field(default_factory=dict)      # 块名 → 外框 (x0, y0, x1, y1)，按块里的线算
+    xrefs: set = field(default_factory=set)         # 外部参照的块名（附着的，和绑定进来的）
     version: str = ""
     reader: str = ""
 
@@ -245,12 +247,15 @@ def from_objects(objs, meta: dict) -> Drawing:
     layout_of: dict[int, str] = {}     # 布局的块记录 → 布局名
     layout_order: dict[int, int] = {}  # 布局的块记录 → 排第几
     raw = []                           # (类型, 对象)
+    xref_names: set[str] = set()
     for o in objs:
         kind = o.get("entity") or o.get("object")
         if kind == "BLOCK_HEADER":
             h = _ref(o.get("handle"))
             if h is not None:
                 bh_name[h] = _s(o.get("name"))
+            if _s(o.get("xref_pname")).strip():  # 附着的外部参照：块记录里有参照文件的路径
+                xref_names.add(_s(o.get("name")))
         elif kind == "LAYOUT":
             bh = _ref(o.get("block_header")) or _ref(o.get("pspace_block_header"))
             if bh is not None:
@@ -331,6 +336,7 @@ def from_objects(objs, meta: dict) -> Drawing:
             last = None
     d.inserts = list(inserts.values())
     d.blocks = {k: _bbox(v) for k, v in lines.items() if v}
+    d.xrefs = _xref_blocks(xref_names, bh_name.values())
     order = sorted(layout_of, key=lambda b: (layout_order.get(b, 99), b))
     d.spaces = [MODEL] + [n for n in dict.fromkeys(layout_of[b] for b in order) if n and n.upper() != "MODEL"]
     for x in (*d.texts, *d.inserts):
@@ -430,6 +436,8 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
                 layout_by_block[get("330").upper()] = _s(get("1"))
                 order[_s(get("1"))] = int(_f(get("71"), 99))
     lines: dict[str, list] = {}
+    xref_names: set[str] = set()
+    block_names: list[str] = []
     block = ps_space = None  # 正在读的块定义 / 布局块（非当前布局的内容放在 *Paper_Space0 这类块里）
     last: Insert | None = None
     for section, kind, g in ents:
@@ -447,6 +455,9 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
                     ps_space = layout_by_block.get((get("330") or "").upper()) or "布局"
                 elif not name.upper().startswith("*MODEL_SPACE"):
                     block = name
+                    if (get("1") or "").strip() or int(_f(get("70"))) & 4:  # 附着的外部参照
+                        xref_names.add(name)
+                block_names.append(name)
             continue
         if section == "BLOCKS" and block:
             if kind == "LINE":
@@ -487,6 +498,7 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
         elif kind != "SEQEND":
             last = None
     d.blocks = {k: _bbox(v) for k, v in lines.items() if v}
+    d.xrefs = _xref_blocks(xref_names, block_names)
     d.spaces = [MODEL] + sorted((n for n in dict.fromkeys(layout_by_block.values()) if n.upper() != "MODEL"),
                                 key=lambda n: order.get(n, 99))
     for x in (*d.texts, *d.inserts):
@@ -626,6 +638,7 @@ class Sheet:
     texts: list                 # 归这张图的文字 [Text]
     box: tuple | None = None    # 这张图的范围（图签外框，或布局上内容的范围），算文字在图上的相对位置用
     how: str = ""               # 图号是怎么认出来的
+    xrefs: list = field(default_factory=list)  # 这张图用到的外部参照名
 
 
 def _insert_box(ins: Insert, blocks: dict) -> tuple | None:
@@ -657,7 +670,7 @@ def split_sheets(d: Drawing) -> list[Sheet]:
     texts = list(d.texts)
     for i in d.inserts:  # 不是图签的块属性（详图索引符号、房间标签……）也当文字，标成“索引”
         if i not in titles:
-            texts += [Text(v, x, y, i.space, tag=t, callout=True) for t, v, x, y in i.attrs if v]
+            texts += [Text(v, x, y, i.space, tag=t, callout=True, mark=_mark(i.attrs, v)) for t, v, x, y in i.attrs if v]
     order = {s: n for n, s in enumerate(d.spaces)}
     sheets: list[Sheet] = []
     for sp in d.spaces:
@@ -696,10 +709,10 @@ def split_sheets(d: Drawing) -> list[Sheet]:
                 for v in vps:
                     if _inside(v.window(), t.x, t.y):
                         px, py = v.to_paper(t.x, t.y)
-                        layout_sheets[v.space].texts.append(Text(t.text, px, py, v.space, t.h, t.tag, t.callout))
+                        layout_sheets[v.space].texts.append(replace(t, x=px, y=py, space=v.space))
         elif model_texts and len(layout_sheets) == 1:
             s = next(iter(layout_sheets.values()))
-            s.texts += [Text(t.text, t.x, t.y, s.space, t.h, t.tag, t.callout) for t in model_texts]
+            s.texts += [replace(t, space=s.space) for t in model_texts]
             s.box = None  # 模型和布局的坐标不一样，算不出相对位置
         elif model_texts and not layout_sheets:
             f, c = label_fields(model_texts)
@@ -709,7 +722,56 @@ def split_sheets(d: Drawing) -> list[Sheet]:
     if any(s.fields.get("drawing_no") for s in sheets):  # 别的布局都认出了图号：没几个字、也没有视口的空布局不算一张图
         sheets = [s for s in sheets if s.fields.get("drawing_no") or len(s.texts) >= 3
                   or any(v.space == s.space for v in d.viewports)]
+    _assign_xrefs(d, sheets)
     return sheets
+
+
+BOUND = re.compile(r"^(.+?)\$\d+\$")  # 绑定进来的外部参照，里面的块、图层名写成“参照名$0$原名”
+
+
+def _xref_blocks(attached: set, names) -> set:
+    """外部参照的块名：附着的（块记录里有路径），加上绑定进来的（别的块名是“它$0$……”）。"""
+    names = list(names)
+    found = set(attached)
+    top = {n for n in names if not BOUND.match(n)}
+    for n in names:
+        m = BOUND.match(n)
+        if m and m.group(1) in top:
+            found.add(m.group(1))
+    return {n for n in found if n and not n.startswith("*")}
+
+
+def _assign_xrefs(d: Drawing, sheets: list) -> None:
+    """外部参照归到图上：和图在同一空间（同一空间有几张图的，按参照范围和图框有没有重叠）；
+    模型空间里的参照，布局视口看得到的归那个布局的图；只有一张布局图的全归它。"""
+    xs = [i for i in d.inserts if i.block in d.xrefs]
+    for i in xs:
+        box = _insert_box(i, d.blocks) or (i.x, i.y, i.x, i.y)
+        same = [s for s in sheets if s.space == i.space]
+        hit = [s for s in same if len(same) == 1 or s.box is None or _overlap(s.box, box)]
+        if not same and i.space == MODEL:
+            layouts = [s for s in sheets if s.space != MODEL]
+            vps = [v for v in d.viewports if any(s.space == v.space for s in layouts)]
+            seen = {v.space for v in vps if _overlap(v.window(), box)}
+            hit = [s for s in layouts if s.space in seen] if vps else layouts if len(layouts) == 1 else []
+        for s in hit:
+            if i.block not in s.xrefs:
+                s.xrefs.append(i.block)
+
+
+def _overlap(a, b) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+MARK = re.compile(r"^[0-9A-Za-z]{1,3}(?:-[0-9A-Za-z]{1,3})?$")
+
+
+def _mark(attrs: list, value: str) -> str | None:
+    """索引符号的详图编号：同一个块里另一个短编号（5、1-1），不是图号。"""
+    for _t, v, _x, _y in attrs:
+        if v and v != value and MARK.match(v) and not looks_like_no(v):
+            return v
+    return None
 
 
 # ---------------- 引用、目录行 ----------------
@@ -796,7 +858,7 @@ def recognition(page_id: str, sha: str, path: str, index: int, count: int, s: Sh
                     continue
                 seen.add((n, t.text))
                 refs.append({"raw_text": t.text[:200], "target_drawing_no": n,
-                             "ref_type": "详图索引" if t.callout else "文字引用",
+                             "ref_type": "详图索引" if t.callout else "文字引用", "mark": t.mark if t.callout else None,
                              "bbox": _rel_box(s.box, t.x, t.y), "source": "cad", "confidence": TEXT_CONF})
     tb = {k: _field(f.get(k), s.conf.get(k)) for k in ("drawing_title", "discipline", "revision", "issue_date", "scale",
                                                         "project_name", "designer_org")}
@@ -819,7 +881,8 @@ def recognition(page_id: str, sha: str, path: str, index: int, count: int, s: Sh
         "references": refs,
         "catalog_entries": _catalog(s.texts) if kind == "图纸目录" else [],
         "content": {"summary": f"从 DWG 读出的图签和文字（{where}{how}，没有看图）。", "notes": [], "tables": [],
-                    "key_values": [], "standards": []},
+                    "key_values": [], "standards": [], "details": [],
+                    "coverage": {k: _field(None, None) for k in ("zone", "axis_x", "axis_y")}, "xrefs": sorted(s.xrefs)},
         "issues": issues,
     }
 

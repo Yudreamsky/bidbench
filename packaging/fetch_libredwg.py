@@ -1,4 +1,4 @@
-"""打包前取 LibreDWG 的 Windows 版（读 DWG 用，docs/图纸字段.md 9.6），放进安装包。
+"""打包前取 LibreDWG 的 Windows 版（读 DWG 用，docs/图纸字段.md 9.7），放进安装包。
 
 只取 dwgread.exe 和它要的 DLL，校验官方发布包的 SHA-256；同时放上许可证（GPLv3）和说明。
 

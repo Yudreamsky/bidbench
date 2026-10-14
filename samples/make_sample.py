@@ -16,7 +16,7 @@
 
 另有单独的几批，不在演示流水线里：build_towers 两栋塔楼各一套编号相同的图（测试“塔楼 + 图号”的图纸身份）；
 build_numbering 英文图号写成“项目-单位-楼栋-专业-类型-楼层-流水号”、有的后面再跟版次的一批（测试图号格式）；
-build_cad 一批 CAD 图（DXF，测试读 DWG、DXF 的图签和文字，docs/图纸字段.md 9.6）。
+build_cad 一批 CAD 图（DXF，测试读 DWG、DXF 的图签和文字，docs/图纸字段.md 9.7）。
 
 用法：python samples/make_sample.py <输出目录>
 """
@@ -383,17 +383,24 @@ def _dxf(pairs) -> list[str]:
     return out
 
 
-def cad_dxf(sheets=(), layouts=()) -> bytes:
+def cad_dxf(sheets=(), layouts=(), xrefs=()) -> bytes:
     """一个 DXF（2007 格式，UTF-8）。sheets：模型空间里一排图框，每个 {no, title, rev, date, texts: [(x, y, 字)],
     callouts: [(x, y, 详图号, 所在图号)], tags: 属性名}；layouts：[(布局名, 图签属性 {属性名: 值} 或 None, [(x, y, 字)])]，
-    布局里没有图签块时，图签写成普通文字（Revit 导出的图常这样）。"""
+    布局里没有图签块时，图签写成普通文字（Revit 导出的图常这样）；xrefs：[(参照名, 绑定了没有, 布局名或 None, x, y)]，
+    附着的参照块记着参照文件的路径，绑定进来的参照里面的块改名成“参照名$0$原名”。"""
     tags = ("图号", "图名", "版次", "日期", "比例")
     lines = _dxf([(0, "SECTION"), (2, "HEADER"), (9, "$ACADVER"), (1, "AC1021"), (0, "ENDSEC"),
                   (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (8, 0), (2, "TK"), (70, 2), (10, 0), (20, 0), (30, 0)])
     for (x1, y1), (x2, y2) in [((0, 0), (TB_W, 0)), ((TB_W, 0), (TB_W, TB_H)), ((TB_W, TB_H), (0, TB_H)), ((0, TB_H), (0, 0))]:
         lines += _dxf([(0, "LINE"), (8, 0), (10, x1), (20, y1), (30, 0), (11, x2), (21, y2), (31, 0)])
     lines += _dxf([(0, "ENDBLK"), (8, 0), (0, "BLOCK"), (8, 0), (2, "SYM"), (70, 2), (10, 0), (20, 0), (30, 0),
-                   (0, "ENDBLK"), (8, 0), (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES")])
+                   (0, "ENDBLK"), (8, 0)])
+    for name, bound in dict.fromkeys((n, b) for n, b, *_ in xrefs):
+        head = [(70, 0)] if bound else [(70, 4), (1, f"..\\参照\\{name}.dwg")]
+        lines += _dxf([(0, "BLOCK"), (8, 0), (2, name), *head, (10, 0), (20, 0), (30, 0), (0, "ENDBLK"), (8, 0)])
+        if bound:
+            lines += _dxf([(0, "BLOCK"), (8, 0), (2, f"{name}$0$WALL"), (70, 0), (10, 0), (20, 0), (30, 0), (0, "ENDBLK"), (8, 0)])
+    lines += _dxf([(0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES")])
 
     def text(x, y, t, h=3.5, space=None):
         return _dxf([(0, "TEXT"), (8, 0), *([(67, 1), (410, space)] if space else []), (10, x), (20, y), (30, 0), (40, h), (1, t)])
@@ -418,6 +425,8 @@ def cad_dxf(sheets=(), layouts=()) -> bytes:
             lines += insert("TK", 0, 0, list(attrs.items()), space=name)
         for x, y, tx in texts:
             lines += text(x, y, tx, space=name)
+    for name, _bound, space, x, y in xrefs:
+        lines += _dxf([(0, "INSERT"), (8, 0), *([(67, 1), (410, space)] if space else []), (2, name), (10, x), (20, y), (30, 0)])
     lines += _dxf([(0, "ENDSEC"), (0, "EOF")])
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -434,16 +443,19 @@ def build_cad(out: Path) -> tuple[Path, str]:
     - 建施-13~14 楼梯详图：一个 DXF 的模型空间里排了两张图，各有图签；建施-14 的索引符号指向缺的建施-15；
     - PRJ1-A-701、A-702 核心筒放大图：一个 DXF 两个布局，图签属性名是自己编的（KD0105、JUDUL1/JUDUL2）；
     - A-150 平面图：布局里的图签是普通文字（“Sheet No.”旁边写图号）；
-    - 坏文件.dxf：二进制 DXF，读不出，按文件名暂定。"""
+    - 坏文件.dxf：二进制 DXF，读不出，按文件名暂定；
+    - 外部参照：建施-03、建施-04 都附着了“标准层柱网”，A-701、A-702 都绑定了“核心筒-1”——共用参照的图连起来。"""
     root = out / CAD_NAME
     h = [("A", "2026-09-01", "出图"), ("B", "2026-10-01", "修改")]
     files = {
         "建筑/建施-03 二层平面图.pdf": sheet_pdf("建施-03", "二层平面图", "B", "2026-10-01", [], h),
         "建筑/建施-03 二层平面图.dxf": cad_dxf([{"no": "建施-03", "title": "二层平面图", "rev": "B", "date": "2026-10-01",
-                                              "texts": [(50, 250, "二层平面图"), (60, 200, "屋面构架详见建施-13")]}]),
+                                              "texts": [(50, 250, "二层平面图"), (60, 200, "屋面构架详见建施-13")]}],
+                                            xrefs=[("标准层柱网", False, None, 100, 100)]),
         "建筑/建施-04 三层平面图.pdf": sheet_pdf("建施-04", "三层平面图", "A", "2026-09-01", [], h[:1]),
         "建筑/建施-04 三层平面图.dxf": cad_dxf([{"no": "建施-04", "title": "三层平面图", "rev": "B", "date": "2026-10-01",
-                                              "texts": [(50, 250, "三层平面图")]}]),
+                                              "texts": [(50, 250, "三层平面图")]}],
+                                            xrefs=[("标准层柱网", False, None, 100, 100)]),
         "建筑/建施-13~14 楼梯详图.dxf": cad_dxf([
             {"no": "建施-13", "title": "楼梯详图一", "rev": "A", "date": "2026-10-01", "texts": [(50, 250, "1号楼梯")]},
             {"no": "建施-14", "title": "楼梯详图二", "rev": "A", "date": "2026-10-01", "texts": [(50, 250, "2号楼梯")],
@@ -452,7 +464,8 @@ def build_cad(out: Path) -> tuple[Path, str]:
             ("A-701", {"KD0105": "PRJ1-A-701", "JUDUL1": "ENLARGED CORE", "JUDUL2": "PLAN 1", "SKALA": "1:50"},
              [(60, 200, "CORE 1"), (60, 180, "REFER TO A-150 FOR SETTING OUT")]),
             ("A-702", {"KD0105": "PRJ1-A-702", "JUDUL1": "ENLARGED CORE", "JUDUL2": "PLAN 2", "SKALA": "1:50"},
-             [(60, 200, "CORE 2")])]),
+             [(60, 200, "CORE 2")])],
+            xrefs=[("核心筒-1", True, "A-701", 100, 100), ("核心筒-1", True, "A-702", 100, 100)]),
         "建筑/A-150 平面图.dxf": cad_dxf(layouts=[
             ("Sheet", None, [(700, 40, "Sheet No."), (730, 40, "A-150"), (700, 60, "Drawing Title"),
                              (700, 52, "GENERAL ARRANGEMENT PLAN - LEVEL 12"), (100, 100, "OFFICE")])]),

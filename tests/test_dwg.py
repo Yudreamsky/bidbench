@@ -1,4 +1,4 @@
-"""读 DWG、DXF（docs/图纸字段.md 9.6）：LibreDWG 的输出怎么读、一个文件怎么分图、读出的图怎么进台账。"""
+"""读 DWG、DXF（docs/图纸字段.md 9.7）：LibreDWG 的输出怎么读、一个文件怎么分图、读出的图怎么进台账。"""
 
 import json
 import os
@@ -10,7 +10,7 @@ import make_sample
 import pytest
 from conftest import _recognize
 
-from bidbench import dwg, export, ingest, ops, state
+from bidbench import dwg, export, ingest, navigate, ops, state
 from bidbench.store import Project
 
 DATA = Path(__file__).parent / "data" / "dwg"
@@ -168,6 +168,22 @@ def test_cad_sheets_join_ledger(cad_project):
     bad = [i for i in st["issues"] if i["kind"] == "DWG 读不出"]
     assert len(bad) == 1 and "坏文件.dxf" in bad[0]["title"]
     assert st["cad_read"]["unread"] == 0
+
+
+def test_cad_xrefs_and_callout_marks(cad_project):
+    """DWG 给出的两种关联：共用的外部参照（附着的、绑定进来的都算），索引符号里的详图编号。"""
+    st = state.build(cad_project)
+    shared = navigate.shared_xrefs(st)
+    assert shared["标准层柱网"] == ["建施-03", "建施-04"]  # 建施-03 的现行页是 PDF，参照从配对的 DXF 并过来
+    assert shared["核心筒-1"] == ["PRJ1-A-701", "PRJ1-A-702"]
+    edge = next(e for e in st["edges"] if (e["from"], e["to"]) == ("建施-14", "建施-15"))
+    assert (edge["form"], edge["mark"]) == ("详图索引", "3")
+
+
+def test_bound_xref_names():
+    assert dwg._xref_blocks(set(), ["TK", "CORE", "CORE$0$WALL", "*Model_Space"]) == {"CORE"}
+    assert dwg._xref_blocks({"GRID"}, ["GRID", "TK"]) == {"GRID"}
+    assert dwg._xref_blocks(set(), ["X$0$WALL"]) == set()  # 参照本身的块没了，不算
 
 
 def test_export_current_copies_cad_original(cad_project, tmp_path):

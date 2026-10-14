@@ -5,7 +5,8 @@
 - 引用、跨专业引用、目录列出：来自 st["edges"]（看图识别的引用、目录条目）
 - 变更单：来自 st["notices"] 的 affects（变更单 → 它改了的图）
 - 同层、通用图：来自 state.same_floor()（按楼层临时算，没有出处位置）
-以后关系模型加了新的边（剖切、索引等），在 relations() 里接上，找图、往外走、数据镜像都跟着有。
+引用分种类（form：详图索引、剖切、文字引用、变更涉及、目录列出，docs/图纸字段.md 9.6），带编号（mark）；
+被指的图上读出了同编号的详图时带 target（那块详图的页面和位置），AI 可以用 locate 直接跳过去。
 """
 
 from __future__ import annotations
@@ -17,17 +18,26 @@ from . import floors, state
 from .state import STATUS_LABEL
 
 REL_LABEL = {"ref": "引用", "cross": "跨专业引用", "catalog": "目录列出", "notice": "变更单",
-             "same_floor": "同层", "general": "通用图"}
+             "same_floor": "同层", "general": "通用图", "xref": "共用参照"}
 REL_NOTE = {
     "引用": "图上写了“详见”“见”或详图索引，指向同专业的图（from 写了，to 被引用）",
     "跨专业引用": "同上，指向别的专业的图",
     "目录列出": "图纸目录列了这张图、手上却没有（缺图）",
-    "变更单": "变更单、答疑改了这张图的局部（from 是变更单编号），相关内容以变更单为准",
+    "变更单": "变更单、答疑改了这张图的局部（from 是变更单编号，text 是那一条的原文，mark 是改的哪个详图），相关内容以变更单为准",
     "同层": "两张图管同一栋楼的同一层（按图名、适用楼层算），没有画在图上的对应关系",
     "通用图": "设计说明、没写楼层的柱平面等，建哪一层都要看",
+    "共用参照": "DWG 里用了同一个外部参照（同一个核心筒、同一套柱子），text 是参照名",
 }
 EXPLICIT = ("引用", "跨专业引用", "目录列出", "变更单")
-FLOOR_BASED = ("同层", "通用图")
+FORM_NOTE = {
+    "详图索引": "圆圈详图索引符号（⑤/建施-12），mark 是详图编号；有 target 时就是被指那张图上的那块详图",
+    "剖切": "剖切符号（1-1 剖面见建施-05、301/1），mark 是剖面编号",
+    "立面": "立面索引符号（201/1），mark 是立面编号",
+    "文字引用": "“详见”“见”某张图，指整张图",
+    "变更涉及": "变更单条文写到的图，mark 是改的哪个详图",
+    "目录列出": "图纸目录的一行",
+}
+FLOOR_BASED = ("同层", "通用图", "共用参照")
 MAX_DEPTH = 3
 MAX_NODES = 120
 ROLE_ORDER = ["主图", "按图名找到", "通用图", "引用到的图", "引用它的图", "同层其他图"]
@@ -35,21 +45,36 @@ ROLE_ORDER = ["主图", "按图名找到", "通用图", "引用到的图", "引�
 
 def relations(st: dict) -> list[dict]:
     """全部有出处的关系（引用、跨专业引用、目录列出、变更单），一条一行，同一对图在不同位置写了几次就有几行。"""
-    out = [{"type": REL_LABEL.get(e["type"], e["type"]), "from": e["from"], "to": e["to"], "text": e["label"],
-            "page_id": e["page_id"], "bbox": e["bbox"]} for e in st["edges"]]
+    by_no = {s["no"]: s for s in st["sheets"]}
+    out = [{"type": REL_LABEL.get(e["type"], e["type"]), "form": e.get("form") or "文字引用", "from": e["from"], "to": e["to"],
+            "text": e["label"], "page_id": e["page_id"], "bbox": e["bbox"], "mark": e.get("mark"), "target": e.get("target")}
+           for e in st["edges"]]
     for n in st["notices"]:
-        out += [{"type": "变更单", "from": n["id"], "to": no, "text": n["title"] or n["kind"],
-                 "page_id": n["page_id"], "bbox": None} for no in n["affects"]]
+        refs = n.get("refs") or [{"to": no, "text": n["title"] or n["kind"], "mark": None, "bbox": None} for no in n["affects"]]
+        out += [{"type": "变更单", "form": "变更涉及", "from": n["id"], "to": r["to"], "text": r["text"],
+                 "page_id": n["page_id"], "bbox": r["bbox"], "mark": r["mark"],
+                 "target": state._detail_at(by_no.get(r["to"]), r["mark"])} for r in refs]
     return out
 
 
 def sheet_row(s: dict) -> dict:
     """一张图在导航结果里的写法：够 AI 决定要不要打开，打开用 page_id（get_page、locate）。"""
     files = {k: v for k, v in (("pdf", s["paths"][:3]), ("cad", (s.get("cad") or [])[:3])) if v}
+    cover = coverage_text(s)
     return {"no": s["no"], "title": s["title"], "discipline": s["discipline"], "status": STATUS_LABEL[s["status"]],
             "current_rev": s["current_rev"], "page_id": s["current_page"], "floors": s.get("floors_name") or s.get("floors_text"),
-            **({"tower": s["tower"]} if s.get("tower") else {}), **({"files": files} if files else {}),
+            **({"tower": s["tower"]} if s.get("tower") else {}), **({"covers": cover} if cover else {}),
+            **({"details": [f"{d['mark']} {d['title'] or ''}".strip() for d in s["details"]]} if s.get("details") else {}),
+            **({"files": files} if files else {}),
             **({"notes": s["notes"]} if s["notes"] else {})}
+
+
+def coverage_text(s: dict) -> str | None:
+    """分区和轴线范围，如“A区 1~12/A~F”。读不到为 None。"""
+    f = s.get("fields") or {}
+    v = lambda k: (f.get(k) or {}).get("value")  # noqa: E731
+    axes = "/".join(x for x in (v("axis_x"), v("axis_y")) if x)
+    return " ".join(x for x in (v("zone"), axes and f"{axes} 轴") if x) or None
 
 
 def parse_floor(st: dict, text: str) -> set[int]:
@@ -166,6 +191,10 @@ def find_for_task(st: dict, floor: str | None = None, discipline: str | None = N
             r["role"] = role
         if note not in r["why"]:
             r["why"].append(note)
+        if rel["target"] and role == "引用到的图":
+            jump = dict(rel["target"], mark=rel["mark"])
+            if jump not in r.setdefault("jump_to", []):
+                r["jump_to"].append(jump)
 
     rows = sorted(picked.values(), key=lambda r: (ROLE_ORDER.index(r["role"]), state._disc_order(r["discipline"]),
                                                   state.no_parts(r["no"])[0], state.no_parts(r["no"])[1] or 0, r["no"]))
@@ -190,7 +219,7 @@ def find_for_task(st: dict, floor: str | None = None, discipline: str | None = N
 
 
 def _neighbors(st: dict, rels_by: dict, node: str, types: set[str], direction: str, start: bool) -> list[tuple]:
-    """一个点往外一步：[(邻居, 关系, 方向)]。同层、通用图只从起点那张图算（它们不是画在图上的关系，再往外就是全楼了）。"""
+    """一个点往外一步：[(邻居, 关系, 方向)]。同层、通用图、共用参照只从起点那张图算（它们不是画在图上的关系，再往外就是全楼了）。"""
     out = []
     for rel in rels_by.get(node, ()):
         if rel["type"] not in types:
@@ -205,7 +234,22 @@ def _neighbors(st: dict, rels_by: dict, node: str, types: set[str], direction: s
             if kind in types:
                 out += [(r["no"], {"type": kind, "from": node, "to": r["no"], "text": r["floors"] or kind,
                                    "page_id": None, "bbox": None}, "out") for r in rows]
+        if "共用参照" in types:
+            for name, nos in shared_xrefs(st).items():
+                if node in nos:
+                    out += [(x, {"type": "共用参照", "from": node, "to": x, "text": name, "page_id": None, "bbox": None}, "out")
+                            for x in nos if x != node]
     return out
+
+
+def shared_xrefs(st: dict) -> dict[str, list[str]]:
+    """外部参照名 → 用了它的现行图（至少两张才算共用）。"""
+    by: dict[str, list] = defaultdict(list)
+    for s in st["sheets"]:
+        if s["status"] != "voided":
+            for name in s.get("xrefs") or ():
+                by[name].append(s["no"])
+    return {k: v for k, v in sorted(by.items()) if len(v) > 1}
 
 
 def walk(st: dict, no: str, depth: int = 1, types: list[str] | None = None, direction: str = "both") -> dict:
@@ -254,9 +298,11 @@ def walk(st: dict, no: str, depth: int = 1, types: list[str] | None = None, dire
                     nxt.append(y)
                 if found[y]["distance"] == d:  # 只记最短的连法，同一步有几条都列出来
                     arrow = "↔" if rel["type"] in FLOOR_BASED else "→"
-                    via = {"step_from": x, "relation": rel["type"], "edge": f"{rel['from']} {arrow} {rel['to']}",
+                    via = {"step_from": x, "relation": rel["type"], **({"form": rel["form"]} if rel.get("form") else {}),
+                           "edge": f"{rel['from']} {arrow} {rel['to']}",
                            "text": rel["text"], **({"page_id": rel["page_id"]} if rel["page_id"] else {}),
-                           **({"bbox": rel["bbox"]} if rel["bbox"] else {})}
+                           **({"bbox": rel["bbox"]} if rel["bbox"] else {}), **({"mark": rel["mark"]} if rel.get("mark") else {}),
+                           **({"target": rel["target"]} if rel.get("target") else {})}
                     if via not in found[y]["via"]:
                         found[y]["via"].append(via)
         frontier = nxt
@@ -265,7 +311,7 @@ def walk(st: dict, no: str, depth: int = 1, types: list[str] | None = None, dire
     return {"start": node_row(no), "depth": depth, "types": sorted(want, key=list(REL_LABEL.values()).index),
             "direction": direction, "total": len(rows), "sheets": rows, **({"truncated": True} if truncated else {}),
             "missing": [r["no"] for r in rows if r.get("status") == "缺失"],
-            "relation_types": {k: REL_NOTE[k] for k in want}}
+            "relation_types": {k: REL_NOTE[k] for k in want}, "forms": FORM_NOTE}
 
 
 def page_owner(st: dict, page_id: str) -> dict | None:
@@ -287,7 +333,8 @@ def page_owner(st: dict, page_id: str) -> dict | None:
 
 def page_relations(st: dict, page_id: str) -> list[dict]:
     """这一页上画出的关系（引用、目录条目），带位置：AI 可以挑一个，用 locate 跳过去。"""
-    return [{"relation": r["type"], "to": r["to"], "text": r["text"], "bbox": r["bbox"]}
+    return [{"relation": r["type"], "form": r["form"], "to": r["to"], "text": r["text"], "bbox": r["bbox"],
+             **({"mark": r["mark"]} if r["mark"] else {}), **({"target": r["target"]} if r["target"] else {})}
             for r in relations(st) if r["page_id"] == page_id and r["type"] != "变更单"]
 
 
