@@ -268,9 +268,27 @@ def add_decision(proj: Project, kind: str, key: str, value: str, note: str | Non
         )
 
 
+REVOKE = "revoke"  # 撤回决定：也记一条，key 是 JSON [kind, key]；之后这一项算没决定过，问题重新出现
+
+
+def revoke_key(kind: str, key: str) -> str:
+    return json.dumps([kind, key], ensure_ascii=False)
+
+
+def revoke_decision(proj: Project, kind: str, key: str, note: str | None = None, actor: str = "我") -> None:
+    add_decision(proj, REVOKE, revoke_key(kind, key), "", note, actor)
+
+
 def latest_decisions(con: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
-    """同一 (kind, key) 以最后一次决定为准。"""
+    """同一 (kind, key) 以最后一次决定为准；最后一次是撤回的，算没决定。"""
     out: dict[tuple[str, str], sqlite3.Row] = {}
     for row in con.execute("SELECT * FROM decisions ORDER BY id"):
+        if row["kind"] == REVOKE:
+            try:
+                kind, key = json.loads(row["key"])
+            except (ValueError, TypeError):
+                continue
+            out.pop((kind, key), None)
+            continue
         out[(row["kind"], row["key"])] = row
     return out

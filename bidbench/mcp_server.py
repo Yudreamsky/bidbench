@@ -33,7 +33,9 @@ INSTRUCTIONS = """你是这个投标图纸项目的助手，工具集就是 bidb
 7. 认图号格式：先用 numbering_overview 看各段的取值和例图名；看不懂的代码先看例图名，再用 get_page
    （include_text_layer=true）看目录页和这个代码的例图的文字；还不懂，把要看图识别的页面编号写进 look_pages，
    不要自己开始识别；都找不到就写进 unsure。最后用 propose_numbering 提议，why 里写清每个代码是从哪看出来的。
-8. 用简体中文回答。"""
+8. 用户不知道下一步做什么、不知道问题怎么选时：下一步看 project_overview 的 next_steps，问题怎么选看 list_issues 的
+   how_to_choose，照着说，并告诉用户在工作台里点哪里（问题中心最上面的“下一步”、每个问题下面的“怎么选？”）。
+9. 用简体中文回答。"""
 
 
 def _server_class():

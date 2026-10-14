@@ -198,7 +198,26 @@ ul.list li { min-width: 0; overflow-wrap: anywhere; }
 .issue .go { font: inherit; text-align: left; background: none; border: 0; padding: 0; color: var(--ink); cursor: pointer; font-weight: 500; }
 .issue .go:hover { color: var(--accent); }
 .issue small { color: var(--muted); display: block; font-size: 12px; }
-.opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.opts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* 指引：问题中心最上面的“下一步”、问题下面的“怎么选？”、做过的决定 */
+.guide { border: 2px solid var(--accent); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.guide .gh { font-size: 14px; font-weight: 600; }
+.guide .gt { font-size: 13px; }
+.stages { display: flex; flex-wrap: wrap; gap: 4px; }
+.stages span { font-size: 12px; padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.stages .done { color: var(--ok); border-color: var(--ok); }
+.stages .now { color: var(--accent); border-color: var(--accent); background: var(--accent-tint); font-weight: 500; }
+.guide .later { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; }
+.textbtn { font: inherit; font-size: 12px; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-align: left; }
+.textbtn:hover { text-decoration: underline; }
+details.help > summary { font-size: 12px; }
+details.help dl.kv { margin-top: 6px; font-size: 12.5px; }
+.flash { animation: flash 1.8s ease-out; }
+@keyframes flash { 0%, 45% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) { .flash { animation: none; outline: 2px solid var(--accent); } }
+li.decided { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+li.decided small { color: var(--muted); display: block; font-size: 12px; }
+li.decided .btn { flex: none; }
 .nsegs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
 .nseg { display: flex; flex-direction: column; align-items: center; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; background: var(--surface); }
 .nseg b { font-family: var(--font-mono); font-weight: 400; font-size: 11.5px; color: var(--muted); }
@@ -1441,6 +1460,30 @@ function optionButtons(issue) {
   if (!issue || !issue.options.length || !latest()) return null;
   return el('div', { class: 'opts' }, issue.options.map(o => el('button', { class: 'btn', type: 'button', onclick: () => decide(o) }, o.label)));
 }
+const HELP_ROWS = [['what', '是什么'], ['look', '怎么看'], ['unsure', '拿不准'], ['effect', '选了以后']];
+function issueHelp(issue) {  // 问题下面的“怎么选？”：说明写在 bidbench/guide.py，按问题编号冒号前那段找
+  const h = (S.issue_help || {})[issue.id.split(':')[0]];
+  if (!h) return null;
+  const pick = issue.options.length > 0;
+  return el('details', { class: 'help' }, el('summary', {}, pick ? '怎么选？' : '这是什么？'),
+    el('dl', { class: 'kv' }, HELP_ROWS.filter(([k]) => h[k]).flatMap(([k, label]) =>
+      [el('dt', {}, k === 'effect' && !pick ? '怎么办' : label), el('dd', {}, h[k])])));
+}
+function showIssue(id) {  // 问题中心里滚到这个问题，展开“怎么选？”，闪一下
+  if (!ui.issueEls || !ui.issueEls.get(id) || !panel.contains(ui.issueEls.get(id))) clearAll();
+  const box = ui.issueEls && ui.issueEls.get(id);
+  if (box) flashBox(box, true);
+}
+function showBlock(name) {  // 问题中心里的“图号格式”卡片、“AI 助手提议”一节、“基线”一节
+  if (!ui.blockEls || !ui.blockEls[name] || !panel.contains(ui.blockEls[name])) clearAll();
+  const box = ui.blockEls && ui.blockEls[name];
+  if (box) flashBox(box);
+}
+function flashBox(box, openHelp) {
+  if (openHelp) box.querySelectorAll('details.help').forEach(d => { d.open = true; });
+  box.scrollIntoView({ block: 'center' });
+  box.classList.remove('flash'); void box.offsetWidth; box.classList.add('flash');
+}
 function sheetChip(no) {
   return sheetBy[no] ? el('button', { class: 'chip', type: 'button', onclick: () => { ui.focusSet = null; selectSheet(no); } }, no) : el('span', { class: 'mono' }, no);
 }
@@ -1563,6 +1606,83 @@ function numberingSection() {  // 确认了的（或先不用的）：一小节�
       btn('不用了', () => decide({ kind: 'numbering', key: '*', value: 'off', label: '图号格式不用了' }))));
 }
 
+/* 下一步（bidbench/guide.py 排好的几件事）：第一件没放着的就是下一步；“先做别的”记在本机，牵涉的问题变了（sig 不同）再显示 */
+const guideSkipKey = () => `bidbench.guideSkip.${(S && S.project && S.project.name) || ''}`;
+function guideSkips() {
+  if (ui.skipFor !== guideSkipKey()) {
+    ui.skipFor = guideSkipKey();
+    try { ui.guideSkip = JSON.parse(localStorage.getItem(ui.skipFor) || '{}') || {}; } catch (e) { ui.guideSkip = {}; }
+  }
+  return ui.guideSkip;
+}
+function saveGuideSkips() {
+  try { localStorage.setItem(guideSkipKey(), JSON.stringify(ui.guideSkip)); } catch (e) { /* 存不了就只在这次打开时有效 */ }
+}
+const openReports = () => openFolder(APP.project.root + (APP.project.root.includes('\\') ? '\\' : '/') + 'reports');
+function taskButtons(t) {  // 每件事的按钮：第一个是主要的（“之后还有”里点名字也是做它）
+  const b = (text, fn) => ({ text, fn });
+  if (t.action === 'receive') return [b('收图', renderReceive)];
+  if (t.action === 'recognize') return [b('去识别', () => renderRecognize())];
+  if (t.action === 'export') return [b('导出', renderExport), b('打开报告文件夹', openReports), b('锁定基线', () => showBlock('baseline'))];
+  if (t.action === 'proposals') return [b('去核对', () => showBlock('proposals'))];
+  if (t.action === 'numbering') return S.numbering && S.numbering.status === 'guess'
+    ? [b('让 AI 助手认', () => askAssistant(ASK_FMT, true)), b('自己看格式', () => showBlock('numbering'))]
+    : [b('去核对', () => showBlock('numbering'))];
+  return [b(t.ack ? '去看看' : t.id === 'crit' || t.id === 'warn' ? '从第一个开始' : '去处理', () => showIssue(t.first))];
+}
+function guideCard() {
+  const G = S.guide;
+  if (!G || !latest()) return null;
+  const skips = guideSkips();
+  const skipped = t => t.skip && skips[t.id] === t.sig;
+  const todo = G.tasks.filter(t => !skipped(t)), later = todo.slice(1), off = G.tasks.filter(t => skipped(t) && !t.ack);
+  const cur = todo[0];
+  if (!cur) return null;
+  const tick = {};  // 前面的步骤都做完、这一步的事也都做完（只要看一下的点过“知道了”）才打勾
+  let before = S.batches.length > 0;
+  for (const x of G.stages) {
+    before = before && x.key !== 'export' && G.tasks.every(t => t.stage !== x.key || (t.ack && skipped(t)));
+    tick[x.key] = before;
+  }
+  const job = ui.job && ui.job.status === 'running' ? ui.job : null;
+  return el('div', { class: 'guide' },
+    el('div', { class: 'gh' }, '下一步：' + cur.title),
+    el('div', { class: 'stages', 'aria-label': '进度' }, G.stages.map(x =>
+      el('span', { class: tick[x.key] ? 'done' : x.key === cur.stage ? 'now' : '' }, (tick[x.key] ? '✓ ' : '') + x.label))),
+    el('p', { class: 'gt' }, cur.text),
+    el('div', { class: 'opts' }, taskButtons(cur).map((x, i) => el('button', { class: 'btn' + (i ? '' : ' primary'), type: 'button', onclick: x.fn }, x.text)),
+      cur.skip ? el('button', { class: 'textbtn', type: 'button',
+        title: cur.ack ? '看过了，先不提醒；有新的会再提醒' : '这一步先放着，看下一件事；牵涉的问题有变化时会再提醒',
+        onclick: () => { skips[cur.id] = cur.sig; saveGuideSkips(); renderOverview(); } }, cur.ack ? '知道了' : '先做别的') : null),
+    later.length ? el('div', { class: 'later' }, el('span', {}, '之后还有：'),
+      later.map(t => el('button', { class: 'textbtn', type: 'button', onclick: taskButtons(t)[0].fn }, t.title))) : null,
+    off.length ? el('div', { class: 'later' }, el('span', {}, '先放着的：' + off.map(t => t.title).join('、')),
+      el('button', { class: 'textbtn', type: 'button', onclick: () => { off.forEach(t => delete skips[t.id]); saveGuideSkips(); renderOverview(); } }, '放回来')) : null,
+    job ? el('p', { class: 'meta' }, `后台正在做：${job.title}。做完这里会自动更新。`) : null);
+}
+function decidedSection() {  // 做过的决定（每项最后一次、没撤回的）：撤回后问题回到“待处理”，可以重新选
+  const ds = S.decided || [];
+  if (!ds.length || !latest()) return null;
+  const row = d => el('li', { class: 'decided' },
+    el('div', {}, d.text, el('small', {}, `${(d.at || '').slice(0, 10)} · ${d.actor}${d.note ? '：' + d.note : ''}`)),
+    el('button', { class: 'btn', type: 'button', title: '撤回这个决定，问题会回到“待处理”', onclick: () => revokeDecision(d) }, '撤回'));
+  const groups = new Map();
+  ds.forEach(d => { if (!groups.has(d.group)) groups.set(d.group, []); groups.get(d.group).push(d); });
+  const body = ds.length <= 8 ? el('ul', { class: 'list' }, ds.map(row))
+    : el('div', { style: 'display:flex;flex-direction:column;gap:6px' }, [...groups].map(([g, xs]) =>
+      el('details', {}, el('summary', {}, `${g}（${xs.length}）`), el('ul', { class: 'list', style: 'margin-top:6px' }, xs.map(row)))));
+  return section(`做过的决定（${ds.length}）`,
+    el('p', { class: 'meta', style: 'margin-bottom:6px' }, '点过的选择都在这里。选错了就撤回：问题会回到上面的“待处理”，再选一次。'), body);
+}
+async function revokeDecision(d) {
+  const r = await api('/api/decision/revoke', { kind: d.kind, key: d.key });
+  if (!r.ok) return;
+  setState(r.data);
+  const back = S.issues.find(i => i.options.some(o => o.kind === d.kind && o.key === d.key));
+  toast(back ? '已撤回，问题回到了“待处理”，可以重新选' : '已撤回');
+  if (back) showIssue(back.id);
+}
+
 function renderOverview() {
   const count = k => S.issues.filter(i => i.kind === k).length;
   const crit = S.issues.filter(i => i.level === 'crit').length;
@@ -1575,6 +1695,9 @@ function renderOverview() {
       el('div', { class: 'stat crit' }, el('b', {}, String(count('版本冲突') + count('事实冲突'))), el('span', {}, '冲突')),
       el('div', { class: 'stat warn' }, el('b', {}, String(S.issues.filter(i => i.level === 'warn').length)), el('span', {}, '提醒'))),
   ];
+  const gc = guideCard();
+  if (gc) parts.splice(1, 0, gc);
+  ui.issueEls = new Map(); ui.blockEls = {};
   if (!latest()) parts.push(el('div', { class: 'note warn' }, '正在查看历史状态，只读。切回最新批次后才能做决定。'));
   const left = (S.recognition?.pages || 0) - (S.recognition?.recognized || 0);
   const recognizing = ui.job && ui.job.status === 'running' && ui.job.kind === 'recognize';
@@ -1590,31 +1713,34 @@ function renderOverview() {
         onclick: () => renderRecognizePick(`把握低的 ${low.length} 张`, low.flatMap(x => x.pages)) }, `看图识别把握低的 ${low.length} 张`)) : null));
   }
   const nbCard = numberingCard();
-  if (nbCard) parts.push(nbCard);
+  if (nbCard) parts.push(ui.blockEls.numbering = nbCard);
   const cls = S.classification, other = S.sheets.filter(x => x.discipline === '其他').length;
   if (latest() && cls && !cls.last && (other >= 5 || cls.facts > 40)) parts.push(el('div', { class: 'note' },
     other >= 5 ? `${other} 张图按图号认不出专业，都排在“其他”里。` : `已有 ${cls.facts} 条事实。`,
     '可以用智能分类让 AI 给图纸分专业、分小框、起中文简称，给事实分多级目录。',
     el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn', type: 'button', onclick: renderClassify }, '智能分类'))));
-  if (!S.batches.length) parts.push(el('div', { class: 'note' }, '新项目还没有收图。每收到一批图纸（压缩包、文件或文件夹）就登记一次。',
-    el('div', { class: 'opts', style: 'margin-top:8px' }, el('button', { class: 'btn primary', type: 'button', onclick: renderReceive }, '收图'))));
   const sec = S.security || { files: [], scans: [], pending: 0 };
-  if (sec.pending) parts.push(el('div', { class: 'note crit' }, `有 ${sec.pending} 个风险文件待确认。处理之前不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。`));
+  if (sec.pending && !gc) parts.push(el('div', { class: 'note crit' }, `有 ${sec.pending} 个风险文件待确认。处理之前不要双击打开，也不要和图纸放在同一个文件夹里用 CAD 打开。`));
   const props = (S.proposals || []).filter(p => p.kind !== 'numbering');  // 图号格式的提议在上面的卡片里
-  if (props.length) parts.push(section(`AI 助手提议（${props.length}）`, el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, props.map(p =>
+  if (props.length) parts.push(ui.blockEls.proposals = section(`AI 助手提议（${props.length}）`, el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, props.map(p =>
     el('div', { class: 'issue' },
       el('div', { class: 'head' }, el('i', { class: 'dot c-mid' }),
         el('div', {}, el('span', { style: 'font-weight:500' }, `#${p.id} ${proposalSummary(p)}`), el('small', {}, `理由：${p.reason}`))),
       latest() ? el('div', { class: 'opts' },
         el('button', { class: 'btn primary', type: 'button', onclick: () => actProposal(p.id, 'confirm') }, '确认'),
         el('button', { class: 'btn', type: 'button', onclick: () => actProposal(p.id, 'reject') }, '驳回')) : null)))));
-  parts.push(section('待处理', S.issues.length ? el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, S.issues.map(i =>
-    el('div', { class: 'issue' },
+  parts.push(section('待处理', S.issues.length ? el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, S.issues.map(i => {
+    const box = el('div', { class: 'issue' },
       el('div', { class: 'head' }, el('i', { class: `dot ${i.level === 'crit' ? 'c-conflict' : i.level === 'warn' ? 'c-low' : 'c-mid'}` }),
         el('div', {}, el('button', { class: 'go', type: 'button', onclick: () => goTarget(i.target) }, `${i.kind}：${i.title}`),
           el('small', {}, i.detail + (i.confirmed ? '（已列入答疑）' : '')))),
-      optionButtons(i))))
+      optionButtons(i), issueHelp(i));
+    ui.issueEls.set(i.id, box);
+    return box;
+  }))
     : el('p', { class: 'meta' }, '没有待处理的问题。')));
+  const dec = decidedSection();
+  if (dec) parts.push(dec);
   if (b) {
     const d = S.diff || {};
     const lines = [];
@@ -1675,7 +1801,7 @@ function renderOverview() {
   const bl = S.baselines.map(x => el('li', {}, `${x.name}（${x.sheets} 张图，批次 #${x.as_of_batch}）`,
     x.outdated.length ? el('small', { style: 'color:var(--warn);display:block' }, '已过期：' + x.outdated.map(o => `${o.sheet} ${o.base_rev}→${o.current_rev}`).join('、')) : el('small', { style: 'color:var(--muted);display:block' }, '图纸均为现行版')));
   const input = el('input', { id: 'bl-name', placeholder: '例如：3 层结构模型', 'aria-label': '基线名称' });
-  parts.push(section('建模任务的图纸基线', bl.length ? el('ul', { class: 'list' }, bl) : el('p', { class: 'meta' }, '还没有基线。开始建模前锁定一份，图纸升版时会提醒。'),
+  parts.push(ui.blockEls.baseline = section('建模任务的图纸基线', bl.length ? el('ul', { class: 'list' }, bl) : el('p', { class: 'meta' }, '还没有基线。开始建模前锁定一份，图纸升版时会提醒。'),
     latest() ? el('div', { class: 'form', style: 'margin-top:8px' }, input,
       el('button', { class: 'btn primary', type: 'button', onclick: async () => { if (input.value.trim() && await post('/api/baseline', { name: input.value.trim() })) toast('已锁定基线'); } }, '锁定当前图纸')) : null));
   panel.replaceChildren(...parts);
@@ -1690,7 +1816,7 @@ function renderSheet(no) {
   parts.push(el('div', { class: 'ptitle' }, el('span', { class: 'pnum' }, s.no.startsWith(NAMELESS) ? '（文件名里看不出图号）' : s.no),
     el('h2', {}, s.title || '（图名未知）'), el('span', { class: `pill st-${s.status}` }, STATUS[s.status])));
   if (s.status === 'guess') parts.push(...guessCard(s));
-  issueFor({ sheet: no }).forEach(i => parts.push(el('div', { class: `note ${i.level === 'crit' ? 'crit' : 'warn'}` }, el('p', {}, i.detail), optionButtons(i))));
+  issueFor({ sheet: no }).forEach(i => parts.push(el('div', { class: `note ${i.level === 'crit' ? 'crit' : 'warn'}` }, el('p', {}, i.detail), optionButtons(i), issueHelp(i))));
   const related = S.issues.filter(i => i.target.sheet !== no && (i.sheets || []).includes(no));
   if (related.length) parts.push(section(`牵涉这张图的问题（${related.length}）`, el('ul', { class: 'list' }, related.map(i => el('li', {},
     el('button', { class: 'linkbtn', type: 'button', onclick: () => goTarget(i.target) },
@@ -1820,7 +1946,7 @@ function renderFact(key) {
   if (f.note) parts.push(el('div', { class: `note ${f.conf === 'conflict' ? 'crit' : f.note.includes('升版') || fNotices.length ? 'warn' : ''}` }, f.note,
     fNotices.length ? el('div', { class: 'row' }, fNotices.map(n => el('a', { class: 'btn', href: `/api/page/${n.page_id}.pdf`, target: '_blank', rel: 'noopener' }, `打开${n.id}原图`))) : null));
   const iss = issueFor({ fact: key });
-  iss.forEach(i => { const o = optionButtons(i); if (o) parts.push(o); });
+  iss.forEach(i => { const o = optionButtons(i), h = issueHelp(i); if (o) parts.push(o); if (h) parts.push(h); });
   if (!iss.length && f.conf !== 'confirmed' && latest())
     parts.push(el('div', { class: 'opts' }, el('button', { class: 'btn', type: 'button', onclick: () => decide({ kind: 'fact', key, value: f.value, label: `确认 ${f.name} = ${f.value}` }) }, '人工确认此值')));
   if (f.guess) parts.push(el('p', { class: 'meta' }, '这条是按图名推测的，图上还没读到；识别出设计说明后以说明为准。'));

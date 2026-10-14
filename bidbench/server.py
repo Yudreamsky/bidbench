@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import antivirus, appconfig, chat, debuglog, export, numbering, oplog, ops, recognition, release, state, updater
-from .store import Project, SchemaTooNew, add_decision, now_iso
+from .store import Project, SchemaTooNew, add_decision, latest_decisions, now_iso, revoke_decision
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev", "name_check",
                   "file_tower", "tower_alias", "rev_check", "floor_base", "numbering"}
@@ -548,6 +548,17 @@ def make_handler(app: _App):
                     except numbering.FormatError as e:
                         return self._json({"error": f"图号格式不对：{e}"}, 400)
                 add_decision(app.proj, kind, key, value, body.get("note"))
+                app.invalidate()
+                return self._json(app.state())
+            if path == "/api/decision/revoke":  # 撤回一个决定：问题回到“待处理”，可以重新选
+                kind, key = body.get("kind"), body.get("key")
+                if kind not in DECISION_KINDS or not isinstance(key, str):
+                    return self._json({"error": "撤回的格式不对"}, 400)
+                with app.proj.connect() as con:
+                    live = (kind, key) in latest_decisions(con)
+                if not live:
+                    return self._json({"error": "这一项没有做过决定，或者已经撤回了"}, 400)
+                revoke_decision(app.proj, kind, key, body.get("note"))
                 app.invalidate()
                 return self._json(app.state())
             if path == "/api/proposal":

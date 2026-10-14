@@ -15,7 +15,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from .store import Project, now_iso
+from . import guide
+from .store import REVOKE, Project, now_iso
 
 FOLDER = "logs"
 MAX_LINES = 400
@@ -108,28 +109,7 @@ def when(s: str) -> datetime:
         return datetime(1970, 1, 2).astimezone()
 
 
-def decision_text(kind: str, key: str, value: str) -> str:
-    """把数据库里的决定翻译成人话。"""
-    if kind == "sheet_void":
-        return f"{key} {'确认已作废' if value == 'voided' else '仍然有效（漏发）'}"
-    if kind == "sheet_current":
-        return f"{key} 以 {value} 版为现行"
-    if kind == "sheet_pick":
-        no, _, rev = key.partition("|")
-        return f"{no} {rev} 版采用页面 {value}"
-    if kind == "missing":
-        what = key.split("|")
-        what = f"{what[1]}缺 {what[2]}" if what[0] == "楼层" and len(what) == 3 else f"缺图 {key}"
-        return f"{what}：{'列入答疑，向招标方要图' if value == 'ask' else '确认不需要'}"
-    if kind == "fact":
-        return f"事实「{key}」采用 {value}"
-    if kind == "risk":
-        return f"风险文件 [{key}] {'确认安全（误报）' if value == 'safe' else '确认有风险，列入答疑'}"
-    if kind == "catalog_rev":
-        parts = key.split("|")
-        what = f"{parts[0]} 目录写 {parts[1]} 版" if len(parts) == 2 else f"{parts[0]} 目录版次没跟上图纸"
-        return f"{what}：{'列入答疑' if value == 'ask' else '以收到的版本为准'}"
-    return f"{kind} {key} = {value}"
+decision_text = guide.decision_text  # 决定写成人话：和问题中心“做过的决定”用同一份
 
 
 def _from_db(proj: Project) -> list[dict]:
@@ -137,7 +117,19 @@ def _from_db(proj: Project) -> list[dict]:
     rows = []
     blank = {"source": "", "user": "", "status": "done", "error": None, "seconds": None, "lines": []}
     with proj.connect() as con:
+        last: dict[tuple, str] = {}  # 每项最后一次的值：撤回时写撤回了什么
         for r in con.execute("SELECT * FROM decisions ORDER BY id"):
+            if r["kind"] == REVOKE:
+                try:
+                    kind, key = json.loads(r["key"])
+                except (ValueError, TypeError):
+                    continue
+                prev = last.pop((kind, key), None)
+                what = decision_text(kind, key, prev) if prev is not None else f"{kind} {key}"
+                rows.append({**blank, "time": r["created_at"], "actor": r["actor"], "kind": "decision",
+                             "title": "撤回决定：" + what, "summary": r["note"]})
+                continue
+            last[(r["kind"], r["key"])] = r["value"]
             if r["actor"] == CONFIRMED_ACTOR:
                 continue  # 确认提议那一条已经写了结果
             rows.append({**blank, "time": r["created_at"], "actor": r["actor"], "kind": "decision",
