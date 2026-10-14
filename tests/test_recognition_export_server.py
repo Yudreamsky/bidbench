@@ -1,9 +1,12 @@
 import json
 import threading
+import urllib.error
+import urllib.parse
 import urllib.request
 
 import jsonschema
 import pymupdf
+import pytest
 
 from bidbench import export, recognition, state
 from bidbench.server import serve
@@ -85,6 +88,14 @@ def test_server(demo_copy):
         page = st["sheets"][0]["current_page"]
         pdf = urllib.request.urlopen(base + f"/api/page/{page}.pdf").read()
         assert pdf.startswith(b"%PDF")
+        png = urllib.request.urlopen(base + f"/api/page/{page}.png").read()  # 看位置：整页图片
+        assert png.startswith(b"\x89PNG")
+        q = urllib.parse.urlencode({"floor": "3F", "discipline": "结构"})
+        found = json.loads(urllib.request.urlopen(base + "/api/find?" + q).read())  # 按任务找图
+        assert found["total"] and all(r["role"] and "why" in r for r in found["sheets"])
+        with pytest.raises(urllib.error.HTTPError) as bad:
+            urllib.request.urlopen(base + "/api/find?floor=" + urllib.parse.quote("不知道哪层"))
+        assert bad.value.code == 400 and "认不出楼层" in json.loads(bad.value.read())["error"]
         req = urllib.request.Request(base + "/api/decision", method="POST",
                                      data=json.dumps({"kind": "sheet_void", "key": "建施-05", "value": "voided"}).encode(),
                                      headers={"Content-Type": "application/json", "X-Bidbench-Token": httpd.app.token})

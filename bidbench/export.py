@@ -36,6 +36,12 @@ def page_pdf_bytes(proj: Project, page_id: str) -> bytes:
     return path.read_bytes() if count == 1 else pdfpages.single_page_pdf(path, idx)
 
 
+def page_png_bytes(proj: Project, page_id: str) -> bytes:
+    """单页图片（只是渲染，不执行文件里的脚本）。"""
+    path, idx, _count, _unsafe = _page_source(proj, page_id)
+    return pdfpages.page_png(path, idx)
+
+
 def export_current(proj: Project, state: dict, target: Path | None = None) -> Path:
     """只放现行版。合订本里的图单独抽成一页 PDF。建模只从这里取图，就接触不到旧版。"""
     target = target or proj.root / "exports" / f"现行图纸-批次{state['as_of']:02d}-{date.today():%Y%m%d}"
