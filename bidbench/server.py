@@ -486,8 +486,11 @@ def make_handler(app: _App):
                     return None
                 st = app.chat.state()
                 if "status" in parse_qs(u.query):  # 打开面板时才查 Codex（要调用几次命令行）
+                    from . import codexlink
                     from .assistant import list_suggestions
                     st.update(codex=ops.codex_status(refresh="refresh" in parse_qs(u.query)),
+                              codex_link={"project": codexlink.connected_project(), "here": str(app.proj.root),
+                                          "path": str(codexlink.config_path())},
                               prefs=appconfig.prefs().get("assistant") or {}, suggestions=len(list_suggestions()))
                 return self._json(st)
             if u.path == "/api/recognizers":
@@ -627,6 +630,9 @@ def make_handler(app: _App):
             if path == "/api/chat/new":
                 app.chat.reset()
                 return self._json(app.chat.state())
+            if path == "/api/codex/connect":  # 把这个项目写进本机 Codex 的设置，外面的 Codex 也能用
+                from . import codexlink
+                return self._json(codexlink.connect(app.proj))
             if path == "/api/baseline":
                 name = (body.get("name") or "").strip()
                 if not name:

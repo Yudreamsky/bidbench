@@ -38,6 +38,8 @@ def main() -> None:
     run(exe, "-p", str(proj), "export", "current")
     run(exe, "-p", str(proj), "recognize", "--executor", "claude", "--dry-run")  # 只估算：确认 anthropic 和渲染都打包进来了
     asyncio.run(mcp_check(exe, proj))
+    out = run(exe, "-p", str(proj), "connect-codex", "--print")  # 只显示：命令要指向安装目录里的 bidbench.exe
+    assert "[mcp_servers.bidbench]" in out and exe.name in out, out
     dwg_check(exe, work)
     print("自检通过")
 

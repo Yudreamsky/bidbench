@@ -2672,6 +2672,20 @@ async function renderAssistant(refresh) {
   if (!cx.ready) notes.push(el('div', { class: 'note warn' }, cx.hint || 'Codex 还不能用。',
     el('button', { class: 'btn', type: 'button', style: 'margin-left:8px', onclick: () => renderAssistant(true) }, '重新检查')));
   else if (cx.hint) notes.push(el('div', { class: 'note warn' }, cx.hint));
+  const link = CHAT.codex_link || {};
+  const linked = link.project && link.project === link.here;
+  const linkBtn = el('button', { class: 'btn', type: 'button', style: 'margin-left:8px' }, linked ? '重新写入' : (link.project ? '改接这个项目' : '接到 Codex'));
+  linkBtn.addEventListener('click', async () => {
+    const r = await api('/api/codex/connect', {});
+    if (!r.ok) return;
+    toast('已写入 Codex 设置，重新打开 Codex 后生效' + (r.data.backup ? '（原设置已备份）' : ''));
+    renderAssistant();
+  });
+  notes.push(el('div', { class: 'note' },
+    linked ? '本机的 Codex（命令行、桌面版、编辑器插件）已接上这个项目，可以在那边让它查图、建模。'
+      : link.project ? `本机的 Codex 现在接的是另一个项目：${link.project}。`
+        : '想在 Codex 里直接用这个项目的图纸数据（比如让它建模），点右边把项目接过去。',
+    linkBtn, el('small', { class: 'meta', style: 'display:block' }, `设置文件：${link.path || ''}`)));
   chatPainted = '';
   panel.replaceChildren(back, head, ...notes, el('div', { class: 'chat', id: 'chat-log' }),
     el('div', { class: 'chat-input' }, input,

@@ -24,6 +24,8 @@ AI_SOURCE = "AI 助手"
 SUGGESTIONS = "改进建议.jsonl"  # 在用户目录（appconfig.config_dir()），不在项目里：建议针对的是软件，不是项目
 CONFIRMED_ACTOR = "AI 助手建议，我确认"
 MAX_LIST = 200
+MAX_BASIS = 200  # check_basis 一次核对的构件数
+BASIS_SKIP = {"基线过期", "风险文件", "解包问题"}  # 和图上内容靠不靠得住无关的问题，核对依据时不提
 
 
 class ToolError(Exception):
@@ -295,6 +297,95 @@ class Toolkit:
         out["hint"] = ("file 是本机文件，page_number 从 1 数；bbox_pt 是 PDF 坐标（点，原点左上角）。"
                        "这一页的识别内容用 get_page(page_id) 看。")
         return out
+
+    def check_basis(self, items: list[dict]) -> dict:
+        """建模依据核对：模型里每个构件写了依据哪张图哪一版、哪一页哪块地方、读到的数值，逐条对照现在的图纸。
+
+        items 每条：element（构件名，必填）、sheet（图号，必填）、rev（用的版次）、page_id、bbox、value（从图上读的数值或文字）、
+        notices_applied（已经按它改过的变更单编号）。结果每条一个 status：对得上 / 要复核 / 不合格，reasons 写为什么。
+        只读：清单由建模的 agent 自己保存在它的工作文件夹里，图纸升版后再核一遍就知道哪些构件受影响。
+        """
+        if not isinstance(items, list) or not items:
+            raise ToolError("items 是构件清单，每条至少有 element 和 sheet。")
+        if len(items) > MAX_BASIS:
+            raise ToolError(f"一次最多核对 {MAX_BASIS} 条，请分几次。")
+        st = self._state()
+        rows, count = [], {"对得上": 0, "要复核": 0, "不合格": 0}
+        for it in items:
+            it = it if isinstance(it, dict) else {}
+            fail, review, ok = [], [], []
+            element = str(it.get("element") or "").strip()
+            if not element:
+                fail.append("没写是哪个构件（element）")
+            sheet = None
+            if not str(it.get("sheet") or "").strip():
+                fail.append("没写依据哪张图（sheet）")
+            else:
+                try:
+                    sheet = self._sheet(st, str(it["sheet"]))
+                except ToolError as e:
+                    fail.append(str(e).split("。")[0] + "：依据的图不在台账里（缺图或图号写错）")
+            if sheet:
+                if sheet["status"] == "guess":
+                    review.append("这张图还没看图识别，图号、版次是按文件名推测的")
+                elif sheet["status"] in ("voided", "missing"):
+                    fail.append(f"这张图{STATUS_LABEL[sheet['status']]}，不能当依据")
+                elif sheet["status"] in ("conflict", "pending_void"):
+                    review.append(f"这张图的状态是“{STATUS_LABEL[sheet['status']]}”，先在问题中心定下来")
+                rev = it.get("rev")
+                if rev is not None and str(rev).strip() != str(sheet["current_rev"] or "").strip():
+                    review.append(f"用的是 {rev or '没写版次'} 版，现行是 {sheet['current_rev'] or '没写版次'} 版")
+                elif rev is None:
+                    review.append("没写用的是哪一版（rev）")
+                pid = it.get("page_id")
+                if pid:
+                    owner = navigate.page_owner(st, str(pid))
+                    if not owner:
+                        fail.append(f"没有页面 {pid}")
+                    elif owner.get("sheet") != sheet["no"]:
+                        fail.append(f"页面 {pid} 不是 {sheet['no']}，是 {owner.get('sheet') or owner.get('notice')}")
+                    elif owner["version_state"] != "现行":
+                        review.append(f"页面 {pid} 是{owner['version_state']}的 {owner['rev'] or '没写版次'} 版，"
+                                      f"现行版在 {sheet['current_page'] or '—'}")
+                else:
+                    review.append("没写在哪一页（page_id），检查时没法回到原图")
+                done = {str(x) for x in it.get("notices_applied") or ()}
+                for n in st["notices"]:
+                    if sheet["no"] in n["affects"] and n["id"] not in done:
+                        review.append(f"变更单 {n['id']}（{n['title']}）改过这张图，确认构件已按它改，"
+                                      f"改过的话写进 notices_applied")
+                for i in st["issues"]:
+                    if (i["level"] in ("crit", "warn") and not i.get("confirmed") and i["kind"] not in BASIS_SKIP
+                            and (i["target"].get("sheet") == sheet["no"] or sheet["no"] in i.get("sheets", []))):
+                        review.append(f"这张图有未处理的问题：{i['title']}")
+                value = str(it.get("value") or "").strip()
+                if value and pid and not fail:
+                    review_or_ok = self._value_on_page(str(pid), it.get("bbox"), value)
+                    (ok if review_or_ok[0] else review).append(review_or_ok[1])
+            status = "不合格" if fail else ("要复核" if review else "对得上")
+            count[status] += 1
+            rows.append({"element": element or None, "sheet": sheet["no"] if sheet else it.get("sheet"),
+                         "status": status, "reasons": fail + review, **({"checked": ok} if ok else {})})
+        return {"summary": count, "items": rows,
+                "hint": "“不合格”的构件没有可靠依据，要改；“要复核”的逐条看 reasons，用 locate(page_id, bbox) 回到原图核对。"
+                        "图纸升版、收到变更单后，把整份清单再核一遍，就知道哪些构件受影响。"}
+
+    def _value_on_page(self, page_id: str, bbox, value: str) -> tuple[bool, str]:
+        """数值在不在原图那块地方（没有 bbox 或没有文字层时，看这一页的识别内容）。"""
+        squash = lambda t: re.sub(r"\s+", "", t or "")  # noqa: E731
+        try:
+            region = self.locate(page_id, bbox).get("region") if bbox is not None else None
+        except ToolError as e:
+            return False, f"bbox 用不了：{e}"
+        if region and region.get("text"):
+            if squash(value) in squash(region["text"]):
+                return True, f"原图这块地方有“{value}”"
+            return False, f"原图这块地方没找到“{value}”，读到的是：{region['text'][:80]}"
+        detail = self.get_page(page_id).get("detail") or ""
+        where = "这块地方没有文字层，" if region else ""
+        if squash(value) in squash(detail):
+            return True, f"{where}这一页的识别内容里有“{value}”（位置要对照原图）"
+        return False, f"{where}这一页的识别内容里没有“{value}”，要打开原图看"
 
     # ---------------- 查询：事实、问题 ----------------
 

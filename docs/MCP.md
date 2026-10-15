@@ -42,15 +42,39 @@ claude mcp add bidbench -- /完整路径/bidbench -p "/图纸项目目录" mcp
 
 保存后重启桌面版。
 
-## Codex
+## Codex（命令行、桌面版、编辑器插件）
 
-在 `~/.codex/config.toml` 里加入：
+三者共用一份设置 `~/.codex/config.toml`（Windows 是 `C:\Users\你\.codex\config.toml`）。**不用手写**，两种办法任选：
+
+- 工作台：打开项目 → AI 助手 → 点“接到 Codex”。
+- 命令行：`bidbench -p "项目目录" connect-codex`（加 `--print` 只显示、不写）。
+
+它会写入下面这样一节（路径按本机自动填），已有的 bidbench 一节整节替换，别的设置不动，原文件备份成 `config.toml.bak`。
+同一时间只接一个项目，换项目再点一次。写完**重新打开 Codex**，在 Codex 里输入 `/mcp` 能看到 bidbench 就是接上了。
 
 ```toml
 [mcp_servers.bidbench]
-command = "/完整路径/bidbench"
-args = ["-p", "/图纸项目目录", "mcp"]
+command = "C:\\Users\\你\\AppData\\Local\\Programs\\bidbench\\bidbench.exe"
+args = ["-p", "D:\\投标\\示例项目", "mcp"]
+startup_timeout_sec = 60     # 大项目第一次算台账要十几秒，Codex 默认只等 10 秒
+tool_timeout_sec = 180
+env = { BIDBENCH_CONFIG_DIR = "C:\\Users\\你\\AppData\\Roaming\\bidbench", PYTHONUTF8 = "1" }
 ```
+
+手写时注意：TOML 双引号里的反斜杠要写两遍（`\\`），或者整段路径改用单引号 `'D:\投标\示例项目'`。
+
+## 让 Codex 照图建模
+
+bidbench 不画模型，它负责告诉 Codex：建某一层某个专业该看哪些图、图上写的“详见”指到哪、缺了哪些图、哪些被变更单改过。
+建议开两个 Codex：一个建模，一个检查（单开对话，不看建模过程）。建模的把每个构件的依据（图号、版次、page_id、bbox、读到的数值）
+记进 `建模依据.json`，检查的用 `check_basis` 逐条对照现行图纸，再对数、抽查。两段现成的第一句话见 [建模提示词.md](建模提示词.md)。
+
+`check_basis(items)` 每条构件返回“对得上 / 要复核 / 不合格”和原因：图在不在台账、是不是现行版、page_id 是不是这张图的现行页、
+有没有没按它改的变更单（改过的写进 `notices_applied`）和没处理的问题、`value` 在原图那块地方找不找得到。
+图纸升版、收到变更单以后，把整份清单再核一遍，“要复核”的就是受影响的构件。
+
+图纸里的尺寸靠识别读出来，目前给到的是图号、图名、楼层、轴线范围、详图编号、引用关系和文字，**不是 CAD 几何**；
+精确的尺寸和定位还是要对照原图（`locate` 给出本机文件和页码）。
 
 ## 可以这样问
 
@@ -69,7 +93,7 @@ args = ["-p", "/图纸项目目录", "mcp"]
 | --- | --- |
 | 全局 | `project_overview`、`list_batches`、`batch_diff`、`compare_batches` |
 | 图纸 | `list_sheets`、`get_sheet`、`get_page`、`search` |
-| 建模找图 | `find_sheets_for_task`、`related_sheets`、`locate`（见下） |
+| 建模找图 | `find_sheets_for_task`、`related_sheets`、`locate`（见下）、`check_basis`（核对建模依据） |
 | 事实与问题 | `list_facts`、`get_fact`、`floor_coverage`、`list_issues`、`draft_qa`、`list_baselines` |
 | 其他 | `estimate_recognition`（只估算，不运行）、`list_notes`、`list_proposals` |
 | 提议（需确认） | `propose_issue_resolution`、`propose_fact_confirmation`、`propose_baseline`、`propose_note`、`propose_improvement`（工作台本身的改进建议，确认后记进改进建议清单，`bidbench suggestions` 查看） |

@@ -174,6 +174,19 @@ def cmd_mcp(args):
     run_stdio(Toolkit(_proj(args)))
 
 
+def cmd_connect_codex(args):
+    from . import codexlink
+    proj = _proj(args)
+    if args.print:
+        print(codexlink.server_block(proj), end="")
+        return
+    r = codexlink.connect(proj)
+    print(f"已把项目接到 Codex：{r['path']}" + ("（替换了原来的 bidbench 设置）" if r["replaced"] else ""))
+    if r["backup"]:
+        print(f"原来的设置备份在：{r['backup']}")
+    print("重新打开 Codex（命令行、桌面版或编辑器插件）后就能用 bidbench 的工具；输入 /mcp 可以查看。")
+
+
 def cmd_proposals(args):
     from .assistant import Toolkit
     rows = Toolkit(_proj(args), source="命令行").list_proposals("all" if args.all else "pending")
@@ -580,6 +593,10 @@ def main(argv=None):
 
     s = sub.add_parser("mcp", help="以 MCP 服务方式运行（stdio），供 Claude 桌面版、Claude Code 等 agent 调用")
     s.set_defaults(fn=cmd_mcp)
+
+    s = sub.add_parser("connect-codex", help="把这个项目接到本机的 Codex（写进 ~/.codex/config.toml）")
+    s.add_argument("--print", action="store_true", help="只显示要写的设置，不写")
+    s.set_defaults(fn=cmd_connect_codex)
 
     s = sub.add_parser("proposals", help="查看 AI 助手的提议")
     s.add_argument("--all", action="store_true", help="包括已处理的提议")

@@ -35,6 +35,7 @@ INSTRUCTIONS = """你是这个投标图纸项目的助手，工具集就是 bidb
    不要自己开始识别；都找不到就写进 unsure。最后用 propose_numbering 提议，why 里写清每个代码是从哪看出来的。
 8. 建模找图：先用 find_sheets_for_task（楼层、专业、构件）拿到该看的现行图，再用 related_sheets 顺着“详见”往外找，
    用 locate(page_id, bbox) 跳到图上那句话、那个详图索引的位置。缺的图、改过它们的变更单、相关问题都要告诉用户。
+   建模时每个构件记下依据（图号、版次、page_id、bbox、读到的数值），用 check_basis 核对；拿不准的尺寸不要猜，列出来问用户。
 9. 用户不知道下一步做什么、不知道问题怎么选时：下一步看 project_overview 的 next_steps，问题怎么选看 list_issues 的
    how_to_choose，照着说，并告诉用户在工作台里点哪里（问题中心最上面的“下一步”、每个问题下面的“怎么选？”）。
 10. 用简体中文回答。"""
@@ -161,6 +162,15 @@ def build_server(kit: Toolkit):
         给了 bbox（[x0, y0, x1, y1]，相对整页 0~1，原点左上角，related_sheets 的 via、get_sheet 的引用里都有）
         再读出那块地方的文字和画在那里的引用。references_on_page 是这页上全部的引用和位置。"""
         return kit.locate(page_id, bbox)
+
+    @tool()
+    def check_basis(items: list[dict]) -> dict:
+        """建模依据核对（检查模型用）：items 是构件清单，每条写 element（构件，如“3F KL1 1~2/A 轴”）、sheet（依据的图号）、
+        rev（用的版次）、page_id、bbox（图上那块地方，[x0, y0, x1, y1] 相对整页 0~1）、value（从图上读的数值或文字，如“300x700”）、
+        notices_applied（已经按它改过的变更单编号）。逐条对照现在的图纸：图在不在、是不是现行版、页面对不对、
+        有没有没处理的变更单和问题、value 在原图那块地方找不找得到。每条返回 status（对得上 / 要复核 / 不合格）和 reasons。
+        一次最多 200 条。清单由你保存在自己的工作文件夹里（如 建模依据.json），图纸升版后再核一遍。"""
+        return kit.check_basis(items)
 
     # ---- 事实、问题 ----
     @tool()
