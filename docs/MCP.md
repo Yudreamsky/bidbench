@@ -66,14 +66,13 @@ env = { BIDBENCH_CONFIG_DIR = "C:\\Users\\你\\AppData\\Roaming\\bidbench", PYTH
 ## 让 Codex 照图建模
 
 bidbench 不画模型，它负责告诉 Codex：建某一层某个专业该看哪些图、图上写的“详见”指到哪、缺了哪些图、哪些被变更单改过。
-建议给 Codex 单开一个空的工作文件夹放模型脚本，在里面启动 Codex，第一句可以这样说：
+建议开两个 Codex：一个建模，一个检查（单开对话，不看建模过程）。建模的把每个构件的依据（图号、版次、page_id、bbox、读到的数值）
+记进 `建模依据.json`，检查的用 `check_basis` 逐条对照现行图纸，再对数、抽查。两段现成的第一句话见 [建模提示词.md](建模提示词.md)。
 
-> 用 bidbench 的工具给 3 层建结构模型（柱、梁、板）。先用 `find_sheets_for_task(floor="3F", discipline="结构")` 列出该看的图，
-> 主图逐张用 `get_sheet` 看尺寸、轴网和标高，“详见”的地方用 `related_sheets` 和 `locate` 找到原文；
-> 缺图和 `notices` 里的变更先列给我。然后写一个 Revit Dynamo（或 IFC / pyRevit）脚本按轴网生成构件，
-> 每个构件注明依据哪张图哪一版。拿不准的尺寸不要猜，列成清单问我。
+`check_basis(items)` 每条构件返回“对得上 / 要复核 / 不合格”和原因：图在不在台账、是不是现行版、page_id 是不是这张图的现行页、
+有没有没按它改的变更单（改过的写进 `notices_applied`）和没处理的问题、`value` 在原图那块地方找不找得到。
+图纸升版、收到变更单以后，把整份清单再核一遍，“要复核”的就是受影响的构件。
 
-建好以后可以接着问“结施-04 升版影响了 3 层哪些构件”，让它对照 `batch_diff` 和变更单改模型。
 图纸里的尺寸靠识别读出来，目前给到的是图号、图名、楼层、轴线范围、详图编号、引用关系和文字，**不是 CAD 几何**；
 精确的尺寸和定位还是要对照原图（`locate` 给出本机文件和页码）。
 
@@ -94,7 +93,7 @@ bidbench 不画模型，它负责告诉 Codex：建某一层某个专业该看�
 | --- | --- |
 | 全局 | `project_overview`、`list_batches`、`batch_diff`、`compare_batches` |
 | 图纸 | `list_sheets`、`get_sheet`、`get_page`、`search` |
-| 建模找图 | `find_sheets_for_task`、`related_sheets`、`locate`（见下） |
+| 建模找图 | `find_sheets_for_task`、`related_sheets`、`locate`（见下）、`check_basis`（核对建模依据） |
 | 事实与问题 | `list_facts`、`get_fact`、`floor_coverage`、`list_issues`、`draft_qa`、`list_baselines` |
 | 其他 | `estimate_recognition`（只估算，不运行）、`list_notes`、`list_proposals` |
 | 提议（需确认） | `propose_issue_resolution`、`propose_fact_confirmation`、`propose_baseline`、`propose_note`、`propose_improvement`（工作台本身的改进建议，确认后记进改进建议清单，`bidbench suggestions` 查看） |
