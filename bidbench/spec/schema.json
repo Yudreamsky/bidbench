@@ -83,6 +83,11 @@
         "finished_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "tiles": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "可选：除整页外还看了 N×N 的局部切片（强档），0 或不写表示只看整页"
         }
       }
     },

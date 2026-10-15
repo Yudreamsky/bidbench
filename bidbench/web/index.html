@@ -139,6 +139,21 @@ button:focus-visible, select:focus-visible, input:focus-visible, .node:focus-vis
 .node .tag { font-size: 11px; font-weight: 500; }
 .t-updated, .t-new { fill: var(--accent); } .t-changed, .t-pending_void { fill: var(--warn); }
 .t-conflict, .t-missing { fill: var(--crit); } .t-voided, .t-inner { fill: var(--muted); }
+.node .dp { fill: var(--line); }
+.node .dp.on { fill: var(--accent); }
+.node .dp.want { fill: none; stroke: var(--warn); stroke-width: 1; }
+.dpl { display: inline-flex; gap: 2px; }
+.dpl i { width: 4px; height: 8px; border-radius: 1px; background: var(--line); }
+.dpl i.on { background: var(--accent); }
+.dpl i.want { background: none; outline: 1px solid var(--warn); outline-offset: -1px; }
+.cmenu { position: fixed; z-index: 30; min-width: 250px; max-width: 320px; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.18); padding: 6px; font-size: 13px; }
+.cmenu .cm-head { padding: 4px 8px 6px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.cmenu button { display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 6px 8px;
+  color: inherit; font: inherit; cursor: pointer; }
+.cmenu button:hover, .cmenu button:focus-visible { background: var(--accent-tint); outline: none; }
+.cmenu button:disabled { color: var(--muted); cursor: default; background: none; }
+.cmenu button small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 1px; }
 .node .ring { fill: none; stroke: var(--accent); stroke-width: 2.5; opacity: 0; }
 .node.sel .ring { opacity: 1; }
 .node.hl .box { fill: var(--accent-tint); }
@@ -364,6 +379,7 @@ dialog.spot::backdrop { background: rgba(0, 0, 0, .45); }
             <span><i class="sw s-changed"></i>有变更/待确认</span><span><i class="sw s-conflict"></i>冲突</span>
             <span><i class="sw s-missing"></i>缺失/作废</span><span><i class="sw s-guess"></i>按文件名暂定</span><span><i class="ln"></i>索引引用</span>
             <span><i class="ln cross"></i>跨专业</span><span><i class="ln catalog"></i>目录列出</span>
+            <span title="方块左下角四格：地图 → 本机读出 → 看图识别 → 精读；橙色框是你指定要到的深度。右键方块可以指定。"><span class="dpl"><i class="on"></i><i class="on"></i><i></i><i></i></span>信息深度（右键改）</span>
           </div>
           <span class="spacer"></span>
           <button class="btn" id="g-classify" type="button" title="让 AI 给图纸分专业、分小框、起中文简称">智能分类</button>
@@ -899,6 +915,51 @@ function drawEdges() {
 }
 const gtip = el('div', { class: 'gtip', role: 'tooltip' });
 gsvg.parentElement.append(gtip);
+/* 信息深度（docs/图纸字段.md 9.9）：右键图纸方块指定要到哪一层，比现在深就自动看图识别这张图 */
+const DEPTH = { 1: ['地图', '只按文件名、文件夹、PDF 文字暂定'], 2: ['本机读出', 'DWG 图签和文字，没看过整张图'],
+  3: ['看图识别', 'AI 看过整张图（经济档）'], 4: ['精读', 'AI 看整张图和局部切片（强档）'] };
+function closeMenu() { document.querySelectorAll('.cmenu').forEach(m => m.remove()); }
+function depthMenu(s, ev) {
+  closeMenu();
+  if (!s.depth) { toast('缺的图手上没有，不能识别'); return; }
+  const now = latest();
+  const pick = async v => {
+    closeMenu();
+    if (!(await post('/api/decision', { kind: 'depth', key: s.no, value: String(v) }))) return;
+    if (v < 3 || v <= s.depth) { toast(`已指定“${DEPTH[v][0]}”` + (v < 3 ? '，分步识别时跳过这张' : '，现在已经到了')); return; }
+    const pages = s.depth_pages || [];
+    if (!pages.length) { toast('只有 CAD 文件，没有 PDF，不能看图识别'); return; }
+    try { RECOG = await (await fetch('/api/recognizers')).json(); } catch (e) { RECOG = null; }
+    const pref = (RECOG && RECOG.prefs) || {}, ex = pref.executor || (RECOG && RECOG.codex.ready ? 'codex' : 'claude');
+    const ready = RECOG && RECOG[ex] && RECOG[ex].ready;
+    const name = s.no.startsWith(NAMELESS) ? s.title : s.no;
+    if (!ready) { renderRecognizePick(`${name}：加深到“${DEPTH[v][0]}”`, pages); return; }  // 识别方式还没设好：在右栏选
+    toast(`开始${v === 4 ? '精读（强档）' : '看图识别'} ${name}`);
+    startJob('recognize', { executor: ex, tier: v === 4 ? 'strong' : 'economy', model: pref.model || null, pages });
+  };
+  const items = [1, 2, 3, 4].map(v => el('button', { type: 'button', role: 'menuitem', onclick: () => pick(v),
+      ...(now ? {} : { disabled: '' }) },
+    `${v}. ${DEPTH[v][0]}` + (v === s.depth ? '（现在）' : '') + (v === s.depth_target ? '（你指定的）' : ''),
+    el('small', {}, DEPTH[v][1] + (v > s.depth && v >= 3 ? '：选了马上识别这张' : v < 3 ? '：分步识别时跳过这张' : ''))));
+  if (s.depth_target) items.push(el('button', { type: 'button', role: 'menuitem', ...(now ? {} : { disabled: '' }),
+    onclick: async () => { closeMenu(); if (await post('/api/decision/revoke', { kind: 'depth', key: s.no })) toast('已撤回指定'); } },
+    '撤回指定', el('small', {}, '按分步识别的规则来')));
+  const m = el('div', { class: 'cmenu', role: 'menu', 'aria-label': `${s.no} 的信息深度` },
+    el('div', { class: 'cm-head' }, `${s.no.startsWith(NAMELESS) ? s.title : s.no} 的信息深度：现在是“${DEPTH[s.depth][0]}”`
+      + (now ? '' : '（在看以前的批次，回到最新批次才能指定）')), ...items);
+  document.body.append(m);
+  m.style.left = Math.min(ev.clientX, innerWidth - m.offsetWidth - 8) + 'px';
+  m.style.top = Math.min(ev.clientY, innerHeight - m.offsetHeight - 8) + 'px';
+  (m.querySelector('button:not([disabled])') || m).focus();
+  m.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeMenu(); return; }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const bs = [...m.querySelectorAll('button:not([disabled])')], i = bs.indexOf(document.activeElement);
+    bs[(i + (e.key === 'ArrowDown' ? 1 : bs.length - 1)) % bs.length].focus();
+  });
+}
+document.addEventListener('pointerdown', ev => { if (!ev.target.closest('.cmenu')) closeMenu(); });
 function showTip(s, r) {  // r：图纸在屏幕上的位置（getBoundingClientRect 那样的 left/top/right/bottom）
   // 鼠标指着的图：源文件名和简单说明
   const src = (s.paths || [])[0];
@@ -910,7 +971,9 @@ function showTip(s, r) {  // r：图纸在屏幕上的位置（getBoundingClient
       (s.fields || {}).content ? el('div', { class: 'file' }, `可能的内容：${s.fields.content.value}`) : null].filter(Boolean) : []),
     ...((s.versions || []).length > 1 ? [el('ul', { class: 'vers' }, s.versions.map(v =>
       el('li', { class: v.state === '现行' ? 'cur' : '' }, `${v.rev || '?'} 版　${v.date || '日期不详'}　批次#${v.batch}　${v.state}`)))] : []),
-    ...((s.paths || []).length > 1 ? [el('div', { class: 'file' }, `另有 ${s.paths.length - 1} 处出处`)] : []));
+    ...((s.paths || []).length > 1 ? [el('div', { class: 'file' }, `另有 ${s.paths.length - 1} 处出处`)] : []),
+    s.depth ? el('div', { class: 'file' }, `信息深度：${DEPTH[s.depth][0]}（${DEPTH[s.depth][1]}）`
+      + (s.depth_target ? `；你指定：${DEPTH[s.depth_target][0]}` : '') + '。右键可以指定') : null);
   gtip.classList.add('show');
   const c = gsvg.parentElement, cr = c.getBoundingClientRect();
   const tw = gtip.offsetWidth, th = gtip.offsetHeight;
@@ -972,11 +1035,15 @@ function buildGraph() {
       g.append(sv('rect', { class: 'ghost', x: p.x + 3.5 * k, y: p.y - 3.5 * k, width: p.w, height: p.h, rx: 7 }));
     g.append(sv('rect', { class: 'box', x: p.x, y: p.y, width: p.w, height: p.h, rx: 7 }));
     g.append(sv('text', { class: 'lbl', x: p.x + p.w / 2, y: p.y + 18.5, 'text-anchor': 'middle' }, ALIAS[s.no]));
+    if (s.depth) for (let k = 1; k <= 4; k++)  // 左下角四格：信息深度；没到你指定的深度的格子画橙色框
+      g.append(sv('rect', { class: `dp${k <= s.depth ? ' on' : k <= (s.depth_target || 0) ? ' want' : ''}`,
+        x: p.x + 5 + (k - 1) * 6, y: p.y + p.h - 5, width: 4, height: 2.5, rx: 0.8 }));
     const flag = s.status === 'guess' ? null : s.status !== 'current' ? s.status : s.inner ? 'inner' : null;  // 右上角小圆点：升版、变更、冲突、缺失……
     if (flag) g.append(sv('circle', { class: `flag f-${flag}`, cx: p.x + p.w - 5, cy: p.y + 5, r: 3.5 }));
     const open = () => { ui.focusSet = null; ui.backTo = null; hideTip(); selectSheet(s.no); };
     g.addEventListener('click', () => { if (!justDragged) open(); });
-    g.addEventListener('pointerdown', ev => startDrag(ev, s.no, g));
+    g.addEventListener('pointerdown', ev => { if (ev.button === 0) startDrag(ev, s.no, g); });
+    g.addEventListener('contextmenu', ev => { ev.preventDefault(); hideTip(); depthMenu(s, ev); });
     g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
     g.addEventListener('mouseenter', () => { showTip(s, g.getBoundingClientRect()); hoverSheet(s.no); });
     g.addEventListener('mouseleave', () => { hideTip(); hoverSheet(null); });

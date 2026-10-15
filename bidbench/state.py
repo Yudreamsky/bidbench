@@ -32,6 +32,13 @@ STATUS_LABEL = {
     "conflict": "冲突", "pending_void": "作废还是漏发待确认", "voided": "已作废", "missing": "缺失",
     "guess": "按文件名暂定",
 }
+# 信息深度（docs/图纸字段.md 9.9）：一张图现在的信息是从哪一层来的。0 是缺图（手上没有）
+DEPTHS = {
+    1: ("地图", "只按文件名、文件夹、PDF 自带的文字暂定"),
+    2: ("本机读出", "DWG 的图签和文字，或演示用的文字层识别；没看过整张图"),
+    3: ("看图识别", "Codex 或 Claude 看过整张图"),
+    4: ("精读", "强档：除了整张图，还看了局部切片"),
+}
 NAMELESS = "文件："  # 文件名里看不出图号的文件，先用文件名代替图号
 SEP = " · "  # 多栋楼的项目里，图纸身份写成“塔楼 · 图号”（docs/图纸字段.md 9.1）
 CONF_LABEL = {"confirmed": "人工确认", "high": "高置信", "mid": "中置信", "low": "低置信", "conflict": "冲突"}
@@ -557,6 +564,27 @@ def _val(rec, key):
     return (rec["title_block"].get(key) or {}).get("value")
 
 
+def depth_of(rec: dict | None) -> int:
+    """一页识别结果的信息深度（DEPTHS）。"""
+    if not rec:
+        return 1
+    run = rec["run"]
+    if run["executor"] in (dwg.EXECUTOR, *PLACEHOLDER_EXECUTORS):
+        return 2
+    return 4 if (run.get("tiles") or 0) > 0 else 3
+
+
+def _set_depth(sheets: list, decisions: dict) -> None:
+    """每张图的信息深度和你指定的目标深度（人工决定 depth，键是图纸身份，值是 1~4）。"""
+    for s in sheets:
+        s.setdefault("depth", 0 if s["status"] == "missing" else 1)
+        pend = [f["page_id"] for f in s.get("pending_files") or []]  # 同图号还没识别的 PDF 也一起识别
+        s["depth_pages"] = list(dict.fromkeys((s.get("depth_pages") or s.get("pages") or []) + pend))
+        d = _dec(decisions, "depth", s["no"], bare(s["no"]))
+        if d and d["value"] in ("1", "2", "3", "4") and s["depth"]:
+            s["depth_target"] = int(d["value"])
+
+
 def _is_cad(p: PageRec) -> bool:
     """从 DWG、DXF 读出的页（docs/图纸字段.md 9.7）。"""
     return bool(p.rec) and p.rec["run"]["executor"] == dwg.EXECUTOR
@@ -1009,6 +1037,8 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
             "rec_notes": [{"type": x["type"], "text": x["description"]} for x in cp.rec["issues"]],
             "cls": cls, "fields": fields, "type_kind": _type_kind(no), "details": _details(cp),
             "xrefs": sorted(set(cp.rec["content"].get("xrefs") or ())),
+            "depth": depth_of(cp.rec),  # 看图、导出优先用 PDF：配成一份的图按 PDF 那页算
+            "depth_pages": [p.page_id for p in chosen["pages"] if not _is_cad(p)],  # 要加深时识别这几页
         }
 
     # ---- 变更单 ----
@@ -1351,6 +1381,7 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
         _set_floors(out, fl, "图名" if fl else "", floors.floor_names(m["title"] or ""))
         sheets_list.append(out)
     sheets_list += prov.values()
+    _set_depth(sheets_list, decisions)
     _guess_facts(facts, sheets_list, decisions)
     sheets_list.sort(key=lambda s: (towers.order_key(s.get("tower")) if keys.multi else 0, _disc_order(s["discipline"]),
                                     no_parts(s["no"])[0], no_parts(s["no"])[1] or 0, s["no"]))

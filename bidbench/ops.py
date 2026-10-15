@@ -270,6 +270,8 @@ def map_text(m: dict) -> str:
     text = f"{m['pages']} 页 PDF 里，{m['numbered']} 页从文件名或 PDF 文字认出了图号"
     if m["dwg_files"]:
         text += f"；DWG {m['dwg_files']} 个，读了 {m['dwg_read']} 个，读出 {m['dwg_sheets']} 张图"
+    if m.get("skipped"):
+        text += f"；你指定不用看图识别的 {m['skipped']} 页不算在下面几步里"
     return text + "。"
 
 

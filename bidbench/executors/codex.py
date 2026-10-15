@@ -320,7 +320,7 @@ def recognize_page(cmd_prefix, runner, task_dir: Path, item: dict, model: str, e
                 "page_id": item["page_id"],
                 "source": item["source"],
                 "run": {"executor": EXECUTOR, "model": model, "instruction_version": claude.INSTRUCTION_VERSION,
-                        "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+                        "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "tiles": tiles},
                 **body,
             }
             errs = sorted(validator.iter_errors(record), key=lambda e: list(e.absolute_path))

@@ -9,6 +9,7 @@ from conftest import _recognize
 from bidbench import assistant, cli, ingest, ops, recognition
 from bidbench.executors import simulated
 from bidbench.store import Project
+from test_desktop import running  # noqa: F401  工作台测试用的服务器
 
 
 @pytest.fixture
@@ -92,3 +93,59 @@ def test_demo_estimate_has_stages(demo_copy):
     _recognize(demo_copy)
     est = ops.plan_recognition(demo_copy, "all", "codex")
     assert sum(x["left"] for x in est["stages"]) == est["pages"]
+
+
+# ---------------- 信息深度（docs/图纸字段.md 9.9） ----------------
+
+def _sheets(proj):
+    from bidbench import state
+    return {s["no"]: s for s in state.build(proj, with_diff=False)["sheets"]}
+
+
+def test_depth_from_sources(staged):
+    """地图 1、DWG 读出 2、看图识别 3、强档精读 4；缺图没有深度。"""
+    s = _sheets(staged)
+    assert s["A-101"]["depth"] == 1 and s["A-101"]["depth_pages"]
+    a103 = s["A-103"]  # DXF 读出了图签；同图号的 PDF 还没识别，加深时识别它
+    assert a103["depth"] == 2 and len(a103["depth_pages"]) == 1
+
+    task = recognition.make_task(staged, render=False, pages=s["A-101"]["depth_pages"] + s["A-301"]["depth_pages"])
+    simulated.run(task)
+    for f in recognition.result_files(task / "results"):  # 假装是 Codex 识别的：A-101 经济档，A-301 强档
+        data = json.loads(f.read_text(encoding="utf-8"))
+        data["run"]["executor"] = "codex"
+        data["run"]["tiles"] = 3 if data["page_id"] in s["A-301"]["depth_pages"] else 0
+        f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert not recognition.import_results(staged, task / "results").errors  # tiles 写进 run 能通过校验
+    s = _sheets(staged)
+    assert (s["A-101"]["depth"], s["A-301"]["depth"]) == (3, 4)
+    from bidbench import state
+    gone = [{"no": "A-109", "status": "missing"}]
+    state._set_depth(gone, {})
+    assert gone[0]["depth"] == 0  # 缺图手上没有，没有深度
+
+
+def test_depth_target_drives_stages(staged, running):
+    from bidbench.guide import decision_text
+    from bidbench.store import add_decision
+    add_decision(staged, "depth", "A-501", "3")  # 详图本来在按需深入：指定要看图识别 → 第二步最前面
+    add_decision(staged, "depth", "A-301", "1")  # 剖面本来在建模主图：指定只要地图 → 跳过
+    s = _sheets(staged)
+    assert s["A-501"]["depth_target"] == 3 and s["A-301"]["depth_target"] == 1
+    sp = recognition.stage_plan(staged)
+    sp.pop("_rows"), sp.pop("_hints")
+    st = {x["key"]: x for x in sp["stages"]}
+    assert st["key"]["groups"][0]["key"] == "target" and st["key"]["groups"][0]["pages"] == 1
+    assert st["main"]["total"] == 1 and sp["map"]["skipped"] == 1
+    assert "不算在下面几步里" in ops.stages_text(sp)
+    task = recognition.make_task(staged, render=False, stages=["key"])
+    items = json.loads((task / "manifest_in.json").read_text(encoding="utf-8"))["pages"]
+    assert items[0]["source"]["file_path"].endswith("A-501 STAIR DETAILS.pdf")
+    assert decision_text("depth", "A-501", "4") == "A-501 的信息深度指定为“精读”"
+
+    c = running(staged)
+    assert c.post("/api/decision", {"kind": "depth", "key": "A-101", "value": "9"})["_status"] == 400
+    got = c.post("/api/decision", {"kind": "depth", "key": "A-101", "value": "4"})
+    assert next(x for x in got["sheets"] if x["no"] == "A-101")["depth_target"] == 4
+    got = c.post("/api/decision/revoke", {"kind": "depth", "key": "A-101"})
+    assert "depth_target" not in next(x for x in got["sheets"] if x["no"] == "A-101")

@@ -64,6 +64,7 @@ def sheet_row(s: dict) -> dict:
     return {"no": s["no"], "title": s["title"], "discipline": s["discipline"], "status": STATUS_LABEL[s["status"]],
             "current_rev": s["current_rev"], "page_id": s["current_page"], "floors": s.get("floors_name") or s.get("floors_text"),
             **({"tower": s["tower"]} if s.get("tower") else {}), **({"covers": cover} if cover else {}),
+            **({"depth": state.DEPTHS[s["depth"]][0]} if s.get("depth") else {}),
             **({"details": [f"{d['mark']} {d['title'] or ''}".strip() for d in s["details"]]} if s.get("details") else {}),
             **({"files": files} if files else {}),
             **({"notes": s["notes"]} if s["notes"] else {})}

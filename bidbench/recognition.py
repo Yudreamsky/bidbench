@@ -134,6 +134,7 @@ STAGES = [
 STAGE_LABEL = {k: v for k, v, _ in STAGES}
 STAGE_RANK = {k: i for i, (k, _, _) in enumerate(STAGES)}
 STAGE_GROUPS = [  # (分组, 属于哪一步, 名称)，同一步里按这个先后
+    ("target", "key", "你指定要看图识别的图"),
     ("catalog", "key", "图纸目录、清单"),
     ("changes", "key", "变更单、答疑"),
     ("lists", "key", "表格、一览表"),
@@ -145,6 +146,7 @@ STAGE_GROUPS = [  # (分组, 属于哪一步, 名称)，同一步里按这个先
     ("dwg", "deep", "DWG 已读出内容的图"),
     ("other", "deep", "认不出种类的页"),
 ]
+SKIP = "skip"  # 你指定只要地图、不用看图识别的图（信息深度 1、2），哪一步都不放
 GROUP_STAGE = {g: st for g, st, _ in STAGE_GROUPS}
 GROUP_LABEL = {g: lb for g, _, lb in STAGE_GROUPS}
 GROUP_RANK = {g: i for i, (g, _, _) in enumerate(STAGE_GROUPS)}
@@ -178,6 +180,25 @@ def map_hints(con) -> dict:
     return {"titles": titles, "dwg": dwg_nos}
 
 
+def depth_targets(proj: Project) -> dict:
+    """你在图纸上指定的信息深度（人工决定 depth）落到页：want 是要看图识别、还没到那么深的页，skip 是指定不用看图识别的页。"""
+    from .state import build
+    from .store import latest_decisions
+    with proj.connect() as con:
+        if not any(k == "depth" for k, _ in latest_decisions(con)):
+            return {"want": set(), "skip": set()}
+    want, skip = set(), set()
+    for sh in build(proj, with_diff=False)["sheets"]:
+        t = sh.get("depth_target")
+        if t is None:
+            continue
+        if t >= 3 and sh["depth"] < t:
+            want |= set(sh["depth_pages"])
+        elif t <= 2:
+            skip |= set(sh["depth_pages"])
+    return {"want": want, "skip": skip}
+
+
 def page_path(r) -> str:
     """页面的出处：多页文件带“（第 n 页）”，和一级识别、图谱里的写法一样。"""
     return r["first_path"] + (f"（第 {r['page_index']} 页）" if (r["page_count"] or 1) > 1 else "")
@@ -192,6 +213,10 @@ def stage_group(r, hints: dict | None = None, guess: dict | None = None) -> str:
     """一页归哪一组（见 STAGE_GROUPS）：先看地图上这页的图名（目录、DWG 里读到的，或文件名里的），再看文件夹。"""
     from .state import norm_no
     hints = hints or {"titles": {}, "dwg": set()}
+    if r["page_id"] in hints.get("skip", ()):
+        return SKIP
+    if r["page_id"] in hints.get("want", ()):
+        return "target"
     g = guess if guess is not None else first_guess(r)
     no = norm_no(g["no"]["value"]) if g else None
     multi = (r["page_count"] or 1) > 1
@@ -219,18 +244,21 @@ def stage_plan(proj: Project, scope: str = "new") -> dict:
     left = {r["page_id"] for r in pick_pages(proj, scope)} if scope != "all" else None
     with proj.connect() as con:
         everything = pages_to_recognize(con, scope="all")
-        hints = map_hints(con)
+        hints = {**map_hints(con), **depth_targets(proj)}
         cad = con.execute("SELECT COUNT(*) AS n, SUM(f.sha256 IN (SELECT sha256 FROM cad_reads)) AS done,"
                           " SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE sheets > 0)) AS ok"
                           " FROM files f WHERE f.kind = 'cad' AND f.ext IN ('.dwg', '.dxf')").fetchone()
         dwg_sheets = con.execute("SELECT COUNT(*) FROM recognitions WHERE executor = 'dwg'").fetchone()[0]
     stages = {k: {"key": k, "label": lb, "desc": d, "total": 0, "left": 0, "groups": {}} for k, lb, d in STAGES}
-    numbered = 0
+    numbered = skipped = 0
     rows_left = []
     for r in everything:
         g = first_guess(r)
         numbered += g is not None
         grp = stage_group(r, hints, g)
+        if grp == SKIP:
+            skipped += 1
+            continue
         st = stages[GROUP_STAGE[grp]]
         st["total"] += 1
         if left is None or r["page_id"] in left:
@@ -245,7 +273,7 @@ def stage_plan(proj: Project, scope: str = "new") -> dict:
                   for g, rs in sorted(st["groups"].items(), key=lambda kv: GROUP_RANK[kv[0]])]
         out.append({**st, "done": st["total"] - st["left"] if left is not None else 0, "groups": groups})
     return {
-        "map": {"pages": len(everything), "numbered": numbered, "titles": len(hints["titles"]),
+        "map": {"pages": len(everything), "numbered": numbered, "titles": len(hints["titles"]), "skipped": skipped,
                 "dwg_files": cad["n"] or 0, "dwg_read": cad["done"] or 0, "dwg_ok": cad["ok"] or 0, "dwg_sheets": dwg_sheets},
         "stages": out,
         "_rows": rows_left,  # 给估算用：还要识别的页（不往外给）
@@ -258,7 +286,7 @@ def stage_rows(rows, stages: list[str], hints: dict) -> list:
     bad = [k for k in stages if k not in STAGE_RANK]
     if bad:
         raise ValueError(f"未知的识别步骤：{'、'.join(bad)}")
-    keyed = [(GROUP_RANK[g], i, r) for i, r in enumerate(rows) for g in [stage_group(r, hints)] if GROUP_STAGE[g] in stages]
+    keyed = [(GROUP_RANK[g], i, r) for i, r in enumerate(rows) for g in [stage_group(r, hints)] if GROUP_STAGE.get(g) in stages]
     return [r for _g, _i, r in sorted(keyed, key=lambda x: (x[0], x[1]))]
 
 
@@ -271,8 +299,9 @@ def pick_pages(proj: Project, scope: str = "new", priorities: list[str] | None =
     only = set(pages) if pages is not None else _conflict_pages(proj) if scope == "conflict" else None
     with proj.connect() as con:
         rows = pages_to_recognize(con, scope=scope, only=only)
-        if stages is not None:
-            return stage_rows(rows, stages, map_hints(con))
+        hints = map_hints(con) if stages is not None else None
+    if stages is not None:
+        return stage_rows(rows, stages, {**hints, **depth_targets(proj)})
     if priorities is not None:
         bad = [k for k in priorities if k not in PRIORITY_RANK]
         if bad:
