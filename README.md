@@ -338,7 +338,8 @@ bidbench update --rollback  # 回到上一次更新之前的版本
 
 `bidbench -p 项目目录 mcp` 把项目作为 MCP 工具集提供给 Claude 桌面版、Claude Code、Codex 等 agent。
 助手能查询图纸、事实、问题、楼层覆盖、批次差异，并起草答疑；**改动只能提议**，在工作台“AI 助手提议”
-或用 `bidbench confirm <编号>` 确认后才生效。接入方法见 [docs/MCP.md](docs/MCP.md)。
+或用 `bidbench confirm <编号>` 确认后才生效。接入方法见 [docs/MCP.md](docs/MCP.md)；
+接 Codex 不用手写设置：工作台 AI 助手里点“接到 Codex”，或运行 `bidbench -p 项目目录 connect-codex`。
 
 ## 压缩包支持
 

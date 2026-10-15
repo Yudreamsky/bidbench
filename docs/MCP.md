@@ -42,15 +42,40 @@ claude mcp add bidbench -- /完整路径/bidbench -p "/图纸项目目录" mcp
 
 保存后重启桌面版。
 
-## Codex
+## Codex（命令行、桌面版、编辑器插件）
 
-在 `~/.codex/config.toml` 里加入：
+三者共用一份设置 `~/.codex/config.toml`（Windows 是 `C:\Users\你\.codex\config.toml`）。**不用手写**，两种办法任选：
+
+- 工作台：打开项目 → AI 助手 → 点“接到 Codex”。
+- 命令行：`bidbench -p "项目目录" connect-codex`（加 `--print` 只显示、不写）。
+
+它会写入下面这样一节（路径按本机自动填），已有的 bidbench 一节整节替换，别的设置不动，原文件备份成 `config.toml.bak`。
+同一时间只接一个项目，换项目再点一次。写完**重新打开 Codex**，在 Codex 里输入 `/mcp` 能看到 bidbench 就是接上了。
 
 ```toml
 [mcp_servers.bidbench]
-command = "/完整路径/bidbench"
-args = ["-p", "/图纸项目目录", "mcp"]
+command = "C:\\Users\\你\\AppData\\Local\\Programs\\bidbench\\bidbench.exe"
+args = ["-p", "D:\\投标\\示例项目", "mcp"]
+startup_timeout_sec = 60     # 大项目第一次算台账要十几秒，Codex 默认只等 10 秒
+tool_timeout_sec = 180
+env = { BIDBENCH_CONFIG_DIR = "C:\\Users\\你\\AppData\\Roaming\\bidbench", PYTHONUTF8 = "1" }
 ```
+
+手写时注意：TOML 双引号里的反斜杠要写两遍（`\\`），或者整段路径改用单引号 `'D:\投标\示例项目'`。
+
+## 让 Codex 照图建模
+
+bidbench 不画模型，它负责告诉 Codex：建某一层某个专业该看哪些图、图上写的“详见”指到哪、缺了哪些图、哪些被变更单改过。
+建议给 Codex 单开一个空的工作文件夹放模型脚本，在里面启动 Codex，第一句可以这样说：
+
+> 用 bidbench 的工具给 3 层建结构模型（柱、梁、板）。先用 `find_sheets_for_task(floor="3F", discipline="结构")` 列出该看的图，
+> 主图逐张用 `get_sheet` 看尺寸、轴网和标高，“详见”的地方用 `related_sheets` 和 `locate` 找到原文；
+> 缺图和 `notices` 里的变更先列给我。然后写一个 Revit Dynamo（或 IFC / pyRevit）脚本按轴网生成构件，
+> 每个构件注明依据哪张图哪一版。拿不准的尺寸不要猜，列成清单问我。
+
+建好以后可以接着问“结施-04 升版影响了 3 层哪些构件”，让它对照 `batch_diff` 和变更单改模型。
+图纸里的尺寸靠识别读出来，目前给到的是图号、图名、楼层、轴线范围、详图编号、引用关系和文字，**不是 CAD 几何**；
+精确的尺寸和定位还是要对照原图（`locate` 给出本机文件和页码）。
 
 ## 可以这样问
 
