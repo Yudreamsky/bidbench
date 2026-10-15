@@ -415,7 +415,7 @@ def recognize_page(client, task_dir: Path, item: dict, model: str, effort: str, 
             "source": item["source"],
             "run": {"executor": EXECUTOR, "model": getattr(msg, "model", None) or model,
                     "instruction_version": INSTRUCTION_VERSION,
-                    "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+                    "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "tiles": tiles},
             **body,
         }
         errs = sorted(validator.iter_errors(record), key=lambda e: list(e.absolute_path))

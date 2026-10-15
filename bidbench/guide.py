@@ -337,6 +337,10 @@ def decision_text(kind: str, key: str, value: str, names: dict | None = None) ->
     if kind == "floor_base":
         label = floors.BASE_LABEL.get(int(value)) if value in ("0", "1") else value
         return f"{'全项目' if key == '*' else key} 英文楼层怎么数：{label}"
+    if kind == "depth":
+        from .state import DEPTHS
+        label = DEPTHS.get(int(value), (value,))[0] if value.isdigit() else value
+        return f"{key} 的信息深度指定为“{label}”" + ("（不用看图识别）" if value in ("1", "2") else "")
     if kind == "numbering":
         if value == "off":
             return "图号格式：先不用，按 ISO 英国附录的顺序读"

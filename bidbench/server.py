@@ -27,7 +27,7 @@ from . import antivirus, appconfig, chat, debuglog, export, navigate, numbering,
 from .store import Project, SchemaTooNew, add_decision, latest_decisions, now_iso, revoke_decision
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev", "name_check",
-                  "file_tower", "tower_alias", "rev_check", "floor_base", "numbering"}
+                  "file_tower", "tower_alias", "rev_check", "floor_base", "numbering", "depth"}
 PAGE_ID = re.compile(r"[0-9a-f]{12}-p\d{3}")
 TOKEN_META = '<meta name="bidbench-token" content="">'
 PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan", "read_dwg"}  # 记进项目操作日志的任务
@@ -578,6 +578,8 @@ def make_handler(app: _App):
                 kind, key, value = body.get("kind"), body.get("key"), body.get("value")
                 if kind not in DECISION_KINDS or not isinstance(key, str) or not isinstance(value, str):
                     return self._json({"error": "决定的格式不对"}, 400)
+                if kind == "depth" and value not in ("1", "2", "3", "4"):
+                    return self._json({"error": "信息深度只能是 1~4"}, 400)
                 if kind == "numbering":
                     try:
                         value = numbering.decision_value(value)
