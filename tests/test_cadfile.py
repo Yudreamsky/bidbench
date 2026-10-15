@@ -1,5 +1,6 @@
 """给 Revit MCP 翻模用的 DXF（cad_file）：现行版的 CAD 文件、同文件的其他图、外部参照，DWG 用 dwg2dxf 转。"""
 
+import os
 import stat
 from pathlib import Path
 
@@ -45,6 +46,7 @@ def _fake(tmp_path, body: str) -> Path:
     return tool
 
 
+@pytest.mark.skipif(os.name == "nt", reason="假的 dwg2dxf 是 shell 脚本；Windows 上打包自检用真的转")
 def test_dwg_converted_with_dwg2dxf(tmp_path, monkeypatch):
     proj = Project.init(tmp_path / "p", "x")
     src = tmp_path / "blob.dwg"
