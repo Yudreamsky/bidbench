@@ -57,7 +57,7 @@ TOOL_LABEL = {
     "propose_note": "提议记笔记", "propose_improvement": "提改进建议",
     "numbering_overview": "图号汇总", "propose_numbering": "提议图号格式",
     "find_sheets_for_task": "按任务找图", "related_sheets": "相关图纸", "locate": "定位到图上",
-    "check_basis": "核对建模依据",
+    "check_basis": "核对建模依据", "cad_file": "转出 DXF",
 }
 
 

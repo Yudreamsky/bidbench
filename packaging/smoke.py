@@ -1,4 +1,4 @@
-"""打包后的自检：用打出来的 bidbench.exe 跑一遍演示流水线，再连一次 MCP，再读一批 DWG。
+"""打包后的自检：用打出来的 bidbench.exe 跑一遍演示流水线，再连一次 MCP，再读一批 DWG、转一张 DXF。
 
 python packaging/smoke.py <bidbench.exe 路径> <工作目录>
 """
@@ -54,6 +54,22 @@ def dwg_check(exe, work):
     run(exe, "init", str(proj), "--name", "DWG 自检")
     out = run(exe, "-p", str(proj), "receive", str(folder), "--date", "2026-10-01", "--no-av")
     assert "认出 5 张图" in out, out
+    asyncio.run(dxf_check(exe, proj))
+
+
+async def dxf_check(exe, proj):
+    """附带的 dwg2dxf 要能把 DWG 转成 DXF（给 Revit MCP 翻模用）：通过 MCP 的 cad_file 转一张。"""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(command=str(exe), args=["-p", str(proj), "mcp"])
+    async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
+        await s.initialize()
+        res = await s.call_tool("cad_file", {"no": "建施-03"})
+        data = json.loads(res.content[0].text)
+        dxf = Path(data["dxf"])
+        assert dxf.exists() and dxf.stat().st_size > 1000 and data["same_file_sheets"] == ["建施-04"], data
+        print(f"DWG 转 DXF 正常：{dxf.name}")
 
 
 async def mcp_check(exe, proj):

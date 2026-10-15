@@ -76,7 +76,23 @@ bidbench 不画模型，它负责告诉 Codex：建某一层某个专业该看�
 图纸里的尺寸靠识别读出来，目前给到的是图号、图名、楼层、轴线范围、详图编号、引用关系和文字，**不是 CAD 几何**；
 精确的尺寸和定位还是要对照原图（`locate` 给出本机文件和页码）。
 
-## 可以这样问
+## 和 Revit MCP 一起用
+
+bidbench 负责“看图”（该看哪些图、现行版、引用、缺图、变更），Revit MCP 负责在 Revit 里建模和翻模。两个都写进 Codex 的设置：
+bidbench 一节用“接到 Codex”写入，Revit 一节照 revit-mcp 的 `clients/codex-config.example.toml` 加上（要建模把
+`REVIT_MCP_PROFILE` 设成含 `modeling`）。两节互不影响，一个 Codex 两边都能调用。
+
+翻模的顺序：
+
+1. `find_sheets_for_task` 找到这一层这个专业的主图。
+2. `cad_file(图号)` 拿到这张图现行版的 DXF：DWG 用安装包附带的 LibreDWG（dwg2dxf）转好，放在项目的 `exports/dxf`。
+   返回里 `where` 是这张图在模型空间还是哪个布局，`same_file_sheets` 是同一个 DWG 里的其他图（翻模只取这一块），
+   `xrefs` 是外部参照（轴网、底图常在里面，收到了的也转好）。只有 PDF 的图会报错，可以列进答疑。
+3. Revit MCP 的 `read_cad(dxf)` 看图层，和你确认哪层是轴网、柱、墙、梁，再 `cad_to_model` 翻模。
+4. 每个构件把依据（图号、版次、`page_id`，`cad_file` 返回里都有）记进 `建模依据.json`。
+5. 检查的 Codex：Revit MCP 的 `compare_cad_with_model` 对几何，bidbench 的 `check_basis` 对出处和版本。
+
+
 
 - “这个项目现在缺哪些图？哪些可以直接列进答疑？”
 - “结施-04 升版影响了什么？3 层结构模型要不要更新？”
@@ -93,7 +109,7 @@ bidbench 不画模型，它负责告诉 Codex：建某一层某个专业该看�
 | --- | --- |
 | 全局 | `project_overview`、`list_batches`、`batch_diff`、`compare_batches` |
 | 图纸 | `list_sheets`、`get_sheet`、`get_page`、`search` |
-| 建模找图 | `find_sheets_for_task`、`related_sheets`、`locate`（见下）、`check_basis`（核对建模依据） |
+| 建模找图 | `find_sheets_for_task`、`related_sheets`、`locate`（见下）、`check_basis`（核对建模依据）、`cad_file`（转出 DXF 给 Revit 翻模） |
 | 事实与问题 | `list_facts`、`get_fact`、`floor_coverage`、`list_issues`、`draft_qa`、`list_baselines` |
 | 其他 | `estimate_recognition`（只估算，不运行）、`list_notes`、`list_proposals` |
 | 提议（需确认） | `propose_issue_resolution`、`propose_fact_confirmation`、`propose_baseline`、`propose_note`、`propose_improvement`（工作台本身的改进建议，确认后记进改进建议清单，`bidbench suggestions` 查看） |

@@ -35,6 +35,7 @@ INSTRUCTIONS = """你是这个投标图纸项目的助手，工具集就是 bidb
    不要自己开始识别；都找不到就写进 unsure。最后用 propose_numbering 提议，why 里写清每个代码是从哪看出来的。
 8. 建模找图：先用 find_sheets_for_task（楼层、专业、构件）拿到该看的现行图，再用 related_sheets 顺着“详见”往外找，
    用 locate(page_id, bbox) 跳到图上那句话、那个详图索引的位置。缺的图、改过它们的变更单、相关问题都要告诉用户。
+   要在 Revit 里翻模时，用 cad_file 拿到这张图的 DXF，交给 Revit MCP 的工具。
    建模时每个构件记下依据（图号、版次、page_id、bbox、读到的数值），用 check_basis 核对；拿不准的尺寸不要猜，列出来问用户。
 9. 用户不知道下一步做什么、不知道问题怎么选时：下一步看 project_overview 的 next_steps，问题怎么选看 list_issues 的
    how_to_choose，照着说，并告诉用户在工作台里点哪里（问题中心最上面的“下一步”、每个问题下面的“怎么选？”）。
@@ -162,6 +163,14 @@ def build_server(kit: Toolkit):
         给了 bbox（[x0, y0, x1, y1]，相对整页 0~1，原点左上角，related_sheets 的 via、get_sheet 的引用里都有）
         再读出那块地方的文字和画在那里的引用。references_on_page 是这页上全部的引用和位置。"""
         return kit.locate(page_id, bbox)
+
+    @tool()
+    def cad_file(no: str) -> dict:
+        """把一张图的 CAD 文件转成 DXF，交给 Revit MCP 翻模（read_cad、cad_to_model、compare_cad_with_model 只认 DXF）。
+        优先用现行版的 DWG；只有旧版的 DWG 会提醒。返回 dxf（本机路径）、cad_file（原 DWG）、where（模型空间还是哪个布局）、
+        same_file_sheets（同一个 DWG 里的其他图，翻模时只取这张图那一块）、xrefs（外部参照，收到了的也转好 DXF）。
+        只有 PDF 的图会报错，告诉用户去要 CAD 文件。"""
+        return kit.cad_file(no)
 
     @tool()
     def check_basis(items: list[dict]) -> dict:

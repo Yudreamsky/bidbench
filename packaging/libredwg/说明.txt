@@ -1,6 +1,6 @@
 LibreDWG 0.13.3（读 DWG 用）
 
-投标图纸工作台调用这里的 dwgread.exe 读 DWG 的图签和文字。它是单独的程序，工作台只是调用它，没有改动、也没有链接进工作台。
+投标图纸工作台调用这里的 dwgread.exe 读 DWG 的图签和文字，调用 dwg2dxf.exe 把 DWG 转成 DXF 给翻模工具用。它是单独的程序，工作台只是调用它，没有改动、也没有链接进工作台。
 
 LibreDWG 是 GNU 项目，按 GNU 通用公共许可证第 3 版（GPLv3）发布，许可证全文见同目录的 COPYING。
 - 官方网站：https://www.gnu.org/software/libredwg/

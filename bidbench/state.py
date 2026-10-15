@@ -1013,7 +1013,8 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
                     state_txt = "待确认" if not chosen_rev and r in unclear else "已替代"
                 vlist.append({"rev": r["rev"], "date": (g.get("issue") or g.get("date")) if tie else g.get("date"),
                               "batch": g["pages"][0].first_batch, "state": state_txt,
-                              "page_id": g["pages"][0].page_id, "paths": sorted({x for p in g["pages"] for x in p.paths})})
+                              "page_id": g["pages"][0].page_id, "page_ids": [p.page_id for p in g["pages"]],  # 配成一份的 PDF 和 DWG
+                              "paths": sorted({x for p in g["pages"] for x in p.paths})})
         cls = classify.sheet_view(lab(no), discipline_of(no))
         tw, tower_f = _tower_field(no, ptower[cp.page_id], keys)
         sheet_tower[no] = tw

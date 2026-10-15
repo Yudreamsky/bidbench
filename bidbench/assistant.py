@@ -298,6 +298,20 @@ class Toolkit:
                        "这一页的识别内容用 get_page(page_id) 看。")
         return out
 
+    def cad_file(self, no: str) -> dict:
+        """一张图的 CAD 文件转成 DXF，给 Revit MCP 的 read_cad、cad_to_model、compare_cad_with_model 用。"""
+        from . import cadfile
+        st = self._state()
+        s = self._sheet(st, no)
+        try:
+            out = cadfile.for_sheet(self.proj, st, s)
+        except cadfile.CadError as e:
+            raise ToolError(str(e)) from None
+        out["hint"] = ("dxf 是本机文件路径，交给 Revit MCP 的 read_cad 先看图层、和用户确认，再 cad_to_model 翻模，"
+                       "建完用 compare_cad_with_model 核对。same_file_sheets 是同一个文件里的其他图：翻模时只取 where 那一块；"
+                       "xrefs 是外部参照（轴网、底图常在里面），要一起叠上。构件依据写这张图的图号、版次和 page_id。")
+        return out
+
     def check_basis(self, items: list[dict]) -> dict:
         """建模依据核对：模型里每个构件写了依据哪张图哪一版、哪一页哪块地方、读到的数值，逐条对照现在的图纸。
 
