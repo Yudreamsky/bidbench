@@ -1,6 +1,6 @@
 """打包前取 LibreDWG 的 Windows 版（读 DWG 用，docs/图纸字段.md 9.7），放进安装包。
 
-只取 dwgread.exe 和它要的 DLL，校验官方发布包的 SHA-256；同时放上许可证（GPLv3）和说明。
+只取 dwgread.exe（读图签）、dwg2dxf.exe（给翻模工具转 DXF）和它们要的 DLL，校验官方发布包的 SHA-256；同时放上许可证（GPLv3）和说明。
 
 python packaging/fetch_libredwg.py <输出目录> [--zip <已下载的发布包>]
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 VERSION = "0.13.3"
 URL = f"https://github.com/LibreDWG/libredwg/releases/download/{VERSION}/libredwg-{VERSION}-win64.zip"
 SHA256 = "b5133f8b6bd71b7e682a06ef5f99c93b40d628a791c30a31924a80d258c87173"
-KEEP = ["dwgread.exe", "libredwg-0.dll", "libiconv-2.dll"]  # dwgread.exe 只依赖 libredwg-0.dll；iconv 转老版本 DWG 的代码页
+KEEP = ["dwgread.exe", "dwg2dxf.exe", "libredwg-0.dll", "libiconv-2.dll"]  # 两个程序都只依赖 libredwg-0.dll；iconv 转老版本 DWG 的代码页
 HERE = Path(__file__).resolve().parent
 
 
