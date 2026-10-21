@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -19,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 class OpError(Exception):
     """操作没法进行。消息直接给用户看。"""
+
+
+class LimitReached(OpError):
+    """AI 的用量额度暂时用完：做好的都留着，额度恢复后接着做。"""
+
+
+def _stop_error(e: Exception, message: str) -> OpError:
+    from .executors import claude
+    return (LimitReached if isinstance(e, claude.LimitError) else OpError)(message)
 
 
 # ---------------- 收图 ----------------
@@ -78,8 +88,19 @@ def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None
             d = dwg.read(proj.root / stored, ext) if ext == ".dxf" else _read_dwg(proj, proj.root / stored, sha, path, tool)
         except dwg.ReadError as e:
             err = str(e)
-        with proj.connect() as con:
-            n = dwg.save(con, sha, path, batch, d, err, now_iso())
+        except Exception as e:  # noqa: BLE001 - 一个文件出意外的错不能停下整批，也不能让下次每次都卡在它上面
+            logger.exception("读 DWG、DXF 意外出错：%s", sha[:12])
+            err = f"读的时候出了意外的错（{type(e).__name__}），只能按文件名暂定"
+        try:
+            with proj.connect() as con:
+                n = dwg.save(con, sha, path, batch, d, err, now_iso())
+        except sqlite3.Error:
+            raise  # 数据库本身的问题（被占用、磁盘满）不是这个文件的错，停下来
+        except Exception as e:  # noqa: BLE001 - 分图、认图签出错：同样记成读不出，接着读下一个
+            logger.exception("读出的 DWG、DXF 分图出错：%s", sha[:12])
+            d, err = None, f"读出来了但分图时出了意外的错（{type(e).__name__}），只能按文件名暂定"
+            with proj.connect() as con:
+                n = dwg.save(con, sha, path, batch, d, err, now_iso())
         out["files"] += 1
         out["sheets"] += n
         if err:
@@ -191,7 +212,7 @@ class LiveImport:
         """整次识别停下了（额度用完、凭据不对等）：先把已识别的导入，再告诉用户。"""
         self.finish()
         got = f"已识别的 {self.count} 页已导入。" if self.count else ""
-        return OpError(f"{e}。{got}任务包已保留，可以续跑")
+        return _stop_error(e, f"{e}。{got}任务包已保留，可以续跑")
 
 
 def plan_recognition(proj: Project, scope: str = "new", executor: str = "codex", tier: str = "economy",
@@ -318,17 +339,19 @@ def _finish_recognition(proj: Project, task: Path, r, usage_text: str, log: Log,
         log(f"  ✗ {f['file']}：{f['error']}")
     live.finish()
     log(f"导入 {live.count} 页。" + (f"{len(live.errors)} 个文件未通过校验，详见 reports/识别结果导入问题.md" if live.errors else ""))
-    return {"done": r.done, "failed": len(r.failed), "imported": live.count, "task": str(task), "model": r.model}
+    return {"done": r.done, "failed": len(r.failed), "later": r.later, "imported": live.count, "task": str(task),
+            "model": r.model}
 
 
 def recognize_claude(proj: Project, task: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
                      tiles: int | None = None, workers: int = 4, log: Log = print, progress=None, client=None,
-                     on_import=None) -> dict:
-    """on_import(已导入页数)：识别途中每导入一批调用一次。"""
+                     on_import=None, stop=None) -> dict:
+    """on_import(已导入页数)：识别途中每导入一批调用一次。stop() 返回真就不再开始新的页（留着下次续跑）。"""
     from .executors import claude
     live = LiveImport(proj, task, progress, on_import)
     try:
-        r = claude.run(Path(task), tier, model, effort, tiles, workers, client=client, progress=live, log_fn=log)
+        r = claude.run(Path(task), tier, model, effort, tiles, workers, client=client, progress=live, log_fn=log,
+                       stop=stop)
     except claude.FatalError as e:
         raise live.stopped(e) from e
     except BaseException:
@@ -342,13 +365,13 @@ def recognize_claude(proj: Project, task: Path, tier: str = "economy", model: st
 
 def recognize_codex(proj: Project, task: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
                     tiles: int | None = None, workers: int | None = None, log: Log = print, progress=None,
-                    runner=None, on_import=None) -> dict:
-    """用本机的 Codex（ChatGPT 账号）识别。runner 只在测试里用，代替真的 Codex；on_import 同 recognize_claude。"""
+                    runner=None, on_import=None, stop=None) -> dict:
+    """用本机的 Codex（ChatGPT 账号）识别。runner 只在测试里用，代替真的 Codex；on_import、stop 同 recognize_claude。"""
     from .executors import claude, codex
     live = LiveImport(proj, task, progress, on_import)
     try:
         r = codex.run(Path(task), tier, model, effort, tiles, workers or codex.DEFAULT_WORKERS, progress=live,
-                      log_fn=log, runner=runner)
+                      log_fn=log, runner=runner, stop=stop)
     except claude.FatalError as e:
         raise live.stopped(e) from e
     except BaseException:
@@ -401,7 +424,7 @@ def classify(proj: Project, executor: str = "codex", model: str | None = None, r
     try:
         r = cls.run(proj, answer, executor, model, redo, log, progress)
     except claude.FatalError as e:
-        raise OpError(f"智能分类停下了：{e}") from e
+        raise _stop_error(e, f"智能分类停下了：{e}") from e
     finally:
         if usage.input or usage.output:
             cost = usage.cost(model) if executor == "claude" else None

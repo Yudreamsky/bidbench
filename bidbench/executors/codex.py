@@ -33,7 +33,7 @@ from ..debuglog import tail
 from ..proc import NO_WINDOW
 from ..recognition import load_schema
 from . import claude
-from .claude import BODY_KEYS, FatalError, ProgressLog, RecognitionError, RunResult, run_pages
+from .claude import BODY_KEYS, FatalError, LimitError, ProgressLog, RecognitionError, RunResult, run_pages
 
 log = logging.getLogger(__name__)
 
@@ -229,18 +229,30 @@ def _message(raw: str) -> str:
 RESUME = "用同一个任务包续跑，已识别的页面会跳过"
 
 
-def classify(msg: str, model: str, resume: str = RESUME) -> str | None:
-    """整次运行都会失败的错误：返回给人看的原因，停下来；其余只算这一页失败。resume：额度恢复后怎么接着做。"""
+def _verdict(msg: str, model: str, resume: str) -> tuple[str, bool] | None:
+    """(给人看的原因, 是不是额度暂时用完)；只算这一页失败的错误返回 None。"""
     m = msg.lower()
     if ("model" in m and ("not supported" in m or "does not exist" in m or "not found" in m)) or "model_not_found" in m:
-        return f"Codex 不能用模型 {model}：{msg}。可以换一个模型；新模型需要先更新 Codex：{INSTALL_HINT}"
+        return f"Codex 不能用模型 {model}：{msg}。可以换一个模型；新模型需要先更新 Codex：{INSTALL_HINT}", False
     if "invalid_json_schema" in m or "invalid schema" in m:
-        return f"Codex 不接受这份输出格式：{msg}"
+        return f"Codex 不接受这份输出格式：{msg}", False
     if "not logged in" in m or "unauthorized" in m or re.search(r"\b401\b", m) or "authentication" in m:
-        return "Codex 还没有登录或登录已过期：在命令行运行 codex login 后重试"
+        return "Codex 还没有登录或登录已过期：在命令行运行 codex login 后重试", False
     if "usage limit" in m or "rate limit" in m or re.search(r"\b429\b", m) or "quota" in m:
-        return f"Codex 的用量额度暂时用完了（{msg}）。等额度恢复后，{resume}"
+        return f"Codex 的用量额度暂时用完了（{msg}）。等额度恢复后，{resume}", True
     return None
+
+
+def classify(msg: str, model: str, resume: str = RESUME) -> str | None:
+    """整次运行都会失败的错误：返回给人看的原因，停下来；其余只算这一页失败。resume：额度恢复后怎么接着做。"""
+    v = _verdict(msg, model, resume)
+    return v[0] if v else None
+
+
+def fatal_error(msg: str, model: str, resume: str = RESUME) -> FatalError | None:
+    """classify 判成整次都会失败的，包成异常：额度暂时用完是 LimitError（等额度恢复能接着做），其余是 FatalError。"""
+    v = _verdict(msg, model, resume)
+    return None if v is None else (LimitError if v[1] else FatalError)(v[0])
 
 
 @dataclass
@@ -304,9 +316,9 @@ def recognize_page(cmd_prefix, runner, task_dir: Path, item: dict, model: str, e
             usage.add(SimpleNamespace(input_tokens=u.get("input_tokens", 0), output_tokens=u.get("output_tokens", 0),
                                       cache_read_input_tokens=u.get("cached_input_tokens", 0), cache_creation_input_tokens=0))
             if call.error:
-                fatal = classify(call.error, model)
+                fatal = fatal_error(call.error, model)
                 if fatal:
-                    raise FatalError(fatal)
+                    raise fatal
                 raise RecognitionError(f"Codex 出错：{call.error}", "Codex 出错")
             try:
                 body = claude._parse_json(call.text or "")
@@ -356,9 +368,9 @@ def ask_json(prompt: str, schema: dict, model: str | None = None, effort: str = 
         usage.add(SimpleNamespace(input_tokens=u.get("input_tokens", 0), output_tokens=u.get("output_tokens", 0),
                                   cache_read_input_tokens=u.get("cached_input_tokens", 0), cache_creation_input_tokens=0))
     if call.error:
-        fatal = classify(call.error, model, resume)
+        fatal = fatal_error(call.error, model, resume)
         if fatal:
-            raise FatalError(fatal)
+            raise fatal
         raise RecognitionError(f"Codex 出错：{call.error}", "Codex 出错")
     try:
         body = claude._parse_json(call.text or "")
@@ -371,8 +383,9 @@ def ask_json(prompt: str, schema: dict, model: str | None = None, effort: str = 
 
 def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
         tiles: int | None = None, workers: int = DEFAULT_WORKERS, progress=None, log_fn=None, runner=None,
-        codex: Codex | None = None) -> RunResult:
-    """runner(cmd, prompt, timeout) -> (返回码, 标准输出, 标准错误)，测试用假的；不给就调用本机的 Codex。"""
+        codex: Codex | None = None, stop=None) -> RunResult:
+    """runner(cmd, prompt, timeout) -> (返回码, 标准输出, 标准错误)，测试用假的；不给就调用本机的 Codex。
+    stop 见 claude.run_pages：返回真就不再开始新的页。"""
     cfg = TIERS[tier]
     model = model or cfg["model"]
     effort = effort or cfg["effort"]
@@ -401,7 +414,7 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
 
         settings = (f"Codex {codex.version}，" if codex else "Codex，") + f"模型 {model}，思考强度 {effort}" + \
             (f"，局部切片 {tiles}×{tiles}" if tiles > 1 else "")
-        res = run_pages(task_dir, recognize, settings, workers, note, model, progress, fatal)
+        res = run_pages(task_dir, recognize, settings, workers, note, model, progress, fatal, stop)
     _write_log(task_dir, res, tier, effort, tiles, codex.version if codex else None)
     return res
 

@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import debuglog, guide, numbering, oplog, ops, recognition, state
+from . import debuglog, guide, numbering, oplog, ops, overnight, recognition, state
 from .store import Project, add_decision, latest_decisions, now_iso, revoke_decision
 
 SOURCE = "命令行"
@@ -117,6 +117,13 @@ def cmd_classify(args):
         return ops.classify(proj, args.executor, args.model, args.all)
     except ops.OpError as e:
         sys.exit(f"错误：{e}")
+
+
+def cmd_overnight(args):
+    proj = _proj(args)
+    until = overnight.deadline(args.until) if args.until else None
+    return overnight.run(proj, args.executor, args.scope, args.tier, args.model, args.stage, until, args.wait,
+                         args.workers)
 
 
 def cmd_import(args):
@@ -420,6 +427,8 @@ def _op(args) -> tuple[str, str, str] | None:
         return "export", oplog.TITLES[args.what], args.project
     if c == "read-dwg":
         return "read_dwg", oplog.TITLES["read_dwg"] + ("（全部重读）" if args.again else ""), args.project
+    if c == "overnight":
+        return "overnight", f"{oplog.TITLES['overnight']}（{ops.CLASSIFY_BY[args.executor]} {tier}）", args.project
     if c in ("scan", "tasks", "import"):
         return c, oplog.TITLES[c], args.project
     return None
@@ -556,6 +565,21 @@ def main(argv=None):
     s.add_argument("--model", help="换模型（Claude 默认 claude-sonnet-5-5，Codex 默认 gpt-6.1-sol）")
     s.add_argument("--all", action="store_true", help="全部重新分；默认只分还没分过的")
     s.set_defaults(fn=cmd_classify)
+
+    s = sub.add_parser("overnight", help="整夜识别：读 DWG、分步识别、智能分类、算报告一口气做完；单个文件出错跳过，"
+                                         "额度用完等着续跑，过程写进项目 logs 文件夹；断了再运行一次接着做")
+    s.add_argument("--executor", default="codex", choices=list(overnight.EXECUTORS),
+                   help="codex=本机的 Codex（ChatGPT 账号的额度）；claude=Anthropic API，按量付费")
+    s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="识别哪些页面（默认 new）")
+    s.add_argument("--tier", default="economy", choices=["economy", "strong"], help="同 recognize")
+    s.add_argument("--model", help="覆盖档位的默认模型")
+    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
+                   help="只识别这几步（可写几次）；默认重点图、建模主图、按需深入依次都做")
+    s.add_argument("--until", help="最晚做到几点（时:分，如 07:30）：到点不再开始新的页、不再等额度，照样分类、出报告；不写就做完为止")
+    s.add_argument("--wait", type=float, default=overnight.WAIT_MINUTES,
+                   help=f"额度用完后隔几分钟再试（默认 {overnight.WAIT_MINUTES}）")
+    s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
+    s.set_defaults(fn=cmd_overnight)
 
     s = sub.add_parser("import", help="校验并导入识别结果")
     s.add_argument("results")
