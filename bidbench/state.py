@@ -1286,6 +1286,11 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
                                  f"{i['detail'].rstrip('。')}。这个文件按文件名暂定，不参与缺图、版本判断。位置：{i['path']}。",
                                  {"batch": i["batch_seq"]}, []))
             continue
+        if i["kind"] == "cad_partial":
+            issues.append(_issue("info", "DWG 没读全", f"dwgpart:{i['id']}", f"没读全：{i['path'].split(' / ')[-1]}",
+                                 f"{i['detail'].rstrip('。')}。读出的部分照常用，这张图的图签可能是空的或不全。位置：{i['path']}。",
+                                 {"batch": i["batch_seq"]}, []))
+            continue
         label = {"encrypted": "加密", "corrupt": "损坏", "no_tool": "缺少解压工具", "volume": "分卷",
                  "too_deep": "嵌套过深", "too_large": "超出上限", "symlink": "符号链接",
                  "unreadable": "读不出来"}.get(i["kind"], i["kind"])

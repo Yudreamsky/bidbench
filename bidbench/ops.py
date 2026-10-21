@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from collections.abc import Callable
 
-from . import antivirus, appconfig, dwg, export, ingest, recognition, reports, risk, state
+from . import antivirus, appconfig, cadfile, dwg, export, ingest, recognition, reports, risk, state
 from .store import Project, now_iso
 
 Log = Callable[[str], None]
@@ -75,7 +75,7 @@ def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None
     for i, (sha, stored, ext, path, batch) in enumerate(rows):
         d = err = None
         try:
-            d = dwg.read(proj.root / stored, ext) if ext == ".dxf" else dwg.read_dwg(proj.root / stored, tool)
+            d = dwg.read(proj.root / stored, ext) if ext == ".dxf" else _read_dwg(proj, proj.root / stored, sha, path, tool)
         except dwg.ReadError as e:
             err = str(e)
         with proj.connect() as con:
@@ -85,11 +85,32 @@ def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None
         if err:
             out["failed"] += 1
             log(f"  ⚠ 读不出：{path.split(' / ')[-1]}——{err}")
+        elif d is not None and d.partial:
+            log(f"  ⚠ 只读出一部分：{path.split(' / ')[-1]}——{dwg.PARTIAL}")
         if progress:
             progress(i + 1, len(rows))
     if rows:
         log(f"  读了 {out['files']} 个文件，认出 {out['sheets']} 张图" + (f"，{out['failed']} 个读不出（按文件名暂定）" if out["failed"] else "") + "。")
     return out
+
+
+def _read_dwg(proj: Project, src: Path, sha: str, name: str, tool: str | None) -> dwg.Drawing:
+    """dwgread 读到一半崩了（docs/图纸字段.md 9.7 第 5 条）：先转成 DXF 读（转好的留在 exports/dxf，翻模也用它），
+    转不了、或转出的也不完整，再读两次 dwgread，用读到最多的那次。"""
+    d = dwg.read_dwg(src, tool)
+    if not d.partial:
+        return d
+    try:
+        dxf = cadfile.to_dxf(proj, src, sha, name)
+        if dwg.dxf_complete(dxf):
+            full = dwg.read_dxf(dxf)
+            full.reader = f"{d.reader or 'LibreDWG'} dwg2dxf"
+            return full
+        logger.debug("dwg2dxf 转出的 DXF 也不完整")
+    except (cadfile.CadError, dwg.ReadError, OSError) as e:
+        logger.debug("没读完的 DWG 转 DXF 也不行：%s", e)
+    again = dwg.read_dwg(src, tool, tries=2)
+    return again if not again.partial or dwg._amount(again) > dwg._amount(d) else d
 
 
 def _antivirus(proj, seq, skip: bool, log: Log) -> str | None:

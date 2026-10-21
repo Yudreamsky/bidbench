@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-7"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
+INSTRUCTION_VERSION = "dwg-8"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -122,6 +122,7 @@ class Drawing:
     xrefs: set = field(default_factory=set)         # 外部参照的块名（附着的，和绑定进来的）
     version: str = ""
     reader: str = ""
+    partial: bool = False  # dwgread 读到一半退出了（JSON 的对象表没写完）：只有前面那部分
 
 
 # ---------------- 找 LibreDWG ----------------
@@ -147,7 +148,7 @@ KIND_LINE = re.compile(r'^\s*"(?:entity|object)": "([A-Z0-9_]+)"')
 def iter_json(lines):
     """dwgread -O JSON 的输出逐行读：返回 ({"version", "reader"}, 只含要用的对象的迭代器)。
     输出是排好版的：OBJECTS 里每个对象从一行“    {”开始，到“    }”或“    },”结束。"""
-    meta = {"version": "", "reader": ""}
+    meta = {"version": "", "reader": "", "closed": False}
 
     def objects():
         inside, buf, skip = False, None, False
@@ -163,6 +164,7 @@ def iter_json(lines):
                 continue
             if line.startswith("  ]"):
                 inside = False
+                meta["closed"] = True
                 continue
             if line == "    {":
                 buf, skip = [line], False
@@ -190,7 +192,8 @@ def iter_json(lines):
 
 
 def _dwgread(path: Path, tool: str | None, consume):
-    """dwgread -O JSON 边读边交给 consume(objs, meta)，超时就停；返回 (consume 的结果, meta)。"""
+    """dwgread -O JSON 边读边交给 consume(objs, meta)，超时就停；返回 (consume 的结果, meta)。
+    meta["partial"]：dwgread 读到一半崩了（有的 DWG 每次崩在不同的地方，图框、布局上的字在后面，常常丢掉）。"""
     tool = tool or find_tool()
     if not tool:
         raise ReadError("没有找到 LibreDWG（dwgread），只能按文件名暂定")
@@ -224,13 +227,41 @@ def _dwgread(path: Path, tool: str | None, consume):
         raise ReadError(f"读了 {limit} 秒还没读完，跳过")
     if not meta["reader"]:
         raise ReadError("LibreDWG 读不出这个文件（可能损坏，或版本太新）")
+    meta["partial"] = not meta["closed"]  # 退出码不作数：小错误也报非 0，对象照样写全；崩了的 OBJECTS 写不到结尾
+    if meta["partial"]:
+        log.debug("dwgread 没读完（退出码 %s，对象表没写完）", p.returncode)
     return out, meta
 
 
-def read_dwg(path: Path, tool: str | None = None) -> Drawing:
-    d, _meta = _dwgread(path, tool, from_objects)
-    log.debug("%s 段文字，%s 个块参照", len(d.texts), len(d.inserts))
-    return d
+def read_dwg(path: Path, tool: str | None = None, tries: int = 1) -> Drawing:
+    """读一个 DWG；没读完的最多读 tries 次，都没读完就用读到东西最多的那次（partial 为真）。"""
+    best = None
+    for _ in range(max(tries, 1)):
+        d, meta = _dwgread(path, tool, from_objects)
+        d.partial = meta["partial"]
+        if best is None or _amount(d) > _amount(best):
+            best = d
+        if not d.partial:
+            break
+    log.debug("%s 段文字，%s 个块参照%s", len(best.texts), len(best.inserts), "（没读完）" if best.partial else "")
+    return best
+
+
+PARTIAL = "LibreDWG 读到一半退出了，转 DXF 也没读全，图签、布局上的字可能没读到"
+
+
+def dxf_complete(path: Path) -> bool:
+    """DXF 写完了：最后一组是“0 / EOF”。"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(path.stat().st_size - 64, 0))
+            return f.read().strip().endswith(b"EOF")
+    except OSError:
+        return False
+
+
+def _amount(d: Drawing) -> int:
+    return len(d.texts) + len(d.inserts) + len(d.viewports) + sum(len(v) for v in d.block_texts.values())
 
 
 def insert_blocks(path: Path, tool: str | None = None) -> dict[int, int]:
@@ -1187,12 +1218,15 @@ def save(con, sha: str, path: str, batch: int, d: Drawing | None, error: str | N
     old = [r[0] for r in con.execute("SELECT page_id FROM pages WHERE file_sha256=?", (sha,))]
     con.executemany("DELETE FROM recognitions WHERE page_id=?", [(x,) for x in old])
     con.execute("DELETE FROM pages WHERE file_sha256=?", (sha,))
-    con.execute("DELETE FROM extraction_issues WHERE kind='cad_unreadable' AND path IN"
+    con.execute("DELETE FROM extraction_issues WHERE kind IN ('cad_unreadable', 'cad_partial') AND path IN"
                 " (SELECT path FROM occurrences WHERE sha256=?)", (sha,))
     sheets = split_sheets(d) if d is not None else []
     if error:
         con.execute("INSERT INTO extraction_issues(batch_seq, path, kind, detail) VALUES (?,?,?,?)",
                     (batch, path, "cad_unreadable", error))
+    elif d is not None and d.partial:
+        con.execute("INSERT INTO extraction_issues(batch_seq, path, kind, detail) VALUES (?,?,?,?)",
+                    (batch, path, "cad_partial", PARTIAL))
     for n, s in enumerate(sheets, 1):
         pid = page_id(sha, n)
         w, h = page_size(s)
@@ -1205,7 +1239,7 @@ def save(con, sha: str, path: str, batch: int, d: Drawing | None, error: str | N
                                                 rec["run"]["finished_at"], now, json.dumps(rec, ensure_ascii=False)))
     con.execute("UPDATE files SET page_count=?, has_text_layer=? WHERE sha256=?",
                 (len(sheets) or None, int(bool(sheets)) if d is not None else None, sha))
-    status = "failed" if error else "ok" if sheets else "empty"
+    status = "failed" if error else "partial" if d is not None and d.partial else "ok" if sheets else "empty"
     con.execute("INSERT OR REPLACE INTO cad_reads(sha256, status, reader, sheets, detail, read_at, version) VALUES (?,?,?,?,?,?,?)",
                 (sha, status, (d.reader if d else "") or "", len(sheets), error, now, INSTRUCTION_VERSION))
     return len(sheets)

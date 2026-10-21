@@ -251,6 +251,64 @@ def test_unread_dwg_waits_for_libredwg(tmp_path, monkeypatch):
     assert state.build(proj)["cad_read"]["unread"] == 0
 
 
+def _tool(path: Path, body: str) -> Path:
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+@pytest.mark.skipif(os.name == "nt", reason="假的 dwgread、dwg2dxf 是 shell 脚本")
+def test_dwgread_cut_short_falls_back_to_dxf(tmp_path, monkeypatch):
+    """dwgread 读到一半崩了（JSON 没写完）：不当作读全，先转 DXF 读；转不了再读一次，还不全就列“DWG 没读全”。"""
+    lines = (DATA / "layouts.json").read_text(encoding="utf-8").splitlines(True)
+    cut = tmp_path / "cut.json"
+    cut.write_text("".join(lines[:2000]), encoding="utf-8")  # 布局上的图签在后面，没读到
+    full = DATA / "layouts.json"
+    reader = _tool(tmp_path / "dwgread", f"cat '{cut}'\nexit 127\n")
+    monkeypatch.setenv("BIDBENCH_DWGREAD", str(reader))
+    f = tmp_path / "a.dwg"
+    f.write_bytes(b"AC1015")
+    d = dwg.read_dwg(f)
+    assert d.partial and not any(s.fields.get("drawing_no") for s in dwg.split_sheets(d))
+    # 崩的地方每次不一样：第二次读全了就用第二次
+    count = tmp_path / "n"
+    _tool(reader, f"if [ -e '{count}' ]; then cat '{full}'; else touch '{count}'; cat '{cut}'; exit 127; fi\n")
+    d = dwg.read_dwg(f, tries=2)
+    assert not d.partial and len(dwg.split_sheets(d)) == 3
+
+    _tool(reader, f"cat '{cut}'\nexit 127\n")
+    dxf = tmp_path / "full.dxf"
+    dxf.write_bytes(make_sample.cad_dxf([{"no": "建施-01", "title": "一层平面图", "rev": "B", "date": "2026-01-01"}]))
+    monkeypatch.setenv("BIDBENCH_DWG2DXF", str(_tool(tmp_path / "dwg2dxf", f"cp '{dxf}' \"$3\"\n")))
+    folder = tmp_path / "图纸"
+    folder.mkdir()
+    (folder / "建施-01 一层平面图.dwg").write_bytes(b"AC1032" + b"\0" * 64)
+    proj = Project.init(tmp_path / "p", "DWG 项目")
+    ops.receive(proj, folder, "2026-10-01", av=False, log=lambda s: None)
+    st = state.build(proj)
+    s1 = next(s for s in st["sheets"] if s["no"] == "建施-01")
+    assert s1["status"] != "guess" and s1["current_rev"] == "B"  # 图签从转出的 DXF 读到
+    assert proj.connect().execute("SELECT status FROM cad_reads").fetchone()[0] == "ok"
+    assert proj.connect().execute("SELECT reader FROM cad_reads").fetchone()[0].endswith(" dwg2dxf")
+    assert list(cadfile.out_dir(proj).glob("*.dxf"))  # 转好的 DXF 留着，翻模直接用
+    assert not [i for i in st["issues"] if i["kind"] == "DWG 没读全"]
+
+    # 转不了 DXF：读出的部分照用，列一条提醒
+    for x in cadfile.out_dir(proj).iterdir():
+        x.unlink()
+    monkeypatch.setenv("BIDBENCH_DWG2DXF", str(tmp_path / "没有"))
+    logs = []
+    ops.read_cad(proj, again=True, log=logs.append)
+    assert any("只读出一部分" in x for x in logs)
+    assert proj.connect().execute("SELECT status FROM cad_reads").fetchone()[0] == "partial"
+    st = state.build(proj)
+    assert [i["title"] for i in st["issues"] if i["kind"] == "DWG 没读全"] == ["没读全：建施-01 一层平面图.dwg"]
+    # 读全以后提醒去掉
+    _tool(reader, f"cat '{full}'\n")
+    ops.read_cad(proj, again=True, log=lambda s: None)
+    assert not [i for i in state.build(proj)["issues"] if i["kind"] == "DWG 没读全"]
+
+
 def test_cad_reads_from_before_the_version_column_are_read_again(tmp_path):
     """第 1 版数据库的 cad_reads 没有规则版本：升级后这些文件都按旧规则读的算，下次读 DWG 时重读。"""
     import sqlite3
