@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
+from test_claude_executor import FakeClient, mimic
 from test_classify import ai, pdf
 from test_codex_executor import FakeCodex
 
@@ -171,3 +172,21 @@ def test_page_that_cannot_be_rendered_is_left_out_of_the_task(night, monkeypatch
     monkeypatch.setattr(recognition.pdfpages, "render_page", real)
     r = overnight.run(night, runner=_codex(), log=lambda s: None, sleep=_no_sleep, clock=Clock(), workers=1)
     assert r["done"] == 6 and r["skipped_pages"] == 0  # 下次准备任务包时这一页好了，照常识别
+
+
+def test_overnight_with_claude_api(night):
+    """用 Claude API 识别也一样：分步识别、到点停、分类、出报告。"""
+    clock = Clock()
+
+    def answer(params, n):
+        first = params["messages"][0]["content"][0]["text"]
+        if "下面每行是" in first:  # 智能分类
+            return ai(first, n)[0], "end_turn"
+        clock.now += timedelta(minutes=30)
+        return mimic(params, n)
+    r = overnight.run(night, "claude", client=FakeClient(answer), log=lambda s: None, sleep=_no_sleep, clock=clock,
+                      until=START + timedelta(hours=1), workers=1)
+    assert r["done"] == 2 and "截止时间" in r["stopped"] and r["classify"]["sheets"] >= 6 and r["left"] == 4
+    r = overnight.run(night, "claude", client=FakeClient(answer), log=lambda s: None, sleep=_no_sleep, clock=Clock(),
+                      workers=1)
+    assert (r["done"], r["left"], r["stopped"]) == (4, 0, None)
