@@ -93,7 +93,8 @@ bidbench 一节用“接到 Codex”写入，Revit 一节照 revit-mcp 的 `clie
    - 轴网：结构主图（柱平面、梁平法图）的 DXF 用 `cad_to_model(build=["grids"])` 只建轴网；只有 PDF 的，按图上的开间、进深
      用 `create_grid_system` 建。建完用 `compare_cad_with_model` 核对轴网。
 2. `find_sheets_for_task` 找到这一层这个专业的主图。
-3. `cad_file(图号)` 拿到这张图现行版的 DXF：DWG 用安装包附带的 LibreDWG（dwg2dxf）转好，放在项目的 `exports/dxf`。
+3. `cad_file(图号)` 拿到这张图现行版的 DXF：DWG 用安装包附带的 LibreDWG（dwg2dxf）转好，放在项目的 `exports/dxf`；
+   LibreDWG 转不出或转不全、本机又装了 AutoCAD 的，用 AutoCAD（accoreconsole 的 DXFOUT）转（docs/图纸字段.md 9.7 第 5 条）。
    返回里 `region` 是这张图在 DXF 模型空间里的范围（一个 DWG 里排了几张图、或者按布局出图时，只有这一块是这张图），
    `read_cad`、`cad_to_model`、`compare_cad_with_model` 都要带上同一个 `region`，不然同一个文件里的其他图（`same_file_sheets`）也会被读进去；
    框不出范围时 `region_note` 说该怎么办；`dxf_warning` 说 DXF 里丢了块（多半是动态块的轴号），要在 AutoCAD 里另存 DXF。`where` 是这张图在模型空间还是哪个布局，`xrefs` 是外部参照（轴网、底图常在里面，收到了的也转好）。
