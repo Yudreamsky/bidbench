@@ -65,6 +65,13 @@ class Toolkit:
             return same[0]
         if same:
             raise ToolError(f"图号 {no} 在几栋楼都有：{'、'.join(s['no'] for s in same)}。请带上塔楼，例如“{same[0]['no']}”。")
+        # 以前按文件名暂定时记下的图号（PRJ-3036），图签读出来是 S-3036：只有一张图的文件名是它时就是这张
+        cached = getattr(self, "_file_nos", None)
+        if cached is None or cached[0] is not st:
+            cached = self._file_nos = (st, {s["no"]: state.file_no(s.get("paths")) for s in st["sheets"] if s["status"] != "guess"})
+        by_file = [s for s in st["sheets"] if cached[1].get(s["no"]) == n]
+        if len(by_file) == 1:
+            return by_file[0]
         raise ToolError(f"没有图号 {no}。可以先用 list_sheets 查看全部图号。")
 
     def _facts(self, st: dict) -> list[dict]:
@@ -355,8 +362,12 @@ class Toolkit:
                 elif sheet["status"] in ("conflict", "pending_void"):
                     review.append(f"这张图的状态是“{STATUS_LABEL[sheet['status']]}”，先在问题中心定下来")
                 rev = it.get("rev")
-                if rev is not None and str(rev).strip() != str(sheet["current_rev"] or "").strip():
-                    review.append(f"用的是 {rev or '没写版次'} 版，现行是 {sheet['current_rev'] or '没写版次'} 版")
+                cur = str(sheet["current_rev"] or "").strip()
+                cur = "" if cur == "?" else cur  # 图上没写版次
+                if not cur and not str(rev or "").strip():
+                    ok.append("这张图本身没有版次（修改记录是空的），依据也没写版次")
+                elif rev is not None and str(rev).strip() != cur:
+                    review.append(f"用的是 {rev or '没写版次'} 版，现行是 {cur or '没写版次'} 版")
                 elif rev is None:
                     review.append("没写用的是哪一版（rev）")
                 pid = it.get("page_id")

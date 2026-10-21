@@ -150,3 +150,12 @@ def test_check_basis_short_values_need_their_own_line(cad_project):
     by = {x["element"]: x for x in got["items"]}
     assert any("单独写着“3”" in c for c in by["轴 3"].get("checked", []))
     assert any("找不到单独写着“1”" in c for c in by["轴 1"]["reasons"])
+
+
+def test_check_basis_finds_a_sheet_by_its_file_name_and_takes_no_revision(cad_project):
+    """以前按文件名暂定时记下的依据（PRJ-3036、没写版次），图签读出来是 S-3036、本来就没有版次：对得上。"""
+    kit = Toolkit(cad_project)
+    page = kit.get_sheet("S-3036")["current_page_id"]
+    got = kit.check_basis([{"element": "L30 梁", "sheet": "PRJ-3036", "page_id": page}])["items"][0]
+    assert got["sheet"] == "S-3036" and got["status"] == "对得上", got
+    assert any("本身没有版次" in c for c in got["checked"])
