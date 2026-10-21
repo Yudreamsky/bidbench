@@ -171,6 +171,17 @@ def test_cad_sheets_join_ledger(cad_project):
     assert st["cad_read"]["unread"] == 0
 
 
+def test_revit_frame_labels_in_the_block_and_values_on_the_layout(cad_project):
+    """Revit 导出的图框：“Sheet No.”这些标签在块定义里，值散放在布局上，图号写成“-S-3036”；文件名用项目代号 PRJ-3036。
+    修改记录只有表头：没有版次。文件名只是前缀不同，不报“文件名不符”。"""
+    st = state.build(cad_project)
+    sheets = {s["no"]: s for s in st["sheets"]}
+    s = sheets["S-3036"]
+    assert s["status"] != "guess" and s["title"] == "TYPICAL OFFICE FLOOR PLAN" and s["current_rev"] == "?"
+    assert "PRJ-3036" not in sheets
+    assert not [i for i in st["issues"] if i["id"] == "name:S-3036"]
+
+
 def test_cad_xrefs_and_callout_marks(cad_project):
     """DWG 给出的两种关联：共用的外部参照（附着的、绑定进来的都算），索引符号里的详图编号。"""
     st = state.build(cad_project)

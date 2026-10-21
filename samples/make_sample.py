@@ -425,12 +425,14 @@ def _dxf(pairs) -> list[str]:
     return out
 
 
-def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=()) -> bytes:
+def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=(), frames=()) -> bytes:
     """一个 DXF（2007 格式，UTF-8）。sheets：模型空间里一排图框，每个 {no, title, rev, date, texts: [(x, y, 字)],
     callouts: [(x, y, 详图号, 所在图号)], tags: 属性名}；layouts：[(布局名, 图签属性 {属性名: 值} 或 None, [(x, y, 字)])]，
     布局里没有图签块时，图签写成普通文字（Revit 导出的图常这样）；xrefs：[(参照名, 绑定了没有, 布局名或 None, x, y)]，
     附着的参照块记着参照文件的路径，绑定进来的参照里面的块改名成“参照名$0$原名”；
-    viewports：[(布局名, 视口在布局上的中心 x, y, 宽, 高, 看到的中心 x, y（视图坐标）, 高[, 扭转角, 目标点 x, y])]。"""
+    viewports：[(布局名, 视口在布局上的中心 x, y, 宽, 高, 看到的中心 x, y（视图坐标）, 高[, 扭转角, 目标点 x, y])]；
+    frames：[(布局名, [(x, y, 标签)])]，Revit 导出的图框：标签写在图框块的块定义里（没有属性），插在布局的 (0, 0)，
+    值是布局上散放的文字（写在 layouts 里）。"""
     tags = ("图号", "图名", "版次", "日期", "比例")
     lines = _dxf([(0, "SECTION"), (2, "HEADER"), (9, "$ACADVER"), (1, "AC1021"), (0, "ENDSEC"),
                   (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (8, 0), (2, "TK"), (70, 2), (10, 0), (20, 0), (30, 0)])
@@ -438,6 +440,13 @@ def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=()) -> bytes:
         lines += _dxf([(0, "LINE"), (8, 0), (10, x1), (20, y1), (30, 0), (11, x2), (21, y2), (31, 0)])
     lines += _dxf([(0, "ENDBLK"), (8, 0), (0, "BLOCK"), (8, 0), (2, "SYM"), (70, 2), (10, 0), (20, 0), (30, 0),
                    (0, "ENDBLK"), (8, 0)])
+    for k, (_space, labels) in enumerate(frames):
+        lines += _dxf([(0, "BLOCK"), (8, 0), (2, f"TB-FRAME-{k}"), (70, 0), (10, 0), (20, 0), (30, 0)])
+        for (x1, y1), (x2, y2) in [((0, 0), (TB_W, 0)), ((TB_W, 0), (TB_W, TB_H)), ((TB_W, TB_H), (0, TB_H)), ((0, TB_H), (0, 0))]:
+            lines += _dxf([(0, "LINE"), (8, 0), (10, x1), (20, y1), (30, 0), (11, x2), (21, y2), (31, 0)])
+        for x, y, label in labels:
+            lines += _dxf([(0, "TEXT"), (8, 0), (10, x), (20, y), (30, 0), (40, 2.5), (1, label)])
+        lines += _dxf([(0, "ENDBLK"), (8, 0)])
     for name, bound in dict.fromkeys((n, b) for n, b, *_ in xrefs):
         head = [(70, 0)] if bound else [(70, 4), (1, f"..\\参照\\{name}.dwg")]
         lines += _dxf([(0, "BLOCK"), (8, 0), (2, name), *head, (10, 0), (20, 0), (30, 0), (0, "ENDBLK"), (8, 0)])
@@ -468,6 +477,8 @@ def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=()) -> bytes:
             lines += insert("TK", 0, 0, list(attrs.items()), space=name)
         for x, y, tx in texts:
             lines += text(x, y, tx, space=name)
+    for k, (space, _labels) in enumerate(frames):
+        lines += _dxf([(0, "INSERT"), (8, 0), (67, 1), (410, space), (2, f"TB-FRAME-{k}"), (10, 0), (20, 0), (30, 0)])
     for space in dict.fromkeys(v[0] for v in viewports):  # dwg2dxf 的写法：布局本身的视口在前，编号都写 1
         lines += _dxf([(0, "VIEWPORT"), (8, 0), (67, 1), (410, space), (10, TB_W / 2), (20, TB_H / 2), (30, 0), (40, TB_W),
                        (41, TB_H), (69, 1), (12, TB_W / 2), (22, TB_H / 2), (45, TB_H)])
@@ -494,6 +505,8 @@ def build_cad(out: Path) -> tuple[Path, str]:
     - PRJ1-A-701、A-702 核心筒放大图：一个 DXF 两个布局，图签属性名是自己编的（KD0105、JUDUL1/JUDUL2）；
       各有一个视口看模型空间的一块（翻模时只取这一块），A-702 的视口转了 90°；按 dwg2dxf 的写法，视口编号都是 1；
     - A-150 平面图：布局里的图签是普通文字（“Sheet No.”旁边写图号）；
+    - PRJ-3036 标准层平面图：Revit 导出的图框，“Sheet No.”这些标签在图框块的块定义里，值散放在布局上，图号写成“-S-3036”
+      （文件名用项目代号，图签是 S-3036）；这一期“仅供参考”，修改记录只有表头、没有行（本来就没有版次）；
     - 坏文件.dxf：二进制 DXF，读不出，按文件名暂定；
     - 外部参照：建施-03、建施-04 都附着了“标准层柱网”，A-701、A-702 都绑定了“核心筒-1”——共用参照的图连起来。"""
     root = out / CAD_NAME
@@ -522,6 +535,12 @@ def build_cad(out: Path) -> tuple[Path, str]:
         "建筑/A-150 平面图.dxf": cad_dxf(layouts=[
             ("Sheet", None, [(700, 40, "Sheet No."), (730, 40, "A-150"), (700, 60, "Drawing Title"),
                              (700, 52, "GENERAL ARRANGEMENT PLAN - LEVEL 12"), (100, 100, "OFFICE")])]),
+        "结构/PRJ-3036 标准层平面图.dxf": cad_dxf(
+            layouts=[("Layout1", None, [(700, 55, "-S-3036"), (700, 75, "TYPICAL OFFICE FLOOR PLAN"), (700, 25, "03/05/24"),
+                                        (730, 45, "FOR INFORMATION"), (790, 30, "Rn"), (700, 150, "REV"), (712, 150, "DATE"),
+                                        (730, 150, "DESCRIPTION"), (100, 100, "OFFICE")])],
+            frames=[("Layout1", [(700, 60, "Sheet No."), (700, 80, "Sheet Name"), (700, 30, "Date"), (760, 30, "Revision"),
+                                 (730, 50, "Stage")])]),
         "建筑/坏文件.dxf": b"AutoCAD Binary DXF\r\n\x1a\x00" + b"\x00" * 64,
     }
     for rel, data in files.items():

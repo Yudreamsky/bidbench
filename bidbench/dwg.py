@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-4"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
+INSTRUCTION_VERSION = "dwg-5"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -117,6 +117,7 @@ class Drawing:
     viewports: list = field(default_factory=list)   # [Viewport]
     blocks: dict = field(default_factory=dict)      # 块名 → 外框 (x0, y0, x1, y1)，按块里的线算
     inner: dict = field(default_factory=dict)       # 块名 → 块里套着的带属性的块参照 [Insert]（坐标是块里的）
+    block_texts: dict = field(default_factory=dict)  # 块名 → 块定义里的文字 [Text]（坐标是块里的）：图框块里的“Sheet No.”这类标签
     xrefs: set = field(default_factory=set)         # 外部参照的块名（附着的，和绑定进来的）
     version: str = ""
     reader: str = ""
@@ -335,12 +336,16 @@ def from_objects(objs, meta: dict) -> Drawing:
             if block:
                 lines.setdefault(block, []).extend(_pt(p) for p in o.get("points") or [])
         elif kind in ("TEXT", "MTEXT"):
-            if space:
+            if space or block:
                 t = _s(o.get("text_value") if kind == "TEXT" else o.get("text"))
                 t = clean_mtext(t) if kind == "MTEXT" else t
                 x, y = _pt(o.get("ins_pt"))
                 if t.strip():
-                    d.texts.append(Text(t.strip(), x, y, space, _num(o.get("height") or o.get("text_height"))))
+                    text = Text(t.strip(), x, y, space or "", _num(o.get("height") or o.get("text_height")))
+                    if space:
+                        d.texts.append(text)
+                    else:
+                        d.block_texts.setdefault(block, []).append(text)
         elif kind == "VIEWPORT":
             if space and space != MODEL:
                 cx, cy = _pt(o.get("center"))
@@ -514,6 +519,12 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
                 continue
             if kind != "SEQEND":
                 last = None
+            if kind in ("TEXT", "MTEXT"):
+                t = _s(get("1") or "")
+                if kind == "MTEXT":
+                    t = clean_mtext(_s("".join(v for c, v in g if c == "3")) + t)
+                if t.strip():
+                    d.block_texts.setdefault(block, []).append(Text(t.strip(), _f(get("10")), _f(get("20")), "", _f(get("40"))))
             if kind == "LINE":
                 lines.setdefault(block, []).extend([(_f(get("10")), _f(get("20"))), (_f(get("11")), _f(get("21")))])
             elif kind == "LWPOLYLINE":
@@ -691,6 +702,28 @@ def _is_label(t: str) -> bool:
     return any(rx.match(t) and not rx.sub("", t, count=1).strip() for rx in LABELS.values())
 
 
+def _no_value(v: str) -> str:
+    """图号格里的值：Revit 图号前缀空着时写成“-S-3036”，去掉前面的“-”。"""
+    return re.sub(r"^[-－—–_\s]+", "", v or "")
+
+
+def frame_labels(d: Drawing, space: str) -> list:
+    """图框块的块定义里写的标签（“Sheet No.”“Revision”……，没有属性），摆到这个空间里插入它的位置。
+    块里至少有两个标签才算图框。"""
+    out = []
+    for ins in d.inserts:
+        if ins.space != space or ins.nested:
+            continue
+        labels = [t for t in d.block_texts.get(ins.block, ()) if _is_label(t.text)]
+        if len(labels) < 2:
+            continue
+        k = abs(ins.sy) or 1.0
+        for t in labels:
+            x, y = _place(ins, t.x, t.y)
+            out.append(Text(t.text, x, y, space, t.h * k))
+    return out
+
+
 def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
     """按位置配对图签文字：“Sheet No.”右边或下面最近的字。“图号：A-01”这种写在一起的也认。"""
     out: dict[str, str] = {}
@@ -702,6 +735,8 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
                 continue
             rest = lab.text[m.end():].strip()
             if rest:
+                if role == "drawing_no":
+                    rest = _no_value(rest)
                 if ((role != "drawing_no" or looks_like_no(rest)) and (role != "revision" or REV_CELL.match(rest))
                         and len(rest) <= 120):
                     best = (0.0, rest)
@@ -718,12 +753,13 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
                     dist = dy * 2
                 else:
                     continue
-                if role == "drawing_no" and not looks_like_no(t.text):
+                value = _no_value(t.text) if role == "drawing_no" else t.text
+                if role == "drawing_no" and not looks_like_no(value):
                     continue
                 if role == "revision" and not REV_CELL.match(t.text.strip()):
                     continue  # 修改记录表头“REV | DESCRIPTION | DATE”：右边是别的表头，版次在下面
                 if best is None or dist < best[0]:
-                    best = (dist, t.text)
+                    best = (dist, value)
         if best:
             out[role] = best[1]
     return out, {k: NEAR_CONF for k in out}
@@ -815,7 +851,7 @@ def split_sheets(d: Drawing) -> list[Sheet]:
                 group[n].texts.append(t)
             sheets += group
         elif sp != MODEL and (own or any(v.space == sp for v in d.viewports)):
-            f, c = label_fields(own)
+            f, c = label_fields(own + frame_labels(d, sp))
             how = "图签文字" if f.get("drawing_no") else ""
             if not f.get("drawing_no") and looks_like_no(sp):
                 f["drawing_no"], c["drawing_no"], how = sp, NEAR_CONF, "布局名"
@@ -839,7 +875,7 @@ def split_sheets(d: Drawing) -> list[Sheet]:
         s.texts += [replace(t, space=s.space) for t in model_texts]
         s.box = None  # 模型和布局的坐标不一样，算不出相对位置
     elif model_texts and not has_model and not layout_sheets:
-        f, c = label_fields(model_texts)
+        f, c = label_fields(model_texts + frame_labels(d, MODEL))
         sheets.append(Sheet(MODEL, f, c, [], model_texts, _bbox([(t.x, t.y) for t in model_texts]),
                             "图签文字" if f.get("drawing_no") else ""))
     sheets.sort(key=lambda s: order.get(s.space, 99))  # 稳定排序：同一空间里保持一排排的顺序

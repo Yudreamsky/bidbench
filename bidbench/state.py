@@ -1758,6 +1758,19 @@ def _guess_sheet(key: str, group: list, labels: dict, disc_how, keys: Keys | Non
     }
 
 
+def file_no(paths) -> str | None:
+    """文件名里的图号（按文件名暂定时用的那个）。"""
+    g = _fmt_guess(names.guess(list(paths or []), ""))
+    return norm_no(g["no"]["value"]) if g and g["no"]["src"].startswith("文件名") else None
+
+
+def code_prefix_only(file_number: str, number: str) -> bool:
+    """文件名和图签只是前缀不同：文件名用项目代号（三个以上字母，PRJ-3036），图签是专业前缀（S-3036），后面的编号一样。"""
+    a = re.fullmatch(r"([A-Z]{3,})-(\d{3,}[A-Z]?)", file_number or "")
+    b = re.search(r"(?:^|-)(\d{3,}[A-Z]?)$", number or "")
+    return bool(a and b and a.group(2) == b.group(1) and not number.startswith(a.group(1) + "-"))
+
+
 def _name_checks(sheet_out, current_page, decisions, issues, live) -> None:
     """看图识别出的图号、版次和文件名对不上：可能是文件名写错，也可能是识别看错了，列出来让人核对。"""
     for no, cp in sorted(current_page.items()):
@@ -1767,7 +1780,7 @@ def _name_checks(sheet_out, current_page, decisions, issues, live) -> None:
         if not g or not g["no"]["src"].startswith("文件名"):
             continue
         gno, diffs, num = norm_no(g["no"]["value"]), [], bare(no)
-        if gno != num and not (gno.endswith("-" + num) or num.endswith("-" + gno)):
+        if gno != num and not (gno.endswith("-" + num) or num.endswith("-" + gno) or code_prefix_only(gno, num)):
             diffs.append(f"图号：文件名写 {gno}，图签是 {num}")
         grev, cur = (g.get("rev") or {}).get("value"), sheet_out[no]["current_rev"]
         if grev and cur and _rev_scheme(grev) and _rev_scheme(grev) == _rev_scheme(cur) and rev_key(grev) != rev_key(cur):
