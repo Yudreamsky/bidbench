@@ -88,7 +88,10 @@ def run(proj: Project, executor: str = "codex", scope: str = "new", tier: str = 
         say(f"整夜识别开始：项目「{proj.meta['name']}」，用 {ops.CLASSIFY_BY[executor]}，范围：{recognition.SCOPES[scope]}"
             + (f"，最晚做到 {until:%m-%d %H:%M}" if until else "，做完为止") + "。")
         say(f"日志：{path}")
+        say("—— 读 DWG ——")
         n.out["dwg"] = n.value(n.step("读 DWG", lambda: ops.read_cad(proj, log=say)))
+        if n.out["dwg"] and not n.out["dwg"]["files"] and not n.out["dwg"]["no_tool"]:
+            say("DWG、DXF 都读过了。")
         before = n.left()
         why = n.step("识别", lambda: n.recognize(stages or [k for k, _lb, _d in recognition.STAGES]))
         n.out["stopped"] = "识别出了意外的错，见上面" if why is FAILED else why
@@ -250,7 +253,8 @@ class _Night:
         if o["stopped"]:
             self.say(f"识别停在：{o['stopped']}。再运行一次整夜识别会接着做。")
         if o["left"] == 0:
-            self.say("范围内的页都识别过了。")
+            m = self.value(self.step("统计", lambda: recognition.stage_plan(self.proj, self.scope)["map"]))
+            self.say("范围内的页都识别过了。" + (ops.map_text(m) if m else ""))
         elif self.plan:
             self.say(ops.stages_text(self.plan))
         self.say(f"报告在 {self.proj.root / 'reports'}，日志在 {o['log']}")
