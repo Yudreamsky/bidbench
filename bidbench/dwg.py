@@ -237,7 +237,16 @@ def read_dwg(path: Path, tool: str | None = None, tries: int = 1) -> Drawing:
     """读一个 DWG；没读完的最多读 tries 次，都没读完就用读到东西最多的那次（partial 为真）。"""
     best = None
     for _ in range(max(tries, 1)):
-        d, meta = _dwgread(path, tool, from_objects)
+        try:
+            d, meta = _dwgread(path, tool, from_objects)
+        except ReadError as e:
+            from . import acad  # LibreDWG 读不出：本机装了 AutoCAD 的用它转成 DXF 读（9.7 第 5 条）
+            if not acad.find_tool():
+                raise
+            try:
+                return acad.read(path)
+            except acad.AcadError as again:
+                raise ReadError(f"{e}；{again}") from None
         d.partial = meta["partial"]
         if best is None or _amount(d) > _amount(best):
             best = d

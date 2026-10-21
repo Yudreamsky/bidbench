@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import debuglog, dwg, proc
+from . import acad, debuglog, dwg, proc
 from .store import Project
 
 log = logging.getLogger(__name__)
@@ -51,6 +51,8 @@ def to_dxf(proj: Project, src: Path, sha: str, name: str) -> Path:
     out = out_dir(proj) / f"{Path(name.replace(chr(92), '/')).stem.strip()}-{sha[:8]}.dxf"
     if out.exists():
         if ext == ".dwg":
+            if not dwg.dxf_complete(out) and _by_autocad(src, out):
+                return out  # 以前 dwg2dxf 只转出一部分，这回装了 AutoCAD
             _refix(out, src)
         return out
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +66,8 @@ def to_dxf(proj: Project, src: Path, sha: str, name: str) -> Path:
         return out
     tool = find_tool()
     if not tool:
+        if _by_autocad(src, out):
+            return out
         raise CadError("没有找到 LibreDWG 的 dwg2dxf，转不了 DXF；请在 AutoCAD 里把这个 DWG 另存为 DXF")
     tmp = out.with_name(out.stem + ".part.dxf")
     cmd = [tool, "-y", "-o", str(tmp), str(src)]
@@ -73,17 +77,39 @@ def to_dxf(proj: Project, src: Path, sha: str, name: str) -> Path:
                            **proc.NO_WINDOW)
         if not tmp.exists() or tmp.stat().st_size == 0:
             log.debug("dwg2dxf 退出码 %s，没有输出", p.returncode)
+            if _by_autocad(src, out):
+                return out
             raise CadError("LibreDWG 转不出这个 DWG（可能损坏，或版本太新）；请在 AutoCAD 里另存为 DXF")
+        if not dwg.dxf_complete(tmp) and _by_autocad(src, out):
+            return out  # dwg2dxf 半路退出了，AutoCAD 转得全
         fix_anonymous_blocks(tmp, src)
         os.replace(tmp, out)  # dwg2dxf 遇到不认识的对象会报错退出，但已写出的 DXF 照样能用
     except subprocess.TimeoutExpired:
+        if _by_autocad(src, out):
+            return out
         raise CadError("转了太久还没转完，跳过；请在 AutoCAD 里另存为 DXF") from None
     except OSError as e:
+        if _by_autocad(src, out):
+            return out
         raise CadError(f"LibreDWG 启动不了：{e}") from None
     finally:
         tmp.unlink(missing_ok=True)
     _mark(out)
     return out
+
+
+def _by_autocad(src: Path, out: Path) -> bool:
+    """本机装了 AutoCAD 就用它转（LibreDWG 转不出、转不全时）；转成了返回真。"""
+    if not acad.find_tool():
+        return False
+    try:
+        acad.dxfout(src, out)
+    except acad.AcadError as e:
+        log.debug("AutoCAD 也转不了：%s", e)
+        return False
+    out.with_name(out.stem + ".regions.json").unlink(missing_ok=True)
+    _mark(out)  # AutoCAD 写的块名是全的，不用补
+    return True
 
 
 def _entities(lines: list[bytes]):
