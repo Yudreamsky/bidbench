@@ -673,7 +673,7 @@ def build(proj: Project, as_of: int | None = None, with_diff: bool = True) -> di
                              " AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.file_sha256 = f.sha256)"
                              " ORDER BY o.batch_seq, o.id", (as_of,)):
             cad[r["sha256"]].append(r["path"])
-        cad_unread = len(dwg.unread(con))  # 还没读过的 DWG、DXF（docs/图纸字段.md 9.7）
+        cad_unread = len(dwg.unread(con))  # 还没读过、或按旧规则读的 DWG、DXF（docs/图纸字段.md 9.7）
         risk_rows = [dict(r) for r in con.execute("SELECT * FROM risk_findings WHERE batch_seq<=? ORDER BY id", (as_of,))]
         risk_rows += risk.blocked_rows(ext_issues)  # 收图时被杀毒软件拦下的文件，也按高风险文件处理
         scans = [dict(r) for r in con.execute("SELECT * FROM av_scans WHERE batch_seq<=? ORDER BY id", (as_of,))]

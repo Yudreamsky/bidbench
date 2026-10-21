@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-3"  # 认图签、分图的规则改了就加 1；用 bidbench read-dwg --again 重读
+INSTRUCTION_VERSION = "dwg-4"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -702,7 +702,8 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
                 continue
             rest = lab.text[m.end():].strip()
             if rest:
-                if (role != "drawing_no" or looks_like_no(rest)) and len(rest) <= 120:
+                if ((role != "drawing_no" or looks_like_no(rest)) and (role != "revision" or REV_CELL.match(rest))
+                        and len(rest) <= 120):
                     best = (0.0, rest)
                     break
                 continue
@@ -719,6 +720,8 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
                     continue
                 if role == "drawing_no" and not looks_like_no(t.text):
                     continue
+                if role == "revision" and not REV_CELL.match(t.text.strip()):
+                    continue  # 修改记录表头“REV | DESCRIPTION | DATE”：右边是别的表头，版次在下面
                 if best is None or dist < best[0]:
                     best = (dist, t.text)
         if best:
@@ -1021,12 +1024,13 @@ def page_size(s: Sheet) -> tuple[float, float]:
 # ---------------- 登记进项目 ----------------
 
 def unread(con, again: bool = False) -> list:
-    """还没读过的 DWG、DXF（again 时全部）：[(sha256, 项目里存的路径, 扩展名, 第一个出处, 第一次收到的批次)]。"""
+    """还没读过、或按旧规则（INSTRUCTION_VERSION 不同）读的 DWG、DXF（again 时全部）：
+    [(sha256, 项目里存的路径, 扩展名, 第一个出处, 第一次收到的批次)]。"""
     rows = con.execute(
         "SELECT f.sha256, f.stored_path, f.ext, MIN(o.path) AS path, MIN(o.batch_seq) AS batch FROM files f"
         " JOIN occurrences o ON o.sha256 = f.sha256 WHERE f.kind = 'cad' AND f.ext IN ('.dwg', '.dxf')"
-        + ("" if again else " AND f.sha256 NOT IN (SELECT sha256 FROM cad_reads)")
-        + " GROUP BY f.sha256 ORDER BY batch, path").fetchall()
+        + ("" if again else " AND f.sha256 NOT IN (SELECT sha256 FROM cad_reads WHERE version = ?)")
+        + " GROUP BY f.sha256 ORDER BY batch, path", () if again else (INSTRUCTION_VERSION,)).fetchall()
     return [tuple(r) for r in rows]
 
 
@@ -1056,6 +1060,6 @@ def save(con, sha: str, path: str, batch: int, d: Drawing | None, error: str | N
     con.execute("UPDATE files SET page_count=?, has_text_layer=? WHERE sha256=?",
                 (len(sheets) or None, int(bool(sheets)) if d is not None else None, sha))
     status = "failed" if error else "ok" if sheets else "empty"
-    con.execute("INSERT OR REPLACE INTO cad_reads(sha256, status, reader, sheets, detail, read_at) VALUES (?,?,?,?,?,?)",
-                (sha, status, (d.reader if d else "") or "", len(sheets), error, now))
+    con.execute("INSERT OR REPLACE INTO cad_reads(sha256, status, reader, sheets, detail, read_at, version) VALUES (?,?,?,?,?,?,?)",
+                (sha, status, (d.reader if d else "") or "", len(sheets), error, now, INSTRUCTION_VERSION))
     return len(sheets)

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import jsonschema
 
-from . import names, pdfpages
+from . import dwg, names, pdfpages
 from .store import PLACEHOLDER_EXECUTORS, Project, now_iso
 
 TITLEBLOCK_CLIP = (0.62, 0.70, 1.0, 1.0)  # 图签常见位置：右下角
@@ -245,9 +245,9 @@ def stage_plan(proj: Project, scope: str = "new") -> dict:
     with proj.connect() as con:
         everything = pages_to_recognize(con, scope="all")
         hints = {**map_hints(con), **depth_targets(proj)}
-        cad = con.execute("SELECT COUNT(*) AS n, SUM(f.sha256 IN (SELECT sha256 FROM cad_reads)) AS done,"
+        cad = con.execute("SELECT COUNT(*) AS n, SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE version = ?)) AS done,"
                           " SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE sheets > 0)) AS ok"
-                          " FROM files f WHERE f.kind = 'cad' AND f.ext IN ('.dwg', '.dxf')").fetchone()
+                          " FROM files f WHERE f.kind = 'cad' AND f.ext IN ('.dwg', '.dxf')", (dwg.INSTRUCTION_VERSION,)).fetchone()
         dwg_sheets = con.execute("SELECT COUNT(*) FROM recognitions WHERE executor = 'dwg'").fetchone()[0]
     stages = {k: {"key": k, "label": lb, "desc": d, "total": 0, "left": 0, "groups": {}} for k, lb, d in STAGES}
     numbered = skipped = 0

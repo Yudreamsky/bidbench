@@ -226,6 +226,35 @@ def test_unread_dwg_waits_for_libredwg(tmp_path, monkeypatch):
     # 重读：先删掉旧的页再写
     assert ops.read_cad(proj, again=True, log=lambda s: None)["sheets"] == 2
     assert proj.connect().execute("SELECT COUNT(*) FROM pages").fetchone()[0] == 2
+    # 读的规则升级了：按旧规则读的文件算没读，下一步提“读 DWG”，读的时候自动重读
+    with proj.connect() as con:
+        con.execute("UPDATE cad_reads SET version = 'dwg-1'")
+    st = state.build(proj)
+    assert st["cad_read"]["unread"] == 1 and [t["id"] for t in st["guide"]["tasks"] if t["id"] == "read_dwg"] == ["read_dwg"]
+    assert ops.read_cad(proj, log=lambda s: None)["files"] == 1
+    assert proj.connect().execute("SELECT version FROM cad_reads").fetchone()[0] == dwg.INSTRUCTION_VERSION
+    assert state.build(proj)["cad_read"]["unread"] == 0
+
+
+def test_cad_reads_from_before_the_version_column_are_read_again(tmp_path):
+    """第 1 版数据库的 cad_reads 没有规则版本：升级后这些文件都按旧规则读的算，下次读 DWG 时重读。"""
+    import sqlite3
+
+    from bidbench import store
+    proj = Project.init(tmp_path / "p", "旧项目")
+    con = sqlite3.connect(proj.db_path)
+    con.executescript("DROP TABLE cad_reads; CREATE TABLE cad_reads(sha256 TEXT PRIMARY KEY, status TEXT NOT NULL,"
+                      " reader TEXT NOT NULL, sheets INTEGER NOT NULL, detail TEXT, read_at TEXT NOT NULL);"
+                      "INSERT INTO files(sha256, stored_path, size, ext, kind) VALUES ('s1', 'files/a.dxf', 1, '.dxf', 'cad');"
+                      "INSERT INTO occurrences(sha256, batch_seq, path, depth) VALUES ('s1', 1, 'a.dxf', 0);"
+                      "INSERT INTO cad_reads VALUES ('s1', 'ok', 'LibreDWG', 1, NULL, '2026-10-01');"
+                      "PRAGMA user_version = 1;")
+    con.commit()
+    con.close()
+    with proj.connect() as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+        assert con.execute("SELECT version FROM cad_reads").fetchone()[0] is None
+        assert [r[0] for r in dwg.unread(con)] == ["s1"]
 
 
 def test_cad_pages_are_not_sent_to_vision(cad_project):
@@ -303,3 +332,15 @@ def test_layout_sheet_gets_model_text_seen_by_its_viewport():
     assert layout == ["1", "A"] and all(t.space == "S-2001" for t in by["S-2001"].texts)
     assert {"A", "1", "KOLOM K1"} <= {t.text for t in by["S-3002C"].texts}
     assert "小标签" in cadfile._region(d, by["S-3002C"])["note"]
+
+
+def test_revision_label_takes_a_revision_not_the_next_column_header():
+    """Revit 导出的图签是普通文字，修改记录表头“REV | DESCRIPTION | DATE”：版次取 REV 下面的 C，不取右边的表头。"""
+    T = dwg.Text
+    texts = [T("Sheet Number", 0, 100, "L", 2.5), T("S-01", 0, 96, "L", 2.5),
+             T("REV", 0, 50, "L", 2.5), T("DESCRIPTION", 10, 50, "L", 2.5), T("DATE", 60, 50, "L", 2.5),
+             T("C", 0, 46, "L", 2.5), T("FOR CONSTRUCTION", 10, 46, "L", 2.5)]
+    f, _c = dwg.label_fields(texts)
+    assert f["drawing_no"] == "S-01" and f["revision"] == "C"
+    assert dwg.label_fields([T("Revised by Lee", 0, 0, "L")])[0].get("revision") is None
+    assert dwg.label_fields([T("Rev: P2", 0, 0, "L")])[0]["revision"] == "P2"

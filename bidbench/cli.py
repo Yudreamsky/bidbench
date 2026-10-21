@@ -48,7 +48,7 @@ def cmd_read_dwg(args):
     proj = _proj(args)
     r = ops.read_cad(proj, again=args.again)
     if not r["files"] and not r["no_tool"]:
-        print("没有要读的 DWG、DXF。" + ("" if args.again else "要按新规则全部重读，加 --again。"))
+        print("没有要读的 DWG、DXF（按旧规则读的会自动重读）。" + ("" if args.again else "要全部重读，加 --again。"))
     return r
 
 

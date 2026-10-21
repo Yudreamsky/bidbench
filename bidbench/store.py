@@ -140,7 +140,8 @@ CREATE TABLE IF NOT EXISTS cad_reads(
   reader TEXT NOT NULL,
   sheets INTEGER NOT NULL,
   detail TEXT,
-  read_at TEXT NOT NULL
+  read_at TEXT NOT NULL,
+  version TEXT
 );
 CREATE TABLE IF NOT EXISTS classifications(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,8 +158,11 @@ CREATE TABLE IF NOT EXISTS classifications(
 # 数据库结构版本。修改已有表的结构时：SCHEMA_SQL 写成最新的样子，SCHEMA_VERSION 加 1，
 # 并在 MIGRATIONS 里写从上一版升级过来的 SQL。旧项目打开时自动升级，升级前先备份数据库。
 # 只新增表（CREATE TABLE IF NOT EXISTS）不用升版本号：旧项目打开时自动建表，回退到旧程序也照样能打开。
-SCHEMA_VERSION = 1
-MIGRATIONS: dict[int, str] = {}
+SCHEMA_VERSION = 2
+MIGRATIONS: dict[int, str] = {
+    # 读 DWG 的规则版本（dwg.INSTRUCTION_VERSION）：规则改了，按旧规则读的文件下次读 DWG 时自动重读
+    2: "ALTER TABLE cad_reads ADD COLUMN version TEXT;",
+}
 
 
 class SchemaTooNew(ValueError):
