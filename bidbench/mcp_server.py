@@ -178,7 +178,7 @@ def build_server(kit: Toolkit):
     def check_basis(items: list[dict]) -> dict:
         """建模依据核对（检查模型用）：items 是构件清单，每条写 element（构件，如“3F KL1 1~2/A 轴”）、sheet（依据的图号）、
         rev（用的版次）、page_id、bbox（图上那块地方，[x0, y0, x1, y1] 相对整页 0~1）、value（从图上读的数值或文字，如“300x700”）、
-        notices_applied（已经按它改过的变更单编号）。逐条对照现在的图纸：图在不在、是不是现行版、页面对不对、
+        notices_applied（已经按它改过的变更单编号）、needs_value（梁、板这类图上应有标注的，value 空着算要复核）。逐条对照现在的图纸：图在不在、是不是现行版、页面对不对、
         有没有没处理的变更单和问题、value 在原图那块地方找不找得到。每条返回 status（对得上 / 要复核 / 不合格）和 reasons。
         一次最多 200 条。清单由你保存在自己的工作文件夹里（如 建模依据.json），图纸升版后再核一遍。"""
         return kit.check_basis(items)
