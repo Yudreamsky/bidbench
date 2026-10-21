@@ -3,6 +3,7 @@
 Revit MCP 的 read_cad / cad_to_model / compare_cad_with_model 只认 DXF。转出来的放在项目的 exports/dxf 里，
 同一个文件转过一次就直接用；转失败时把没写完的文件删掉。DXF 原文件复制一份过去，名字好认。
 外部参照不会合进 DXF（dwg2dxf 不绑定），同项目里收到了同名的 DWG 就一并转好，列出来让翻模的 agent 自己叠。
+一个文件里有几张图时，给出这张图在模型空间里的范围（region），Revit MCP 只读范围里的东西（docs/图纸字段.md 9.7 第 7 条）。
 """
 
 from __future__ import annotations
@@ -81,6 +82,75 @@ def to_dxf(proj: Project, src: Path, sha: str, name: str) -> Path:
     return out
 
 
+REGION_VERSION = 1  # 算范围的规则改了就加 1，存着的范围重算
+
+
+def _box(b) -> list[float]:
+    return [round(float(x), 3) for x in b]
+
+
+def _region(d: dwg.Drawing, sh: dwg.Sheet) -> dict:
+    """一张图在模型空间里的范围：图框（模型空间里排图签的），或布局视口看到的地方。"""
+    if sh.space == dwg.MODEL:
+        if sh.attrs and sh.box:  # 图签块的外框；没有图签块时 box 只是文字的范围，不能当图框
+            return {"region": [_box(sh.box)]}
+        return {"note": "框不出这张图的范围（图签转了角度，或没有图签块），翻模时请在 CAD 里单独存出这张图"}
+    vps = [v for v in d.viewports if v.space == sh.space]
+    if not vps:
+        return {"note": "这张图画在布局上，没有看模型空间的视口；Revit MCP 只读模型空间，请在 CAD 里把图移到模型空间再转"}
+    straight = [v for v in vps if abs(v.twist) < 1e-6]
+    if not straight:
+        return {"note": "布局视口转了角度，算不出范围，翻模时请在 CAD 里单独存出这张图"}
+    out: dict = {"region": [_box(v.window()) for v in straight]}
+    if len(straight) < len(vps):
+        out["note"] = "有的视口转了角度，没算进范围"
+    return out
+
+
+def regions(dxf: Path) -> list[dict]:
+    """转好的 DXF 里每张图的图号和范围：软件自己读 DXF、分图（和读 DWG 同一套分法），算一次存在 DXF 旁边。"""
+    cache = dxf.with_name(dxf.stem + ".regions.json")
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        if data.get("version") == REGION_VERSION:
+            return data["sheets"]
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+    try:
+        d = dwg.read_dxf(dxf)
+        sheets = dwg.split_sheets(d)
+    except dwg.ReadError as e:
+        log.debug("算翻模范围时 DXF 读不出：%s", e)
+        return []
+    out = []
+    for sh in sheets:
+        no = sh.fields.get("drawing_no")
+        out.append({"no": dwg._norm_no(no) if no else None, "space": sh.space, **_region(d, sh)})
+    tmp = cache.with_name(cache.name + ".part")
+    try:
+        tmp.write_text(json.dumps({"version": REGION_VERSION, "sheets": out}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, cache)
+    except OSError as e:
+        log.debug("翻模范围存不下：%s", e)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
+
+
+def _match(found: list[dict], rec: dict) -> dict | None:
+    """识别结果对应 DXF 里的哪张图：先按图号，图数一样再按第几张。"""
+    no = ((rec.get("title_block") or {}).get("drawing_no") or {}).get("value")
+    if no:
+        hit = [r for r in found if r["no"] and r["no"].upper() == dwg._norm_no(no).upper()]
+        if len(hit) == 1:
+            return hit[0]
+    src = rec.get("source") or {}
+    i = src.get("page_index")
+    if isinstance(i, int) and len(found) == src.get("page_count") and 0 <= i < len(found):
+        return found[i]
+    return None
+
+
 def _source(proj: Project, page_id: str):
     with proj.connect() as con:
         return con.execute("SELECT f.sha256, f.stored_path, f.ext, MIN(o.path) AS name FROM pages p"
@@ -131,11 +201,23 @@ def for_sheet(proj: Project, st: dict, s: dict) -> dict:
     dxf = to_dxf(proj, src, r["sha256"], r["name"])
     with proj.connect() as con:
         rec = con.execute("SELECT data FROM recognitions WHERE page_id=?", (pid,)).fetchone()
-    content = json.loads(rec["data"])["content"] if rec else {}
+    data = json.loads(rec["data"]) if rec else {}
+    content = data.get("content") or {}
     m = re.search(r"（(模型空间|布局“[^”]*”)", content.get("summary") or "")
     out = {"sheet": s["no"], "title": s["title"], "rev": v["rev"], "current_rev": s["current_rev"],
            "page_id": pid, "cad_file": r["name"], "dxf": str(dxf), "where": m.group(1) if m else None,
            "same_file_sheets": _same_file(st, r["sha256"], s["no"])}
+    found = regions(dxf)
+    hit = _match(found, data) if data else None
+    if hit and hit.get("region"):
+        out["region"] = hit["region"]
+    if len(found) > 1 or out["same_file_sheets"]:
+        if hit and hit.get("note"):
+            out["region_note"] = hit["note"]
+        elif not hit:
+            out["region_note"] = "这个文件里有几张图，没对上是哪一块，翻模时请在 CAD 里单独存出这张图"
+    elif hit and hit.get("note") and hit["space"] != dwg.MODEL and not hit.get("region"):
+        out["region_note"] = hit["note"]  # 只有一张图、但画在布局上：Revit MCP 读不到
     if rank == 2:
         out["warning"] = (f"CAD 文件是 {v['rev'] or '没写版次'} 版，现行是 {s['current_rev'] or '没写版次'} 版，"
                           "翻模后要按现行版 PDF 核对改动")
