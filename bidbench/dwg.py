@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-2"  # 认图签、分图的规则改了就加 1；用 bidbench read-dwg --again 重读
+INSTRUCTION_VERSION = "dwg-3"  # 认图签、分图的规则改了就加 1；用 bidbench read-dwg --again 重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -231,19 +231,17 @@ def read_dwg(path: Path, tool: str | None = None) -> Drawing:
     return d
 
 
-def insert_blocks(path: Path, tool: str | None = None) -> dict[int, str]:
-    """每个块参照（句柄）用的是哪个块：dwg2dxf 会把动态块的匿名块名写成光秃秃的“*U”，靠这个补回。"""
+def insert_blocks(path: Path, tool: str | None = None) -> dict[int, int]:
+    """每个块参照（句柄）用的是哪个块（块记录的句柄）：dwg2dxf 会把动态块的匿名块名写成光秃秃的“*U”，
+    dwgread 读出的块名也是“*U”，只有句柄靠得住，名字到 DXF 自己的块记录表里找（cadfile.fix_anonymous_blocks）。"""
     def consume(objs, _meta):
-        names: dict[int, str] = {}
         refs: dict[int, int] = {}
         for o in objs:
             kind = o.get("entity") or o.get("object")
             h = _ref(o.get("handle"))
-            if kind == "BLOCK_HEADER" and h is not None:
-                names[h] = _s(o.get("name"))
-            elif kind in ("INSERT", "MINSERT") and h is not None and _ref(o.get("block_header")) is not None:
+            if kind in ("INSERT", "MINSERT") and h is not None and _ref(o.get("block_header")) is not None:
                 refs[h] = _ref(o.get("block_header"))
-        return {h: names[b] for h, b in refs.items() if names.get(b)}
+        return refs
     return _dwgread(path, tool, consume)[0]
 
 
@@ -821,25 +819,26 @@ def split_sheets(d: Drawing) -> list[Sheet]:
             pts = [(t.x, t.y) for t in own] + [p for v in d.viewports if v.space == sp
                                                for p in ((v.cx - v.w / 2, v.cy - v.h / 2), (v.cx + v.w / 2, v.cy + v.h / 2))]
             sheets.append(Sheet(sp, f, c, [], list(own), _bbox(pts), how))
-    # 模型空间里的文字（没有图签块时）：按布局视口看到的范围归到布局那张图；只有一个布局图的全归它；没有布局图的，模型空间自己算一张
-    if not any(s.space == MODEL for s in sheets):
-        model_texts = [t for t in texts if t.space == MODEL]
-        layout_sheets = {s.space: s for s in sheets}
-        vps = [v for v in d.viewports if v.space in layout_sheets]
-        if model_texts and vps:
-            for t in model_texts:
-                for v in vps:
-                    if _inside(v.window(), t.x, t.y):
-                        px, py = v.to_paper(t.x, t.y)
-                        layout_sheets[v.space].texts.append(replace(t, x=px, y=py, space=v.space))
-        elif model_texts and len(layout_sheets) == 1:
-            s = next(iter(layout_sheets.values()))
-            s.texts += [replace(t, space=s.space) for t in model_texts]
-            s.box = None  # 模型和布局的坐标不一样，算不出相对位置
-        elif model_texts and not layout_sheets:
-            f, c = label_fields(model_texts)
-            sheets.append(Sheet(MODEL, f, c, [], model_texts, _bbox([(t.x, t.y) for t in model_texts]),
-                                "图签文字" if f.get("drawing_no") else ""))
+    # 模型空间里的文字：按布局视口看到的范围归到布局那张图（模型空间自己有图签的，这些字照样留在模型空间那张图上）；
+    # 模型空间没有图签块时，没有视口、只有一个布局图的全归它；没有布局图的，模型空间自己算一张
+    model_texts = [t for t in texts if t.space == MODEL]
+    has_model = any(s.space == MODEL for s in sheets)
+    layout_sheets = {s.space: s for s in sheets if s.space != MODEL}
+    vps = [v for v in d.viewports if v.space in layout_sheets]
+    if model_texts and vps:
+        for t in model_texts:
+            for v in vps:
+                if _inside(v.window(), t.x, t.y):
+                    px, py = v.to_paper(t.x, t.y)
+                    layout_sheets[v.space].texts.append(replace(t, x=px, y=py, space=v.space))
+    elif model_texts and not has_model and len(layout_sheets) == 1:
+        s = next(iter(layout_sheets.values()))
+        s.texts += [replace(t, space=s.space) for t in model_texts]
+        s.box = None  # 模型和布局的坐标不一样，算不出相对位置
+    elif model_texts and not has_model and not layout_sheets:
+        f, c = label_fields(model_texts)
+        sheets.append(Sheet(MODEL, f, c, [], model_texts, _bbox([(t.x, t.y) for t in model_texts]),
+                            "图签文字" if f.get("drawing_no") else ""))
     sheets.sort(key=lambda s: order.get(s.space, 99))  # 稳定排序：同一空间里保持一排排的顺序
     if any(s.fields.get("drawing_no") for s in sheets):  # 别的布局都认出了图号：没几个字、也没有视口的空布局不算一张图
         sheets = [s for s in sheets if s.fields.get("drawing_no") or len(s.texts) >= 3

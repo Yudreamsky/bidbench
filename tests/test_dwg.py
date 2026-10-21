@@ -10,7 +10,7 @@ import make_sample
 import pytest
 from conftest import _recognize
 
-from bidbench import dwg, export, ingest, navigate, ops, state
+from bidbench import cadfile, dwg, export, ingest, navigate, ops, state
 from bidbench.store import Project
 
 DATA = Path(__file__).parent / "data" / "dwg"
@@ -89,7 +89,7 @@ def test_read_dwg_with_fake_tool(tmp_path, monkeypatch):
     f.write_bytes(b"AC1015")
     assert dwg.find_tool() == str(tool)
     assert len(dwg.split_sheets(dwg.read_dwg(f))) == 3
-    assert dwg.insert_blocks(f) == {65: "TB", 76: "TB"}  # 每个块参照用的块：给 dwg2dxf 写丢的匿名块名补回
+    assert dwg.insert_blocks(f) == {65: 47, 76: 47}  # 每个块参照用哪条块记录（句柄）：给 dwg2dxf 写丢的匿名块名补回
 
     tool.write_text("#!/bin/sh\nexit 1\n")
     with pytest.raises(dwg.ReadError, match="读不出"):
@@ -288,3 +288,18 @@ def test_split_title_blocks_and_nested_grid_bubbles():
     bubbles = [i for i in d.inserts if i.nested]
     assert [(round(i.x), round(i.y), i.attrs[0][1]) for i in bubbles] == [(100000, -800, "3"), (100000, 30800, "3")]
     assert not any(dwg.is_title_block(i) for i in bubbles)
+
+
+def test_layout_sheet_gets_model_text_seen_by_its_viewport():
+    """模型空间自己有一张图（只是个小图签标签），布局又按视口看模型空间：视口看得到的字也算布局那张图的，
+    照样留在模型空间那张图上；图签块里没有线的，cad_file 说它只是个标签。"""
+    d = dwg.Drawing(spaces=[dwg.MODEL, "S-2001"])
+    d.inserts = [dwg.Insert("TAG", 5000, 5000, 1, 1, 0, dwg.MODEL, [("DRAWING_NO", "S-3002C", 5000, 5000)]),
+                 dwg.Insert("TB", 0, 0, 1, 1, 0, "S-2001", [("DRAWING_NO", "S-2001", 90, 5)])]
+    d.texts = [dwg.Text("A", 50, 150, dwg.MODEL), dwg.Text("1", 150, 50, dwg.MODEL), dwg.Text("KOLOM K1", 5100, 5100, dwg.MODEL)]
+    d.viewports = [dwg.Viewport("S-2001", 50, 50, 100, 100, 100, 100, 200)]
+    by = {s.fields["drawing_no"]: s for s in dwg.split_sheets(d)}
+    layout = sorted(t.text for t in by["S-2001"].texts)
+    assert layout == ["1", "A"] and all(t.space == "S-2001" for t in by["S-2001"].texts)
+    assert {"A", "1", "KOLOM K1"} <= {t.text for t in by["S-3002C"].texts}
+    assert "小标签" in cadfile._region(d, by["S-3002C"])["note"]
