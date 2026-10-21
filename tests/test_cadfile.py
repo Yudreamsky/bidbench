@@ -106,7 +106,7 @@ def _anon_dxf(path: Path) -> Path:
             "0", "BLOCK", "330", "A2", "2", "*U6", "70", "1", "0", "ENDBLK", "0", "ENDSEC",
             "0", "SECTION", "2", "ENTITIES", *_insert("*U", "1A"), *_insert("*U", "1B"), *_insert("*U", "1D"),
             *_insert("*U4", "1C"), "0", "ENDSEC", "0", "EOF"]
-    path.write_text("\n".join(body) + "\n")
+    path.write_bytes(("\r\n".join(body) + "\r\n").encode())  # Windows 上转出的 DXF 是 CRLF
     return path
 
 
@@ -119,7 +119,7 @@ def test_anonymous_block_names_are_put_back(tmp_path, monkeypatch):
     assert cadfile.fix_anonymous_blocks(dxf, tmp_path / "a.dwg") == 1
     lines = dxf.read_bytes().split(b"\n")
     assert [h for _line, h in cadfile.broken_blocks(lines)] == [0x1B, 0x1D]  # 1B 在 DWG 里找不到；1D 的 *U9 没有块定义
-    assert lines[lines.index(b"1A") + 4] == b"*U6"
+    assert lines[lines.index(b"1A\r") + 4] == b"*U6\r"
     assert cadfile.fix_anonymous_blocks(dxf, tmp_path / "a.dwg") == 0  # 再跑一遍不会出错
 
 
