@@ -405,7 +405,8 @@ class Toolkit:
             status = "不合格" if fail else ("要复核" if review else "对得上")
             count[status] += 1
             rows.append({"element": element or None, "sheet": sheet["no"] if sheet else it.get("sheet"),
-                         "status": status, "reasons": fail + review, **({"checked": ok} if ok else {})})
+                         "status": status, "reasons": fail + review, **({"checked": ok} if ok else {}),
+                         **({"revit_id": it["revit_id"]} if it.get("revit_id") is not None else {})})  # Revit MCP 写回构件用
         return {"summary": count, "items": rows,
                 "hint": "“不合格”的构件没有可靠依据，要改；“要复核”的逐条看 reasons，用 locate(page_id, bbox) 回到原图核对。"
                         "图纸升版、收到变更单后，把整份清单再核一遍，就知道哪些构件受影响。"}
