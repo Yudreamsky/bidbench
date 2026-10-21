@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-8"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
+INSTRUCTION_VERSION = "dwg-9"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -383,7 +383,7 @@ def from_objects(objs, meta: dict) -> Drawing:
                 cx, cy = _pt(o.get("center"))
                 vx, vy = _pt(o.get("VIEWCTR") or o.get("view_center"))
                 w, hh, vh = _num(o.get("width")), _num(o.get("height")), _num(o.get("VIEWSIZE") or o.get("view_height"))
-                paper_itself = abs(cx - vx) < 1e-6 and abs(cy - vy) < 1e-6 and abs(hh - vh) < 1e-6  # 布局本身那个视口
+                paper_itself = abs(cx - vx) < 1e-6 and abs(cy - vy) < 1e-6  # 布局本身那个视口（高不一定一样，见 _floating）
                 if w > 0 and hh > 0 and vh > 0 and not paper_itself:
                     tx, ty = _pt(o.get("view_target"))
                     twist = _num(o.get("twist_angle"))
@@ -632,10 +632,11 @@ def _expand(d: Drawing, depth: int = 4) -> None:
 
 
 def _floating(vps: list[tuple]) -> list[Viewport]:
-    """去掉布局本身那个视口：看到的就是图纸本身（中心、高和布局上一样）；认不出时去掉编号 1 的。
-    AutoCAD 只给布局本身编号 1，dwg2dxf 转出的 DXF 里浮动视口也写成 1，所以不能只看编号。"""
+    """去掉布局本身那个视口：看到的就是图纸本身（看的中心就是它在布局上的中心）；认不出时去掉编号 1 的。
+    AutoCAD 只给布局本身编号 1，dwg2dxf 转出的 DXF 里浮动视口也写成 1，所以不能只看编号；
+    布局本身那个视口的高和看到的高也不一定一样（dwg2dxf 写出 12×9 的默认视口，看的高是 12），不能拿高来认。"""
     def itself(v: Viewport) -> bool:
-        return abs(v.cx - v.vx) < 1e-6 and abs(v.cy - v.vy) < 1e-6 and abs(v.h - v.vh) < 1e-6 and not v.twist
+        return abs(v.cx - v.vx) < 1e-6 and abs(v.cy - v.vy) < 1e-6 and not v.twist
     out = []
     for space in dict.fromkeys(v.space for _n, v in vps):
         own = [(n, v) for n, v in vps if v.space == space]
@@ -995,6 +996,9 @@ def split_sheets(d: Drawing) -> list[Sheet]:
             pts = [(t.x, t.y) for t in own] + [p for v in d.viewports if v.space == sp
                                                for p in ((v.cx - v.w / 2, v.cy - v.h / 2), (v.cx + v.w / 2, v.cy + v.h / 2))]
             sheets.append(Sheet(sp, f, c, [], list(own), _bbox(pts), how, history=history))
+    # 布局有自己的图签（图签块或图签文字，不只是布局名）时，模型空间里的图签块是留下来的（复制图框时带过来的旧图号），不算一张图
+    if any(s.space != MODEL and s.fields.get("drawing_no") and s.how != "布局名" for s in sheets):
+        sheets = [s for s in sheets if s.space != MODEL]
     # 模型空间里的文字：按布局视口看到的范围归到布局那张图（模型空间自己有图签的，这些字照样留在模型空间那张图上）；
     # 模型空间没有图签块时，没有视口、只有一个布局图的全归它；没有布局图的，模型空间自己算一张
     model_texts = [t for t in texts if t.space == MODEL]
