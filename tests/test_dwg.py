@@ -438,3 +438,36 @@ def test_revision_label_takes_a_revision_not_the_next_column_header():
     assert f["drawing_no"] == "S-01" and f["revision"] == "C"
     assert dwg.label_fields([T("Revised by Lee", 0, 0, "L")])[0].get("revision") is None
     assert dwg.label_fields([T("Rev: P2", 0, 0, "L")])[0]["revision"] == "P2"
+
+
+def test_reread_keeps_page_ids(cad_project, monkeypatch):
+    """重读时少认一张图（如去掉假的旧图签），同一个文件里别的图留原来的页号；check_basis 碰到没了的页号按图号、文件找到现在那页。"""
+    con = cad_project.connect()
+    sha = next(r[0] for r in con.execute("SELECT file_sha256 FROM pages GROUP BY file_sha256 HAVING COUNT(*) > 1"
+                                         " ORDER BY file_sha256"))
+    before = {json.loads(d)["title_block"]["drawing_no"]["value"]: pid for pid, d in con.execute(
+        "SELECT p.page_id, r.data FROM pages p JOIN recognitions r ON r.page_id = p.page_id WHERE p.file_sha256=?", (sha,))}
+    first = min(before.values())
+    real = dwg.split_sheets
+    dropped = []
+
+    def fewer(d):
+        sheets = real(d)
+        if any(s.fields.get("drawing_no") and dwg._norm_no(s.fields["drawing_no"]) == next(k for k, v in before.items() if v == first)
+               for s in sheets):
+            dropped.append(sheets[0])
+            return sheets[1:]
+        return sheets
+
+    monkeypatch.setattr(dwg, "split_sheets", fewer)
+    ops.read_cad(cad_project, again=True, log=lambda s: None)
+    after = {json.loads(d)["title_block"]["drawing_no"]["value"]: pid for pid, d in cad_project.connect().execute(
+        "SELECT p.page_id, r.data FROM pages p JOIN recognitions r ON r.page_id = p.page_id WHERE p.file_sha256=?", (sha,))}
+    assert dropped and first not in after.values()
+    assert after == {k: v for k, v in before.items() if v != first}  # 别的图页号不变
+
+    from bidbench.assistant import Toolkit
+    no, pid = next(iter(after.items()))
+    old = pid.rsplit("-p", 1)[0] + "-p099"
+    row = Toolkit(cad_project).check_basis([{"element": "梁 #7", "sheet": no, "rev": None, "page_id": old, "revit_id": 7}])["items"][0]
+    assert row["page_id_now"] == pid and any("已经没有了" in r for r in row["reasons"]) and row["status"] != "不合格"

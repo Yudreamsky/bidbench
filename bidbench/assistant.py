@@ -28,6 +28,16 @@ MAX_BASIS = 200  # check_basis 一次核对的构件数
 BASIS_SKIP = {"基线过期", "风险文件", "解包问题"}  # 和图上内容靠不靠得住无关的问题，核对依据时不提
 
 
+def _moved_page(sheet: dict, page_id: str) -> str | None:
+    """依据记的页面没有了时，这张图在同一个文件里现在的页面（现行版优先）。"""
+    prefix = page_id.rsplit("-p", 1)[0] + "-p"
+    if not prefix[:-2]:
+        return None
+    hits = [v["page_id"] for v in sorted(sheet.get("versions") or (), key=lambda v: v.get("state") != "现行")
+            if str(v.get("page_id") or "").startswith(prefix)]
+    return hits[0] if hits else None
+
+
 class ToolError(Exception):
     """参数不对或对象不存在。消息会原样返回给 AI。"""
 
@@ -344,6 +354,7 @@ class Toolkit:
         for it in items:
             it = it if isinstance(it, dict) else {}
             fail, review, ok = [], [], []
+            moved = None
             element = str(it.get("element") or "").strip()
             if not element:
                 fail.append("没写是哪个构件（element）")
@@ -372,6 +383,12 @@ class Toolkit:
                 elif rev is None:
                     review.append("没写用的是哪一版（rev）")
                 pid = it.get("page_id")
+                if pid and not navigate.page_owner(st, str(pid)):
+                    moved = _moved_page(sheet, str(pid))
+                    if moved:  # 同一个文件重读过、这张图换了页号（以前重读会按顺序重编页号）：按图号、文件找到它现在那页
+                        review.append(f"页面 {pid} 已经没有了（同一个文件重读后这张图在 {moved}），按 {moved} 核对；"
+                                      f"把构件的依据页面改成 {moved}")
+                        pid = moved
                 if pid:
                     owner = navigate.page_owner(st, str(pid))
                     if not owner:
@@ -406,7 +423,8 @@ class Toolkit:
             count[status] += 1
             rows.append({"element": element or None, "sheet": sheet["no"] if sheet else it.get("sheet"),
                          "status": status, "reasons": fail + review, **({"checked": ok} if ok else {}),
-                         **({"revit_id": it["revit_id"]} if it.get("revit_id") is not None else {})})  # Revit MCP 写回构件用
+                         **({"revit_id": it["revit_id"]} if it.get("revit_id") is not None else {}),  # Revit MCP 写回构件用
+                         **({"page_id_now": moved} if moved else {})})
         return {"summary": count, "items": rows,
                 "hint": "“不合格”的构件没有可靠依据，要改；“要复核”的逐条看 reasons，用 locate(page_id, bbox) 回到原图核对。"
                         "图纸升版、收到变更单后，把整份清单再核一遍，就知道哪些构件受影响。"}
