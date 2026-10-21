@@ -405,7 +405,7 @@ class Toolkit:
 
     def _value_on_page(self, page_id: str, bbox, value: str) -> tuple[bool, str]:
         """数值在不在原图那块地方（没有 bbox 或没有文字层时，看这一页的识别内容）。"""
-        squash = lambda t: re.sub(r"\s+", "", t or "")  # noqa: E731
+        squash = lambda t: re.sub(r"[x×X*＊]", "x", re.sub(r"\s+", "", t or ""))  # noqa: E731  # 350×850 = 350x850
         try:
             region = self.locate(page_id, bbox).get("region") if bbox is not None else None
         except ToolError as e:
@@ -426,7 +426,11 @@ class Toolkit:
             return False, f"{where}这一页找不到单独写着“{value}”的字（轴号、编号），要打开原图看"
         if squash(value) in squash(detail):
             return True, f"{where}这一页的识别内容里有“{value}”（位置要对照原图）"
-        return False, f"{where}这一页的识别内容里没有“{value}”，要打开原图看"
+        with self.proj.connect() as con:  # DWG、有文字层的 PDF：页面上的字（识别内容只摘了一部分）
+            row = con.execute("SELECT text FROM pages WHERE page_id=?", (page_id,)).fetchone()
+        if row and squash(value) in squash(row["text"]):
+            return True, f"{where}这一页的文字里有“{value}”（位置要对照原图）"
+        return False, f"{where}这一页的识别内容和文字里都没有“{value}”，要打开原图看"
 
     # ---------------- 查询：事实、问题 ----------------
 

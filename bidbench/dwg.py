@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-5"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
+INSTRUCTION_VERSION = "dwg-6"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -59,6 +59,7 @@ class Text:
     tag: str | None = None      # 块属性的属性名；单行、多行文字为 None
     callout: bool = False       # 来自不是图签的块属性（详图索引符号之类）
     mark: str | None = None     # 索引符号里的详图编号（同一个块的另一个属性，⑤/建施-12 的 5）
+    frame: bool = False         # 图框块的块定义里写的字（标签“Drawn By”，或块里写死的修改记录行）
 
 
 @dataclass
@@ -695,7 +696,9 @@ LABELS = {
     "revision": re.compile(r"^(?:rev(?:ision)?|版次)\.?\s*[:：]?\s*", re.I),
     "issue_date": re.compile(r"^(?:date|issue\s*date|出图日期|日期)\.?\s*[:：]?\s*", re.I),
     "scale": re.compile(r"^(?:scale|比例)\.?\s*[:：]?\s*", re.I),
+    "project_name": re.compile(r"^(?:project\s*(?:name|title)?|工程名称|项目名称)\.?\s*[:：]?\s*", re.I),
 }
+CELL_LINES = ("drawing_title", "scale", "project_name")  # 一格里分几行写的：“As / indicated”
 
 
 def _is_label(t: str) -> bool:
@@ -707,26 +710,70 @@ def _no_value(v: str) -> str:
     return re.sub(r"^[-－—–_\s]+", "", v or "")
 
 
-def frame_labels(d: Drawing, space: str) -> list:
-    """图框块的块定义里写的标签（“Sheet No.”“Revision”……，没有属性），摆到这个空间里插入它的位置。
-    块里至少有两个标签才算图框。"""
+def _labelish(t: str) -> bool:
+    """标签、两个标签连写的（“Rev Date”）、表头（“DESCRIPTION”）：不当别的标签的值。"""
+    t = t.strip()
+    return (_is_label(t) or bool(DESC_HEAD.match(t))
+            or any(rx.match(t) and _is_label(rx.sub("", t, count=1).strip()) for rx in LABELS.values()))
+
+
+def _merge_fragments(texts: list) -> list:
+    """图框块里分两行写的标签（“Sheet”下面一行“No.”）合成一个，放在下面那行的位置（值在它下面）。"""
+    rows = sorted(texts, key=lambda t: (-t.y, t.x))
+    used: set[int] = set()
+    out = []
+    for i, t in enumerate(rows):
+        if i in used:
+            continue
+        group = [t]
+        for j in range(i + 1, len(rows)):
+            u, last = rows[j], group[-1]
+            h = max(last.h, u.h) or 2.5
+            if (j not in used and abs(u.x - last.x) <= max(1.0, h * 0.5) and 0 < last.y - u.y <= h * 2.0
+                    and len(u.text) <= 20 and not re.search(r"\d", last.text + u.text)):
+                group.append(u)
+                used.add(j)
+        joined = " ".join(x.text for x in group)
+        if len(group) > 1 and _is_label(joined):
+            out.append(replace(group[-1], text=joined, x=group[0].x))
+        else:
+            out += group
+    return out
+
+
+def frame_texts(d: Drawing, space: str) -> list:
+    """图框块的块定义里写的字（Revit 导出的图框：“Sheet No.”“Revision”这些标签，有时还有写死的修改记录行，都没有属性），
+    摆到这个空间里插入它的位置，标成 frame。块里至少有两个标签才算图框。"""
     out = []
     for ins in d.inserts:
         if ins.space != space or ins.nested:
             continue
-        labels = [t for t in d.block_texts.get(ins.block, ()) if _is_label(t.text)]
-        if len(labels) < 2:
+        own = _merge_fragments(d.block_texts.get(ins.block, ()))
+        if sum(1 for t in own if _is_label(t.text)) < 2:
             continue
         k = abs(ins.sy) or 1.0
-        for t in labels:
+        for t in own:
             x, y = _place(ins, t.x, t.y)
-            out.append(Text(t.text, x, y, space, t.h * k))
+            out.append(Text(t.text, x, y, space, t.h * k, frame=True))
     return out
 
 
+def _static(t) -> bool:
+    """标签，或图框块里写死的字（没有数字的：“Drawn By”“Checked”）：划分格子用，不当值。"""
+    return _is_label(t.text) or (t.frame and not re.search(r"\d", t.text))
+
+
+def _right_edge(lab, statics: list) -> float:
+    """这个标签的格子到哪：同一行右边下一个标签。"""
+    h = lab.h or 2.5
+    return min((o.x for o in statics if o is not lab and abs(o.y - lab.y) <= h * 0.8 and o.x > lab.x + h), default=math.inf)
+
+
 def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
-    """按位置配对图签文字：“Sheet No.”右边或下面最近的字。“图号：A-01”这种写在一起的也认。"""
+    """按位置配对图签文字：“Sheet No.”右边或下面、同一格里最近的字（格子到同一行右边下一个标签为止）。
+    “图号：A-01”这种写在一起的也认。图名、比例分几行写的连起来。"""
     out: dict[str, str] = {}
+    statics = [t for t in texts if _static(t)]
     for role, rx in LABELS.items():
         best = None
         for lab in texts:
@@ -739,17 +786,18 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
                     rest = _no_value(rest)
                 if ((role != "drawing_no" or looks_like_no(rest)) and (role != "revision" or REV_CELL.match(rest))
                         and len(rest) <= 120):
-                    best = (0.0, rest)
+                    best = (0.0, rest, None, lab)
                     break
                 continue
             h = lab.h or 2.5
+            edge = _right_edge(lab, statics)
             for t in texts:
-                if t is lab or _is_label(t.text) or len(t.text) > 120:
+                if t is lab or _static(t) or _labelish(t.text) or len(t.text) > 120 or t.x >= edge:
                     continue
                 dx, dy = t.x - lab.x, lab.y - t.y
                 if abs(dy) <= h * 0.8 and 0 < dx <= h * 60:
                     dist = dx
-                elif abs(dx) <= h * 30 and 0 < dy <= h * 4:
+                elif -h * 2 <= dx <= h * 30 and 0 < dy <= h * 4:
                     dist = dy * 2
                 else:
                     continue
@@ -759,10 +807,58 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
                 if role == "revision" and not REV_CELL.match(t.text.strip()):
                     continue  # 修改记录表头“REV | DESCRIPTION | DATE”：右边是别的表头，版次在下面
                 if best is None or dist < best[0]:
-                    best = (dist, value)
+                    best = (dist, value, t, lab)
         if best:
-            out[role] = best[1]
+            value, t0, lab = best[1], best[2], best[3]
+            if role in CELL_LINES and t0 is not None:
+                h = max(t0.h, lab.h) or 2.5
+                edge, prev = _right_edge(lab, statics), t0
+                for u in sorted(texts, key=lambda u: -u.y):  # 同一格里接着往下写的几行
+                    if (u is not t0 and not _static(u) and lab.x - h * 2 <= u.x < edge
+                            and 0 < prev.y - u.y <= h * 1.8 and not _labelish(u.text)):
+                        value, prev = f"{value} {u.text}", u
+            out[role] = value
     return out, {k: NEAR_CONF for k in out}
+
+
+REV_HEAD = re.compile(r"^(?:rev(?:ision)?\.?|版次|版本)$", re.I)
+DATE_HEAD = re.compile(r"^(?:date|日期)$", re.I)
+DESC_HEAD = re.compile(r"^(?:description|desc\.?|内容|修改内容|说明)$", re.I)
+
+
+def schedule_rows(texts: list) -> list[dict]:
+    """修改记录表：表头“REV | DATE | DESCRIPTION”同一行，版次一格一格挨着往上或往下排（Revit 的表头在下、行往上长）。
+    返回从表头往外的各行 {revision, date, description}，离表头最远的是最新一版。"""
+    for head in sorted((t for t in texts if REV_HEAD.match(t.text.strip())), key=lambda t: (-t.y, t.x)):
+        h = head.h or 2.5
+        row = sorted((t for t in texts if t is not head and abs(t.y - head.y) <= h * 0.8 and t.x > head.x), key=lambda t: t.x)
+        date_h = next((t for t in row if DATE_HEAD.match(t.text.strip())), None)
+        desc_h = next((t for t in row if DESC_HEAD.match(t.text.strip())), None)
+        if not date_h and not desc_h:
+            continue
+        cols = sorted([c for c in (head, date_h, desc_h) if c], key=lambda c: c.x)
+        def col(c):
+            n = cols.index(c)
+            return c.x - h * 2, (cols[n + 1].x - h * 0.5 if n + 1 < len(cols) else math.inf)
+        lo, hi = col(head)
+        cells = [t for t in texts if lo <= t.x < hi and REV_CELL.match(t.text.strip()) and abs(t.y - head.y) > h * 0.8]
+        rows = []
+        for side in (1, -1):  # 往上、往下
+            prev = head.y
+            for t in sorted((t for t in cells if (t.y - head.y) * side > 0), key=lambda t: abs(t.y - head.y)):
+                if abs(t.y - prev) > h * 4:
+                    break
+                prev = t.y
+                def cell(c):
+                    if c is None:
+                        return None
+                    a, b = col(c)
+                    hit = [u for u in texts if a <= u.x < b and abs(u.y - t.y) <= h * 0.8 and u is not c]
+                    return " ".join(u.text for u in sorted(hit, key=lambda u: u.x)) or None
+                rows.append({"revision": t.text.strip(), "date": cell(date_h), "description": cell(desc_h)})
+            if rows:
+                return rows
+    return []
 
 
 # ---------------- 分图 ----------------
@@ -777,6 +873,7 @@ class Sheet:
     box: tuple | None = None    # 这张图的范围（图签外框，或布局上内容的范围），算文字在图上的相对位置用
     how: str = ""               # 图号是怎么认出来的
     xrefs: list = field(default_factory=list)  # 这张图用到的外部参照名
+    history: list = field(default_factory=list)  # 修改记录表的各行 {revision, date, description}，最后一行最新
 
 
 def _insert_box(ins: Insert, blocks: dict) -> tuple | None:
@@ -851,13 +948,17 @@ def split_sheets(d: Drawing) -> list[Sheet]:
                 group[n].texts.append(t)
             sheets += group
         elif sp != MODEL and (own or any(v.space == sp for v in d.viewports)):
-            f, c = label_fields(own + frame_labels(d, sp))
+            framed = own + frame_texts(d, sp)
+            f, c = label_fields(framed)
+            history = schedule_rows(framed)
+            if history and not f.get("revision"):
+                f["revision"], c["revision"] = history[-1]["revision"], NEAR_CONF
             how = "图签文字" if f.get("drawing_no") else ""
             if not f.get("drawing_no") and looks_like_no(sp):
                 f["drawing_no"], c["drawing_no"], how = sp, NEAR_CONF, "布局名"
             pts = [(t.x, t.y) for t in own] + [p for v in d.viewports if v.space == sp
                                                for p in ((v.cx - v.w / 2, v.cy - v.h / 2), (v.cx + v.w / 2, v.cy + v.h / 2))]
-            sheets.append(Sheet(sp, f, c, [], list(own), _bbox(pts), how))
+            sheets.append(Sheet(sp, f, c, [], list(own), _bbox(pts), how, history=history))
     # 模型空间里的文字：按布局视口看到的范围归到布局那张图（模型空间自己有图签的，这些字照样留在模型空间那张图上）；
     # 模型空间没有图签块时，没有视口、只有一个布局图的全归它；没有布局图的，模型空间自己算一张
     model_texts = [t for t in texts if t.space == MODEL]
@@ -875,9 +976,13 @@ def split_sheets(d: Drawing) -> list[Sheet]:
         s.texts += [replace(t, space=s.space) for t in model_texts]
         s.box = None  # 模型和布局的坐标不一样，算不出相对位置
     elif model_texts and not has_model and not layout_sheets:
-        f, c = label_fields(model_texts + frame_labels(d, MODEL))
+        framed = model_texts + frame_texts(d, MODEL)
+        f, c = label_fields(framed)
+        history = schedule_rows(framed)
+        if history and not f.get("revision"):
+            f["revision"], c["revision"] = history[-1]["revision"], NEAR_CONF
         sheets.append(Sheet(MODEL, f, c, [], model_texts, _bbox([(t.x, t.y) for t in model_texts]),
-                            "图签文字" if f.get("drawing_no") else ""))
+                            "图签文字" if f.get("drawing_no") else "", history=history))
     sheets.sort(key=lambda s: order.get(s.space, 99))  # 稳定排序：同一空间里保持一排排的顺序
     if any(s.fields.get("drawing_no") for s in sheets):  # 别的布局都认出了图号：没几个字、也没有视口的空布局不算一张图
         sheets = [s for s in sheets if s.fields.get("drawing_no") or len(s.texts) >= 3
@@ -1023,7 +1128,7 @@ def recognition(page_id: str, sha: str, path: str, index: int, count: int, s: Sh
     tb = {k: _field(f.get(k), s.conf.get(k)) for k in ("drawing_title", "discipline", "revision", "issue_date", "scale",
                                                         "project_name", "designer_org")}
     tb["drawing_no"] = _field(no, s.conf.get("drawing_no"))
-    tb["revision_history"] = []
+    tb["revision_history"] = [{**r, "source": "cad", "confidence": NEAR_CONF} for r in s.history]
     tb["bbox"] = None
     issues = []
     if not no:
