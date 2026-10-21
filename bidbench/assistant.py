@@ -307,11 +307,17 @@ class Toolkit:
             out = cadfile.for_sheet(self.proj, st, s)
         except cadfile.CadError as e:
             raise ToolError(str(e)) from None
-        out["hint"] = ("dxf 是本机文件路径，交给 Revit MCP 的 read_cad 先看图层、和用户确认，再 cad_to_model 翻模，"
-                       "建完用 compare_cad_with_model 核对；三个工具都要带上 region（这张图在模型空间里的范围），"
-                       "不然同一个文件里的其他图（same_file_sheets）也会被读进去。没有 region 又有 region_note 的，照 region_note 说的办。"
-                       "xrefs 是外部参照（轴网、底图常在里面），要一起叠上。"
-                       "构件依据写这张图的图号、版次和 page_id：cad_to_model 的 basis 填 {sheet, rev, page_id}。")
+        tips = ["dxf 是本机文件路径，交给 Revit MCP 的 read_cad 先看图层、和用户确认，再 cad_to_model 翻模，建完用 compare_cad_with_model 核对。"]
+        if out.get("region"):
+            tips.append("三个工具都带上 region（这张图在模型空间里的范围），不然同一个文件里的其他图也会被读进去。")
+        elif out.get("region_note"):
+            tips.append("没有 region：照 region_note 说的办，别把整个模型空间当成这张图。")
+        if out.get("dxf_warning"):
+            tips.append("先处理 dxf_warning：丢了块的 DXF 翻出来缺轴号、轴线。")
+        if out.get("xrefs"):
+            tips.append("xrefs 是外部参照（轴网、底图常在里面），要一起叠上。")
+        tips.append("构件依据写这张图的图号、版次和 page_id：cad_to_model 的 basis 填 {sheet, rev, page_id}。")
+        out["hint"] = "".join(tips)
         return out
 
     def check_basis(self, items: list[dict]) -> dict:
@@ -399,6 +405,14 @@ class Toolkit:
             return False, f"原图这块地方没找到“{value}”，读到的是：{region['text'][:80]}"
         detail = self.get_page(page_id).get("detail") or ""
         where = "这块地方没有文字层，" if region else ""
+        if len(squash(value)) <= 3:  # 轴号、短编号（A、3、H1）：随便一段字里都有，要整行就是它才算（轴号圈、索引符号的属性单独一行）
+            with self.proj.connect() as con:
+                row = con.execute("SELECT text FROM pages WHERE page_id=?", (page_id,)).fetchone()
+            text = (row["text"] if row else "") or ""
+            lines = {squash(x).strip("|*-:：") for x in (detail + "\n" + text).splitlines()}
+            if squash(value) in lines:
+                return True, f"{where}这一页有单独写着“{value}”的字（轴号、编号；位置要对照原图）"
+            return False, f"{where}这一页找不到单独写着“{value}”的字（轴号、编号），要打开原图看"
         if squash(value) in squash(detail):
             return True, f"{where}这一页的识别内容里有“{value}”（位置要对照原图）"
         return False, f"{where}这一页的识别内容里没有“{value}”，要打开原图看"
@@ -432,9 +446,12 @@ class Toolkit:
 
     def floor_coverage(self) -> list[dict]:
         st = self._state()
-        return [{"group": r["group"], "result": reports.FLOOR_STATUS[r["status"]], "basis": r["basis"],
+        rows = [{"group": r["group"], "result": reports.FLOOR_STATUS[r["status"]], "basis": r["basis"],
                  "covered": r["covered"], "missing": r["missing_text"] or None, "remarks": r.get("remarks", [])}
                 for r in st["floor_coverage"]]
+        return rows or [{"group": None, "result": "还没法核对", "covered": None, "missing": None, "remarks": [],
+                         "basis": "要知道地上、地下各几层（设计说明、剖面），和平面图各是哪一层（图名），看图识别以后才有；"
+                                  "只读了 DWG 图签、或图名里没写楼层的，先识别设计说明、剖面和平面图"}]
 
     def list_issues(self, level: str | None = None, kind: str | None = None) -> dict:
         st = self._state()

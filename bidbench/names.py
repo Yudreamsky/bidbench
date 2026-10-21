@@ -26,12 +26,12 @@ WORDS = [
     (re.compile(r"景观|landscap", re.I), "景观"),
     (re.compile(r"室内|装修|interior", re.I), "室内"),
     (re.compile(r"总图|总平面|civil|infrastructure|external\s*works|site\s*works", re.I), "总图"),
-    (re.compile(r"结构|structur|\bSTR\b|\bSTRC?\b|\bSE\b", re.I), "结构"),
-    (re.compile(r"给排水|给水|排水|plumbing|public\s*health|drainage|\bPHE?\b|\bPLB\b", re.I), "给排水"),
-    (re.compile(r"暖通|通风|空调|hvac|mechanical|\bMECH?\b|\bMEC\b", re.I), "暖通"),
-    (re.compile(r"电气|强电|弱电|electrical|\bELEC?\b|\bELE\b", re.I), "电气"),
+    (re.compile(r"结构|structur|struktur|\bSTR\b|\bSTRC?\b|\bSE\b", re.I), "结构"),
+    (re.compile(r"给排水|给水|排水|plumbing|plambing|public\s*health|drainage|\bPHE?\b|\bPLB\b", re.I), "给排水"),
+    (re.compile(r"暖通|通风|空调|hvac|mechanical|mekanikal|\bMECH?\b|\bMEC\b", re.I), "暖通"),
+    (re.compile(r"电气|强电|弱电|electrical|elektrikal|\bELEC?\b|\bELE\b", re.I), "电气"),
     (re.compile(r"机电|\bMEP\b|\bMEPF\b|building\s*services|services", re.I), "机电"),
-    (re.compile(r"建筑|architect|\bARCH?\b|\bARC\b", re.I), "建筑"),
+    (re.compile(r"建筑|architect|arsitek|\bARCH?\b|\bARC\b", re.I), "建筑"),
 ]
 CN_PREFIX = [("建", "建筑"), ("结", "结构"), ("水", "给排水"), ("暖", "暖通"), ("电", "电气")]
 

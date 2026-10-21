@@ -97,6 +97,45 @@ def _words(keyword: str | None) -> list[str]:
     return [w for w in re.split(r"[\s,，、/;；]+", keyword or "") if w]
 
 
+# 关键词的同义词：中文找得到英文、印尼文图名（COLUMN、KOLOM），反过来也一样。英文缩写按整词认（AS 不算 GLASS 里的）
+SYNONYMS = [
+    ("柱", "COLUMN", "COLUMNS", "COL", "KOLOM"),
+    ("墙", "WALL", "WALLS", "COREWALL", "CORE WALL", "SHEAR WALL", "DINDING"),
+    ("梁", "BEAM", "BEAMS", "BALOK"),
+    ("板", "SLAB", "SLABS", "PELAT", "PLAT"),
+    ("轴网", "轴线", "GRID", "GRIDS", "AS"),
+    ("标高", "LEVEL", "LEVELS", "EL", "ELEVASI", "PEIL"),
+    ("剖面", "SECTION", "SECTIONS", "POTONGAN"),
+    ("平面", "PLAN", "PLANS", "DENAH"),
+    ("立面", "ELEVATION", "TAMPAK"),
+    ("详图", "大样", "DETAIL", "DETAILS", "DETIL"),
+    ("楼梯", "STAIR", "STAIRS", "STAIRCASE", "TANGGA"),
+    ("基础", "FOUNDATION", "PILE CAP", "PONDASI", "FONDASI"),
+    ("桩", "PILE", "PILES", "TIANG PANCANG"),
+    ("门窗", "DOOR", "WINDOW", "PINTU", "JENDELA"),
+    ("屋面", "ROOF", "ATAP"),
+]
+
+
+def _aliases(word: str) -> list[str]:
+    up = word.upper()
+    for group in SYNONYMS:
+        if up in group or word in group:
+            return list(dict.fromkeys([word, *group]))
+    return [word]
+
+
+def _has(alias: str, text: str) -> bool:
+    if not alias.isascii():
+        return alias in text
+    return re.search(rf"(?<![A-Za-z]){re.escape(alias)}(?![A-Za-z])", text, re.I) is not None
+
+
+def _hit(word: str, text: str) -> bool:
+    """关键词或它的同义词在不在这段字里。"""
+    return any(_has(a, text) for a in _aliases(word))
+
+
 def _disc_ok(s: dict, discipline: str | None) -> bool:
     return not discipline or discipline in s["discipline"] or s["discipline"] in discipline
 
@@ -135,8 +174,8 @@ def find_for_task(st: dict, floor: str | None = None, discipline: str | None = N
         if want and fl and not (want & fl):
             continue
         title = s["title"] or ""
-        in_title = [w for w in words if w in title or w in s["no"]]
-        in_content = [w for w in words if w not in in_title and w in _content(s)]
+        in_title = [w for w in words if _hit(w, title) or w in s["no"]]
+        in_content = [w for w in words if w not in in_title and _hit(w, _content(s))]
         why = []
         if want and fl:
             why.append(f"楼层 {s['floors_text']}" + ("（正好是这几层）" if fl == want else "（含要找的层）"))
@@ -145,7 +184,7 @@ def find_for_task(st: dict, floor: str | None = None, discipline: str | None = N
         if in_content:
             why.append(f"内容摘要有“{'、'.join(in_content)}”")
         if want and fl:  # 这一层的平面图总是主图：墙、门窗、梁都画在平面上
-            plan = "平面" in title and not in_title
+            plan = _hit("平面", title) and not in_title
             role = "主图" if (in_title or in_content or not words or plan) else "同层其他图"
             if plan and words:
                 why.append("这一层的平面图")

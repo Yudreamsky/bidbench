@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-1"  # 认图签、分图的规则改了就加 1；用 bidbench read-dwg --again 重读
+INSTRUCTION_VERSION = "dwg-2"  # 认图签、分图的规则改了就加 1；用 bidbench read-dwg --again 重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -72,6 +72,7 @@ class Insert:
     space: str
     attrs: list = field(default_factory=list)  # [(属性名, 值, x, y)]
     rng: tuple | None = None                   # R2000 的第一个、最后一个属性句柄
+    nested: bool = False                       # 块里套的块（动态块的轴号圈之类）：属性当图上的字，不当图签
 
 
 @dataclass
@@ -81,18 +82,31 @@ class Viewport:
     cy: float
     w: float
     h: float
-    vx: float       # 看到的模型空间：中心、高
+    vx: float       # 看到的模型空间：中心（视图坐标，扭转、目标点之前）、高
     vy: float
     vh: float
-    twist: float = 0.0  # 视口里的图转了多少度（DXF 组码 51）；只有翻模取范围时用
+    twist: float = 0.0  # 视口里的图转了多少度（DXF 组码 51）
+    tx: float = 0.0     # 目标点（DXF 组码 17、27）：视图坐标的原点在模型空间里的位置
+    ty: float = 0.0
+
+    def _to_model(self, x: float, y: float) -> tuple[float, float]:
+        """视图坐标 → 模型空间：转回扭转角，再加目标点。"""
+        r = math.radians(-self.twist)
+        return self.tx + x * math.cos(r) - y * math.sin(r), self.ty + x * math.sin(r) + y * math.cos(r)
 
     def window(self) -> tuple:
+        """看到的模型空间范围（转了角度的取外接矩形）。"""
         vw = self.vh * self.w / self.h
-        return self.vx - vw / 2, self.vy - self.vh / 2, self.vx + vw / 2, self.vy + self.vh / 2
+        pts = [self._to_model(self.vx + dx * vw / 2, self.vy + dy * self.vh / 2) for dx in (-1, 1) for dy in (-1, 1)]
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        return min(xs), min(ys), max(xs), max(ys)
 
     def to_paper(self, x: float, y: float) -> tuple[float, float]:
+        r = math.radians(self.twist)
+        dx, dy = x - self.tx, y - self.ty
+        u, v = dx * math.cos(r) - dy * math.sin(r), dx * math.sin(r) + dy * math.cos(r)
         k = self.h / self.vh
-        return self.cx + (x - self.vx) * k, self.cy + (y - self.vy) * k
+        return self.cx + (u - self.vx) * k, self.cy + (v - self.vy) * k
 
 
 @dataclass
@@ -102,6 +116,7 @@ class Drawing:
     inserts: list = field(default_factory=list)     # [Insert]
     viewports: list = field(default_factory=list)   # [Viewport]
     blocks: dict = field(default_factory=dict)      # 块名 → 外框 (x0, y0, x1, y1)，按块里的线算
+    inner: dict = field(default_factory=dict)       # 块名 → 块里套着的带属性的块参照 [Insert]（坐标是块里的）
     xrefs: set = field(default_factory=set)         # 外部参照的块名（附着的，和绑定进来的）
     version: str = ""
     reader: str = ""
@@ -172,7 +187,8 @@ def iter_json(lines):
     return meta, objects()
 
 
-def read_dwg(path: Path, tool: str | None = None) -> Drawing:
+def _dwgread(path: Path, tool: str | None, consume):
+    """dwgread -O JSON 边读边交给 consume(objs, meta)，超时就停；返回 (consume 的结果, meta)。"""
     tool = tool or find_tool()
     if not tool:
         raise ReadError("没有找到 LibreDWG（dwgread），只能按文件名暂定")
@@ -193,7 +209,7 @@ def read_dwg(path: Path, tool: str | None = None) -> Drawing:
     timer.start()
     try:
         meta, objs = iter_json(p.stdout)
-        d = from_objects(objs, meta)
+        out = consume(objs, meta)
         p.wait()
     finally:
         timer.cancel()
@@ -201,12 +217,34 @@ def read_dwg(path: Path, tool: str | None = None) -> Drawing:
             p.kill()
             p.wait()
         p.stdout.close()
-    log.debug("dwgread 退出码 %s，%s 段文字，%s 个块参照", p.returncode, len(d.texts), len(d.inserts))
+    log.debug("dwgread 退出码 %s", p.returncode)
     if killed.is_set():
         raise ReadError(f"读了 {limit} 秒还没读完，跳过")
     if not meta["reader"]:
         raise ReadError("LibreDWG 读不出这个文件（可能损坏，或版本太新）")
+    return out, meta
+
+
+def read_dwg(path: Path, tool: str | None = None) -> Drawing:
+    d, _meta = _dwgread(path, tool, from_objects)
+    log.debug("%s 段文字，%s 个块参照", len(d.texts), len(d.inserts))
     return d
+
+
+def insert_blocks(path: Path, tool: str | None = None) -> dict[int, str]:
+    """每个块参照（句柄）用的是哪个块：dwg2dxf 会把动态块的匿名块名写成光秃秃的“*U”，靠这个补回。"""
+    def consume(objs, _meta):
+        names: dict[int, str] = {}
+        refs: dict[int, int] = {}
+        for o in objs:
+            kind = o.get("entity") or o.get("object")
+            h = _ref(o.get("handle"))
+            if kind == "BLOCK_HEADER" and h is not None:
+                names[h] = _s(o.get("name"))
+            elif kind in ("INSERT", "MINSERT") and h is not None and _ref(o.get("block_header")) is not None:
+                refs[h] = _ref(o.get("block_header"))
+        return {h: names[b] for h, b in refs.items() if names.get(b)}
+    return _dwgread(path, tool, consume)[0]
 
 
 U_ESC = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
@@ -312,14 +350,18 @@ def from_objects(objs, meta: dict) -> Drawing:
                 w, hh, vh = _num(o.get("width")), _num(o.get("height")), _num(o.get("VIEWSIZE") or o.get("view_height"))
                 paper_itself = abs(cx - vx) < 1e-6 and abs(cy - vy) < 1e-6 and abs(hh - vh) < 1e-6  # 布局本身那个视口
                 if w > 0 and hh > 0 and vh > 0 and not paper_itself:
-                    d.viewports.append(Viewport(space, cx, cy, w, hh, vx, vy, vh))
+                    tx, ty = _pt(o.get("view_target"))
+                    twist = _num(o.get("twist_angle"))
+                    d.viewports.append(Viewport(space, cx, cy, w, hh, vx, vy, vh, math.degrees(twist), tx, ty))
         elif kind in ("INSERT", "MINSERT"):
             last = None
-            if space:
+            if space or block:
                 sc = o.get("scale") if isinstance(o.get("scale"), list) and len(o.get("scale")) >= 2 else [1, 1]
                 x, y = _pt(o.get("ins_pt"))
                 ins = Insert(bh_name.get(_ref(o.get("block_header")), ""), x, y, _num(sc[0], 1) or 1, _num(sc[1], 1) or 1,
-                             _num(o.get("rotation")), space)
+                             _num(o.get("rotation")), space or "", nested=not space)
+                if not space:  # 块里套的块：用它的地方再摆出来
+                    d.inner.setdefault(block, []).append(ins)
                 f, la = _ref(o.get("first_attrib")), _ref(o.get("last_attrib"))
                 ins.rng = (f, la) if f and la else None
                 inserts[h] = last = ins
@@ -335,7 +377,9 @@ def from_objects(objs, meta: dict) -> Drawing:
                 ins.attrs.append((_s(o.get("tag")), _s(o.get("text_value")).strip(), x, y))
         elif kind != "SEQEND":
             last = None
-    d.inserts = list(inserts.values())
+    d.inserts = [i for i in inserts.values() if not i.nested]
+    d.inner = {k: [i for i in v if i.attrs] for k, v in d.inner.items() if any(i.attrs for i in v)}
+    _expand(d)
     d.blocks = {k: _bbox(v) for k, v in lines.items() if v}
     d.xrefs = _xref_blocks(xref_names, bh_name.values())
     order = sorted(layout_of, key=lambda b: (layout_order.get(b, 99), b))
@@ -440,6 +484,7 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
     xref_names: set[str] = set()
     block_names: list[str] = []
     block = ps_space = None  # 正在读的块定义 / 布局块（非当前布局的内容放在 *Paper_Space0 这类块里）
+    vps: list[tuple] = []     # (编号, 视口)
     last: Insert | None = None
     for section, kind, g in ents:
         get = _getter(g)
@@ -461,6 +506,16 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
                 block_names.append(name)
             continue
         if section == "BLOCKS" and block:
+            if kind == "INSERT":
+                last = Insert(_s(get("2") or ""), _f(get("10")), _f(get("20")), _f(get("41"), 1.0), _f(get("42"), 1.0),
+                              math.radians(_f(get("50"))), "", nested=True)
+                d.inner.setdefault(block, []).append(last)
+                continue
+            if kind == "ATTRIB" and last is not None:
+                last.attrs.append((_s(get("2") or ""), _s(get("1") or "").strip(), _f(get("10")), _f(get("20"))))
+                continue
+            if kind != "SEQEND":
+                last = None
             if kind == "LINE":
                 lines.setdefault(block, []).extend([(_f(get("10")), _f(get("20"))), (_f(get("11")), _f(get("21")))])
             elif kind == "LWPOLYLINE":
@@ -484,11 +539,11 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
                 d.texts.append(Text(t, _f(get("10")), _f(get("20")), space, _f(get("40"))))
             last = None
         elif kind == "VIEWPORT":
-            if space != MODEL and get("69") != "1":  # 编号 1 是布局本身那个视口
+            if space != MODEL:
                 vp = Viewport(space, _f(get("10")), _f(get("20")), _f(get("40")), _f(get("41")),
-                              _f(get("12")), _f(get("22")), _f(get("45")), _f(get("51")))
+                              _f(get("12")), _f(get("22")), _f(get("45")), _f(get("51")), _f(get("17")), _f(get("27")))
                 if vp.w > 0 and vp.h > 0 and vp.vh > 0:
-                    d.viewports.append(vp)
+                    vps.append((get("69"), vp))
             last = None
         elif kind == "INSERT":
             last = Insert(_s(get("2") or ""), _f(get("10")), _f(get("20")), _f(get("41"), 1.0), _f(get("42"), 1.0),
@@ -498,6 +553,9 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
             last.attrs.append((_s(get("2") or ""), _s(get("1") or "").strip(), _f(get("10")), _f(get("20"))))
         elif kind != "SEQEND":
             last = None
+    d.viewports = _floating(vps)
+    d.inner = {k: [i for i in v if i.attrs] for k, v in d.inner.items() if any(i.attrs for i in v)}
+    _expand(d)
     d.blocks = {k: _bbox(v) for k, v in lines.items() if v}
     d.xrefs = _xref_blocks(xref_names, block_names)
     d.spaces = [MODEL] + sorted((n for n in dict.fromkeys(layout_by_block.values()) if n.upper() != "MODEL"),
@@ -506,6 +564,47 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
         if x.space not in d.spaces:
             d.spaces.append(x.space)
     return d
+
+
+def _place(parent: Insert, x: float, y: float) -> tuple[float, float]:
+    c, s_ = math.cos(parent.rot), math.sin(parent.rot)
+    lx, ly = x * parent.sx, y * parent.sy
+    return parent.x + lx * c - ly * s_, parent.y + lx * s_ + ly * c
+
+
+def _expand(d: Drawing, depth: int = 4) -> None:
+    """块里套的带属性的块参照（动态块里的轴号圈、索引符号）摆到用它的地方，属性当成图上的字读。"""
+    todo = [i for i in d.inserts if d.inner.get(i.block)]
+    for _ in range(depth):
+        nxt = []
+        for parent in todo:
+            for child in d.inner.get(parent.block, ()):
+                x, y = _place(parent, child.x, child.y)
+                ins = Insert(child.block, x, y, child.sx * parent.sx, child.sy * parent.sy, child.rot + parent.rot,
+                             parent.space, [(t, v, *_place(parent, ax, ay)) for t, v, ax, ay in child.attrs], nested=True)
+                d.inserts.append(ins)
+                if d.inner.get(ins.block):
+                    nxt.append(ins)
+        todo = nxt
+        if not todo:
+            break
+
+
+def _floating(vps: list[tuple]) -> list[Viewport]:
+    """去掉布局本身那个视口：看到的就是图纸本身（中心、高和布局上一样）；认不出时去掉编号 1 的。
+    AutoCAD 只给布局本身编号 1，dwg2dxf 转出的 DXF 里浮动视口也写成 1，所以不能只看编号。"""
+    def itself(v: Viewport) -> bool:
+        return abs(v.cx - v.vx) < 1e-6 and abs(v.cy - v.vy) < 1e-6 and abs(v.h - v.vh) < 1e-6 and not v.twist
+    out = []
+    for space in dict.fromkeys(v.space for _n, v in vps):
+        own = [(n, v) for n, v in vps if v.space == space]
+        if any(itself(v) for _n, v in own):
+            out += [v for _n, v in own if not itself(v)]
+        elif len({n for n, _v in own}) > 1:
+            out += [v for n, v in own if n != "1"]
+        else:  # 编号都一样（dwg2dxf）：第一个是布局本身
+            out += [v for _n, v in own[1:]] if len(own) > 1 else [v for n, v in own if n != "1"]
+    return out
 
 
 def read(path: Path, ext: str | None = None, tool: str | None = None) -> Drawing:
@@ -517,11 +616,12 @@ def read(path: Path, ext: str | None = None, tool: str | None = None) -> Drawing
 # 属性名（去掉空格、下划线等，大写）→ 图签的哪一项；JUDUL、SKALA、TANGGAL 等是印尼语
 TAGS = {
     "drawing_no": ("图号", "图纸编号", "图纸号", "图别图号", "DWGNO", "DRGNO", "DRAWINGNO", "DRAWINGNUMBER", "DRAWINGNUM",
-                   "SHEETNO", "SHEETNUMBER", "SHEETNUM", "DOCNO", "DOCUMENTNO", "DOCUMENTNUMBER", "NOGAMBAR", "NOMORGAMBAR"),
+                   "SHEETNO", "SHEETNUMBER", "SHEETNUM", "DOCNO", "DOCUMENTNO", "DOCUMENTNUMBER", "NOGAMBAR", "NOMORGAMBAR",
+                   "NOGBR", "NOGB"),
     "drawing_title": ("图名", "图纸名称", "图纸名", "图样名称", "DWGTITLE", "DRAWINGTITLE", "DRAWINGNAME", "SHEETTITLE",
                       "SHEETNAME", "TITLE", "JUDUL", "JUDULGAMBAR"),
     "revision": ("版次", "版本", "版本号", "修改版次", "REV", "REVISION", "REVNO", "REVISIONNO", "CURRENTREVISION", "REVISI"),
-    "issue_date": ("日期", "出图日期", "DATE", "ISSUEDATE", "DRAWINGDATE", "TANGGAL"),
+    "issue_date": ("日期", "出图日期", "DATE", "ISSUEDATE", "DRAWINGDATE", "TANGGAL", "TGL"),
     "scale": ("比例", "SCALE", "SKALA"),
     "project_name": ("工程名称", "项目名称", "工程名", "PROJECT", "PROJECTNAME", "PROJECTTITLE", "PROYEK"),
     "designer_org": ("设计单位", "设计院", "DESIGNER", "COMPANY", "CONSULTANT"),
@@ -576,7 +676,7 @@ def title_fields(attrs: list) -> tuple[dict[str, str], dict[str, float]]:
 
 
 def is_title_block(ins: Insert) -> bool:
-    return "drawing_no" in title_fields(ins.attrs)[0]
+    return not ins.nested and "drawing_no" in title_fields(ins.attrs)[0]
 
 
 # 图签是普通文字时（Revit 导出的图常这样）：标签右边或下面的字就是值
@@ -665,6 +765,26 @@ def _dist(box, x, y, ins: Insert) -> float:
     return math.hypot(max(box[0] - x, 0, x - box[2]), max(box[1] - y, 0, y - box[3]))
 
 
+def _merge_title_parts(d: Drawing, space: str, titles: list, tb: list, boxes: list, group: list) -> None:
+    """图签拆成几个块的（一个块写图号、图名，另一个“状态”块写版次、日期）：别的块里认得出的图签项补到这张图上，
+    放在哪张图的图签外框里就归哪张；这个空间只有一张图的归它。已有的项不覆盖。"""
+    for i in d.inserts:
+        if i.space != space or i.nested or i in titles:
+            continue
+        f, c = title_fields(i.attrs)
+        f.pop("drawing_no", None)
+        if not f:
+            continue
+        hit = [n for n, b in enumerate(boxes) if _inside(b, i.x, i.y)]
+        n = hit[0] if len(hit) == 1 else 0 if len(tb) == 1 else None
+        if n is None:
+            continue
+        added = {k for k in f if k not in group[n].fields}
+        for k in added:
+            group[n].fields[k], group[n].conf[k] = f[k], c[k]
+        group[n].attrs += [(t, v) for t, v, _x, _y in i.attrs if v and tag_role(t)[0] in added]
+
+
 def split_sheets(d: Drawing) -> list[Sheet]:
     """一个文件分成几张图（见本模块开头）。"""
     titles = [i for i in d.inserts if is_title_block(i)]
@@ -684,6 +804,7 @@ def split_sheets(d: Drawing) -> list[Sheet]:
                 f, c = title_fields(i.attrs)
                 group.append(Sheet(sp, f, c, [(t, v) for t, v, _x, _y in i.attrs], [], b,
                                    "图签属性" if c.get("drawing_no") == ATTR_CONF else "图签属性的值"))
+            _merge_title_parts(d, sp, titles, tb, boxes, group)
             for t in own:
                 inside = [n for n, b in enumerate(boxes) if _inside(b, t.x, t.y)]
                 if inside:

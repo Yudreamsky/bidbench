@@ -72,6 +72,7 @@ def to_dxf(proj: Project, src: Path, sha: str, name: str) -> Path:
         if not tmp.exists() or tmp.stat().st_size == 0:
             log.debug("dwg2dxf 退出码 %s，没有输出", p.returncode)
             raise CadError("LibreDWG 转不出这个 DWG（可能损坏，或版本太新）；请在 AutoCAD 里另存为 DXF")
+        fix_anonymous_blocks(tmp, src)
         os.replace(tmp, out)  # dwg2dxf 遇到不认识的对象会报错退出，但已写出的 DXF 照样能用
     except subprocess.TimeoutExpired:
         raise CadError("转了太久还没转完，跳过；请在 AutoCAD 里另存为 DXF") from None
@@ -82,59 +83,133 @@ def to_dxf(proj: Project, src: Path, sha: str, name: str) -> Path:
     return out
 
 
-REGION_VERSION = 1  # 算范围的规则改了就加 1，存着的范围重算
+def _entities(lines: list[bytes]):
+    """DXF 按实体切开：[(实体在第几行开始, 段名, 类型, [(组码行号, 组码, 值)…])]。"""
+    out, section = [], None
+    for i in range(0, len(lines) - 1, 2):
+        code, val = lines[i].strip(), lines[i + 1].strip()
+        if code == b"0":
+            if val == b"SECTION":
+                section = b"?"
+            elif val == b"ENDSEC":
+                section = None
+            out.append([i, section, val, []])
+        elif out:
+            if code == b"2" and out[-1][2] == b"SECTION":
+                out[-1][1] = section = val
+            out[-1][3].append((i, code, val))
+    return out
+
+
+def broken_blocks(lines: list[bytes]) -> list[tuple[int, int]]:
+    """引用了不存在的匿名块的块参照：[(块名那一行, 句柄)]。"""
+    ents = _entities(lines)
+    defined = {next((v for _i, c, v in g if c == b"2"), b"") for _n, sec, kind, g in ents if sec == b"BLOCKS" and kind == b"BLOCK"}
+    bad = []
+    for _n, _sec, kind, g in ents:
+        if kind not in (b"INSERT", b"MINSERT"):
+            continue
+        name = next(((i, v) for i, c, v in g if c == b"2"), None)
+        handle = next((v for _i, c, v in g if c == b"5"), None)
+        if name and name[1].startswith(b"*") and name[1] not in defined:
+            try:
+                bad.append((name[0], int(handle, 16) if handle else -1))
+            except ValueError:
+                bad.append((name[0], -1))
+    return bad
+
+
+def fix_anonymous_blocks(dxf: Path, src: Path) -> int:
+    """dwg2dxf 把动态块的匿名块名写成“*U”（块定义还在，叫 *U4、*U6），轴号、轴线这类动态块就全丢了。
+    用 dwgread 读出每个块参照真正用的块名补回去；返回补了几个，补不了的留着（cad_file 会提醒）。"""
+    try:
+        lines = dxf.read_bytes().split(b"\n")
+    except OSError:
+        return 0
+    bad = broken_blocks(lines)
+    if not bad:
+        return 0
+    try:
+        names = dwg.insert_blocks(src)
+    except dwg.ReadError as e:
+        log.debug("补匿名块名时 DWG 读不出：%s", e)
+        return 0
+    fixed = 0
+    for line, handle in bad:
+        name = names.get(handle)
+        if name:
+            end = b"\r" if lines[line + 1].endswith(b"\r") else b""
+            lines[line + 1] = name.encode("utf-8") + end
+            fixed += 1
+    if fixed:
+        dxf.write_bytes(b"\n".join(lines))
+    log.debug("匿名块名：%s 个不对，补回 %s 个", len(bad), fixed)
+    return fixed
+
+
+REGION_VERSION = 2  # 算范围的规则改了就加 1，存着的范围重算
 
 
 def _box(b) -> list[float]:
     return [round(float(x), 3) for x in b]
 
 
+def _is_frame(sh: dwg.Sheet) -> bool:
+    """图签块的外框是不是整张图的图框：归这张图的字铺开的范围比它大十倍以上的，它只是个图名标签。"""
+    pts = [(t.x, t.y) for t in sh.texts] + [sh.box[:2], sh.box[2:]]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    spread = (max(xs) - min(xs)) * (max(ys) - min(ys))
+    return (sh.box[2] - sh.box[0]) * (sh.box[3] - sh.box[1]) * 10 >= spread
+
+
 def _region(d: dwg.Drawing, sh: dwg.Sheet) -> dict:
     """一张图在模型空间里的范围：图框（模型空间里排图签的），或布局视口看到的地方。"""
     if sh.space == dwg.MODEL:
-        if sh.attrs and sh.box:  # 图签块的外框；没有图签块时 box 只是文字的范围，不能当图框
+        if sh.attrs and sh.box and _is_frame(sh):  # 图签块的外框；没有图签块时 box 只是文字的范围，不能当图框
             return {"region": [_box(sh.box)]}
+        if sh.attrs and sh.box:  # 图上的字大多在“图签块”外面：它只是个图名标签，不是图框
+            return {"note": "这张图的图签块只是个小标签，不是图框，框不出这张图的范围，翻模时请在 CAD 里单独存出这张图"}
         return {"note": "框不出这张图的范围（图签转了角度，或没有图签块），翻模时请在 CAD 里单独存出这张图"}
     vps = [v for v in d.viewports if v.space == sh.space]
     if not vps:
         return {"note": "这张图画在布局上，没有看模型空间的视口；Revit MCP 只读模型空间，请在 CAD 里把图移到模型空间再转"}
-    straight = [v for v in vps if abs(v.twist) < 1e-6]
-    if not straight:
-        return {"note": "布局视口转了角度，算不出范围，翻模时请在 CAD 里单独存出这张图"}
-    out: dict = {"region": [_box(v.window()) for v in straight]}
-    if len(straight) < len(vps):
-        out["note"] = "有的视口转了角度，没算进范围"
+    out: dict = {"region": [_box(v.window()) for v in vps]}
+    if any(v.twist % 90 for v in vps):
+        out["note"] = "视口转了角度，范围取的是外接矩形，可能带进旁边的一点东西"
     return out
 
 
-def regions(dxf: Path) -> list[dict]:
-    """转好的 DXF 里每张图的图号和范围：软件自己读 DXF、分图（和读 DWG 同一套分法），算一次存在 DXF 旁边。"""
+def regions(dxf: Path) -> dict:
+    """转好的 DXF 里每张图的图号和范围，和引用了不存在的块的块参照有几个：软件自己读 DXF、分图（和读 DWG 同一套分法），
+    算一次存在 DXF 旁边。"""
     cache = dxf.with_name(dxf.stem + ".regions.json")
     try:
         data = json.loads(cache.read_text(encoding="utf-8"))
         if data.get("version") == REGION_VERSION:
-            return data["sheets"]
+            return data
     except (OSError, ValueError, KeyError, AttributeError):
         pass
     try:
         d = dwg.read_dxf(dxf)
         sheets = dwg.split_sheets(d)
-    except dwg.ReadError as e:
+        broken = len(broken_blocks(dxf.read_bytes().split(b"\n")))
+    except (dwg.ReadError, OSError) as e:
         log.debug("算翻模范围时 DXF 读不出：%s", e)
-        return []
+        return {"sheets": [], "broken": 0}
     out = []
     for sh in sheets:
         no = sh.fields.get("drawing_no")
         out.append({"no": dwg._norm_no(no) if no else None, "space": sh.space, **_region(d, sh)})
+    data = {"version": REGION_VERSION, "sheets": out, "broken": broken}
     tmp = cache.with_name(cache.name + ".part")
     try:
-        tmp.write_text(json.dumps({"version": REGION_VERSION, "sheets": out}, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, cache)
     except OSError as e:
         log.debug("翻模范围存不下：%s", e)
     finally:
         tmp.unlink(missing_ok=True)
-    return out
+    return data
 
 
 def _match(found: list[dict], rec: dict) -> dict | None:
@@ -207,7 +282,11 @@ def for_sheet(proj: Project, st: dict, s: dict) -> dict:
     out = {"sheet": s["no"], "title": s["title"], "rev": v["rev"], "current_rev": s["current_rev"],
            "page_id": pid, "cad_file": r["name"], "dxf": str(dxf), "where": m.group(1) if m else None,
            "same_file_sheets": _same_file(st, r["sha256"], s["no"])}
-    found = regions(dxf)
+    info = regions(dxf)
+    found = info["sheets"]
+    if info.get("broken"):
+        out["dxf_warning"] = (f"转出的 DXF 里有 {info['broken']} 个块参照找不到它用的块（多半是动态块：轴号、轴线、门窗），"
+                              "Revit MCP 读不到它们；请在 AutoCAD 里把这个 DWG 另存为 DXF 再翻模")
     hit = _match(found, data) if data else None
     if hit and hit.get("region"):
         out["region"] = hit["region"]

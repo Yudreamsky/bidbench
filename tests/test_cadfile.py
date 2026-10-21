@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from bidbench import cadfile, ops
+from bidbench import cadfile, dwg, ops
 from bidbench.assistant import Toolkit, ToolError
 from bidbench.store import Project
 
@@ -39,7 +39,7 @@ def test_cad_file_for_sheets(cad_project):
     assert r13["region"] == [[0, 0, 420, 297]] and r14["region"] == [[500, 0, 920, 297]]  # 各取自己的图框
     a701 = kit.cad_file("PRJ1-A-701")
     assert a701["where"] == "布局“A-701”" and a701["region"] == [[0, 0, 30000, 20000]]  # 视口看到的模型空间
-    assert kit.cad_file("PRJ1-A-702")["region"] == [[30000, 0, 60000, 20000]]
+    assert kit.cad_file("PRJ1-A-702")["region"] == [[35000, -5000, 55000, 25000]]  # 视口转了 90°
     assert kit.cad_file("A-150")["region_note"].startswith("这张图画在布局上")  # Revit MCP 读不到布局上的图
     with pytest.raises(ToolError, match="没有收到 DWG 或 DXF|没有图号"):
         kit.cad_file("建施-15")  # 缺图
@@ -73,3 +73,53 @@ def test_dwg_converted_with_dwg2dxf(tmp_path, monkeypatch):
     monkeypatch.setenv("BIDBENCH_DWG2DXF", str(tmp_path / "没有"))
     with pytest.raises(cadfile.CadError, match="另存为 DXF"):
         cadfile.to_dxf(proj, src, "12" * 32, "a.dwg")
+
+
+def test_twisted_viewport_window():
+    """实测的图：布局视口转了 90°，目标点在模型空间远处（看到的是 x 102023~127793、y 5635~66313 的轴网）。"""
+    v = dwg.Viewport("S-2001", 0, 0, 72500 / 100, 58400 / 100, -22107.4, -62204.6, 58400, 90, 182999.2, 13641.8)
+    x0, y0, x1, y1 = v.window()
+    assert [round(x0), round(y0), round(x1), round(y1)] == [91595, -501, 149995, 71999]
+    px, py = v.to_paper(120794.6, 35749.2)  # 范围中心落在视口中心
+    assert abs(px) < 1e-6 and abs(py) < 1e-6
+
+
+def test_title_tag_is_not_a_frame():
+    """模型空间里的“图签块”只是图名旁边的小标签（JUDUL 层），图上的字铺得远比它大：不当图框。"""
+    texts = [dwg.Text("KOLOM K1", x, y, dwg.MODEL) for x, y in ((0, 0), (60000, 0), (0, 40000), (60000, 40000))]
+    tag = dwg.Sheet(dwg.MODEL, {"drawing_no": "S-3002C"}, {}, [("NO", "S-3002C")], texts, (30000, -3000, 33000, -2000))
+    assert "region" not in cadfile._region(dwg.Drawing(), tag) and "小标签" in cadfile._region(dwg.Drawing(), tag)["note"]
+    frame = dwg.Sheet(dwg.MODEL, {"drawing_no": "S-1"}, {}, [("NO", "S-1")], texts, (-1000, -5000, 61000, 41000))
+    assert cadfile._region(dwg.Drawing(), frame) == {"region": [[-1000, -5000, 61000, 41000]]}
+
+
+def _insert(name: str, handle: str) -> list[str]:
+    return ["0", "INSERT", "5", handle, "8", "TNOT", "2", name, "10", "0", "20", "0", "30", "0"]
+
+
+def test_anonymous_block_names_are_put_back(tmp_path, monkeypatch):
+    """dwg2dxf 把动态块的参照写成“*U”（块定义叫 *U4、*U6）：用 dwgread 读出的块名补回；补不了的 cad_file 提醒。"""
+    body = ["0", "SECTION", "2", "BLOCKS", "0", "BLOCK", "2", "*U4", "70", "1", "0", "ENDBLK",
+            "0", "BLOCK", "2", "*U6", "70", "1", "0", "ENDBLK", "0", "ENDSEC",
+            "0", "SECTION", "2", "ENTITIES", *_insert("*U", "1A"), *_insert("*U", "1B"), *_insert("*U4", "1C"),
+            "0", "ENDSEC", "0", "EOF"]
+    dxf = tmp_path / "a.dxf"
+    dxf.write_text("\n".join(body) + "\n")
+    lines = dxf.read_bytes().split(b"\n")
+    assert [h for _line, h in cadfile.broken_blocks(lines)] == [0x1A, 0x1B]
+    monkeypatch.setattr(cadfile.dwg, "insert_blocks", lambda src: {0x1A: "*U6", 0x1C: "*U4"})
+    assert cadfile.fix_anonymous_blocks(dxf, tmp_path / "a.dwg") == 1
+    lines = dxf.read_bytes().split(b"\n")
+    assert [h for _line, h in cadfile.broken_blocks(lines)] == [0x1B]  # 0x1B 在 DWG 里也找不到，留着
+    assert b"*U6" in lines[lines.index(b"1A") + 4]
+
+
+def test_check_basis_short_values_need_their_own_line(cad_project):
+    """轴号、短编号（3、A、H1）：整行就是它才算对得上，不能因为“1:100”里有个 1 就算。"""
+    kit = Toolkit(cad_project)
+    r14 = kit.cad_file("建施-14")
+    base = {"sheet": "建施-14", "rev": r14["rev"], "page_id": r14["page_id"]}
+    got = kit.check_basis([{"element": "轴 3", **base, "value": "3"}, {"element": "轴 1", **base, "value": "1"}])
+    by = {x["element"]: x for x in got["items"]}
+    assert any("单独写着“3”" in c for c in by["轴 3"].get("checked", []))
+    assert any("找不到单独写着“1”" in c for c in by["轴 1"]["reasons"])
