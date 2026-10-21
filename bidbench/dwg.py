@@ -1215,10 +1215,43 @@ def unread(con, again: bool = False) -> list:
     return [tuple(r) for r in rows]
 
 
+def _sheet_key(no: str | None, render_hash: str) -> tuple:
+    return ("no", no.upper()) if no else ("hash", render_hash)
+
+
+def _old_indexes(con, sha: str) -> dict[tuple, int]:
+    """重读以前，这个文件每张图用的页号：按图号认，没有图号的按内容指纹认。"""
+    out: dict[tuple, int] = {}
+    for idx, h, data in con.execute("SELECT p.page_index, p.render_hash, r.data FROM pages p LEFT JOIN recognitions r"
+                                    " ON r.page_id = p.page_id WHERE p.file_sha256=? ORDER BY p.page_index", (sha,)):
+        no = ((json.loads(data).get("title_block") or {}).get("drawing_no") or {}).get("value") if data else None
+        out.setdefault(_sheet_key(no, h), idx)
+    return out
+
+
+def _indexes(sheets: list, kept: dict[tuple, int]) -> list[int]:
+    """每张图的页号。重读时同一张图留原来的页号（建模依据、人工决定记的是页号，读法改了、多认或少认一张图，
+    别的图的页号不能跟着变）；新认出的图接在用过的页号后面。"""
+    want = [kept.get(_sheet_key(_norm_no(s.fields["drawing_no"]) if s.fields.get("drawing_no") else None, page_hash(s)))
+            for s in sheets]
+    used, out = set(), []
+    for w in want:
+        out.append(w if w is not None and w not in used else None)
+        if out[-1] is not None:
+            used.add(w)
+    top = max([*kept.values(), *used, 0])
+    for i, n in enumerate(out):
+        if n is None:
+            top += 1
+            out[i] = top
+    return out
+
+
 def save(con, sha: str, path: str, batch: int, d: Drawing | None, error: str | None, now: str) -> int:
     """一个文件读的结果写进项目：每张图一页（pages）和一份识别结果（recognitions）；读不出的记进收图问题。
     同一个文件以前读过的先删掉（重读）。返回读出几张图。"""
     from .pdfpages import page_id
+    kept = _old_indexes(con, sha)
     old = [r[0] for r in con.execute("SELECT page_id FROM pages WHERE file_sha256=?", (sha,))]
     con.executemany("DELETE FROM recognitions WHERE page_id=?", [(x,) for x in old])
     con.execute("DELETE FROM pages WHERE file_sha256=?", (sha,))
@@ -1231,7 +1264,7 @@ def save(con, sha: str, path: str, batch: int, d: Drawing | None, error: str | N
     elif d is not None and d.partial:
         con.execute("INSERT INTO extraction_issues(batch_seq, path, kind, detail) VALUES (?,?,?,?)",
                     (batch, path, "cad_partial", PARTIAL))
-    for n, s in enumerate(sheets, 1):
+    for n, s in zip(_indexes(sheets, kept), sheets):
         pid = page_id(sha, n)
         w, h = page_size(s)
         text = sheet_text(s)
