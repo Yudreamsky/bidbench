@@ -82,15 +82,24 @@ bidbench 负责“看图”（该看哪些图、现行版、引用、缺图、�
 bidbench 一节用“接到 Codex”写入，Revit 一节照 revit-mcp 的 `clients/codex-config.example.toml` 加上（要建模把
 `REVIT_MCP_PROFILE` 设成含 `modeling`）。两节互不影响，一个 Codex 两边都能调用。
 
-翻模的顺序：
+翻模的顺序（Revit MCP 的 Skill“CAD 翻模”也是这个顺序）：
 
-1. `find_sheets_for_task` 找到这一层这个专业的主图。
-2. `cad_file(图号)` 拿到这张图现行版的 DXF：DWG 用安装包附带的 LibreDWG（dwg2dxf）转好，放在项目的 `exports/dxf`。
-   返回里 `where` 是这张图在模型空间还是哪个布局，`same_file_sheets` 是同一个 DWG 里的其他图（翻模只取这一块），
-   `xrefs` 是外部参照（轴网、底图常在里面，收到了的也转好）。只有 PDF 的图会报错，可以列进答疑。
-3. Revit MCP 的 `read_cad(dxf)` 看图层，和你确认哪层是轴网、柱、墙、梁，再 `cad_to_model` 翻模。
-4. 每个构件把依据（图号、版次、`page_id`，`cad_file` 返回里都有）记进 `建模依据.json`。
-5. 检查的 Codex：Revit MCP 的 `compare_cad_with_model` 对几何，bidbench 的 `check_basis` 对出处和版本。
+1. **先建轴网和标高，你确认了再建构件。** 骨架错了后面全错。
+   - 标高：`find_sheets_for_task(keyword="标高 层高")`、`list_facts(group="楼层")` 找到层高表、结构层楼面标高表和剖面，
+     建筑标高、结构标高分清（常差一个面层厚度，不是冲突），对不上的列进答疑；再用 Revit MCP 的 `create_levels_bulk` 建。
+   - 轴网：结构主图（柱平面、梁平法图）的 DXF 用 `cad_to_model(build=["grids"])` 只建轴网；只有 PDF 的，按图上的开间、进深
+     用 `create_grid_system` 建。建完用 `compare_cad_with_model` 核对轴网。
+2. `find_sheets_for_task` 找到这一层这个专业的主图。
+3. `cad_file(图号)` 拿到这张图现行版的 DXF：DWG 用安装包附带的 LibreDWG（dwg2dxf）转好，放在项目的 `exports/dxf`。
+   返回里 `region` 是这张图在 DXF 模型空间里的范围（一个 DWG 里排了几张图、或者按布局出图时，只有这一块是这张图），
+   `read_cad`、`cad_to_model`、`compare_cad_with_model` 都要带上同一个 `region`，不然同一个文件里的其他图（`same_file_sheets`）也会被读进去；
+   框不出范围时 `region_note` 说该怎么办。`where` 是这张图在模型空间还是哪个布局，`xrefs` 是外部参照（轴网、底图常在里面，收到了的也转好）。
+   只有 PDF 的图会报错，可以列进答疑。
+4. Revit MCP 的 `read_cad(dxf, region=...)` 看图层，和你确认哪层是轴网、柱、墙、梁，再 `cad_to_model` 翻模；
+   `basis` 填 `cad_file` 返回的图号、版次、`page_id`，建出来的构件会记下依据。
+5. 建完用 Revit MCP 的 `export_model_basis` 从模型导出 `建模依据.json`（每个构件的图号、版次、`page_id`、尺寸），交给 `check_basis`。
+6. 检查的 Codex：Revit MCP 的 `compare_cad_with_model` 对几何，bidbench 的 `check_basis` 对出处和版本。
+   图纸升版后，再导出一次 `建模依据.json` 交给 `check_basis`，“要复核”的就是受影响的构件。
 
 
 

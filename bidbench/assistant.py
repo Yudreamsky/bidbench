@@ -308,8 +308,10 @@ class Toolkit:
         except cadfile.CadError as e:
             raise ToolError(str(e)) from None
         out["hint"] = ("dxf 是本机文件路径，交给 Revit MCP 的 read_cad 先看图层、和用户确认，再 cad_to_model 翻模，"
-                       "建完用 compare_cad_with_model 核对。same_file_sheets 是同一个文件里的其他图：翻模时只取 where 那一块；"
-                       "xrefs 是外部参照（轴网、底图常在里面），要一起叠上。构件依据写这张图的图号、版次和 page_id。")
+                       "建完用 compare_cad_with_model 核对；三个工具都要带上 region（这张图在模型空间里的范围），"
+                       "不然同一个文件里的其他图（same_file_sheets）也会被读进去。没有 region 又有 region_note 的，照 region_note 说的办。"
+                       "xrefs 是外部参照（轴网、底图常在里面），要一起叠上。"
+                       "构件依据写这张图的图号、版次和 page_id：cad_to_model 的 basis 填 {sheet, rev, page_id}。")
         return out
 
     def check_basis(self, items: list[dict]) -> dict:

@@ -425,11 +425,12 @@ def _dxf(pairs) -> list[str]:
     return out
 
 
-def cad_dxf(sheets=(), layouts=(), xrefs=()) -> bytes:
+def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=()) -> bytes:
     """一个 DXF（2007 格式，UTF-8）。sheets：模型空间里一排图框，每个 {no, title, rev, date, texts: [(x, y, 字)],
     callouts: [(x, y, 详图号, 所在图号)], tags: 属性名}；layouts：[(布局名, 图签属性 {属性名: 值} 或 None, [(x, y, 字)])]，
     布局里没有图签块时，图签写成普通文字（Revit 导出的图常这样）；xrefs：[(参照名, 绑定了没有, 布局名或 None, x, y)]，
-    附着的参照块记着参照文件的路径，绑定进来的参照里面的块改名成“参照名$0$原名”。"""
+    附着的参照块记着参照文件的路径，绑定进来的参照里面的块改名成“参照名$0$原名”；
+    viewports：[(布局名, 视口在布局上的中心 x, y, 宽, 高, 看到的模型空间中心 x, y, 高)]。"""
     tags = ("图号", "图名", "版次", "日期", "比例")
     lines = _dxf([(0, "SECTION"), (2, "HEADER"), (9, "$ACADVER"), (1, "AC1021"), (0, "ENDSEC"),
                   (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (8, 0), (2, "TK"), (70, 2), (10, 0), (20, 0), (30, 0)])
@@ -467,6 +468,9 @@ def cad_dxf(sheets=(), layouts=(), xrefs=()) -> bytes:
             lines += insert("TK", 0, 0, list(attrs.items()), space=name)
         for x, y, tx in texts:
             lines += text(x, y, tx, space=name)
+    for k, (space, cx, cy, w, h, vx, vy, vh) in enumerate(viewports):
+        lines += _dxf([(0, "VIEWPORT"), (8, 0), (67, 1), (410, space), (10, cx), (20, cy), (30, 0), (40, w), (41, h),
+                       (69, k + 2), (12, vx), (22, vy), (45, vh)])
     for name, _bound, space, x, y in xrefs:
         lines += _dxf([(0, "INSERT"), (8, 0), *([(67, 1), (410, space)] if space else []), (2, name), (10, x), (20, y), (30, 0)])
     lines += _dxf([(0, "ENDSEC"), (0, "EOF")])
@@ -484,6 +488,7 @@ def build_cad(out: Path) -> tuple[Path, str]:
     - 建施-04 三层平面图：PDF 是 A 版，DXF 是 B 版——DXF 是现行版；
     - 建施-13~14 楼梯详图：一个 DXF 的模型空间里排了两张图，各有图签；建施-14 的索引符号指向缺的建施-15；
     - PRJ1-A-701、A-702 核心筒放大图：一个 DXF 两个布局，图签属性名是自己编的（KD0105、JUDUL1/JUDUL2）；
+      各有一个视口看模型空间的一块（翻模时只取这一块）；
     - A-150 平面图：布局里的图签是普通文字（“Sheet No.”旁边写图号）；
     - 坏文件.dxf：二进制 DXF，读不出，按文件名暂定；
     - 外部参照：建施-03、建施-04 都附着了“标准层柱网”，A-701、A-702 都绑定了“核心筒-1”——共用参照的图连起来。"""
@@ -507,7 +512,8 @@ def build_cad(out: Path) -> tuple[Path, str]:
              [(60, 200, "CORE 1"), (60, 180, "REFER TO A-150 FOR SETTING OUT")]),
             ("A-702", {"KD0105": "PRJ1-A-702", "JUDUL1": "ENLARGED CORE", "JUDUL2": "PLAN 2", "SKALA": "1:50"},
              [(60, 200, "CORE 2")])],
-            xrefs=[("核心筒-1", True, "A-701", 100, 100), ("核心筒-1", True, "A-702", 100, 100)]),
+            xrefs=[("核心筒-1", True, "A-701", 100, 100), ("核心筒-1", True, "A-702", 100, 100)],
+            viewports=[("A-701", 200, 150, 300, 200, 15000, 10000, 20000), ("A-702", 200, 150, 300, 200, 45000, 10000, 20000)]),
         "建筑/A-150 平面图.dxf": cad_dxf(layouts=[
             ("Sheet", None, [(700, 40, "Sheet No."), (730, 40, "A-150"), (700, 60, "Drawing Title"),
                              (700, 52, "GENERAL ARRANGEMENT PLAN - LEVEL 12"), (100, 100, "OFFICE")])]),

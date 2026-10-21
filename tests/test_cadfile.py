@@ -33,8 +33,14 @@ def test_cad_file_for_sheets(cad_project):
     assert kit.cad_file("建施-04")["dxf"] == r["dxf"]  # 第二次直接用
     r3 = kit.cad_file("建施-03")  # 现行页是 PDF，配成一份的 DXF 同为 B 版
     assert r3["rev"] == "B" and r3["dxf"].endswith(".dxf") and "warning" not in r3
-    assert kit.cad_file("建施-13")["same_file_sheets"] == ["建施-14"]
-    assert kit.cad_file("PRJ1-A-701")["where"] == "布局“A-701”"
+    assert r["region"] == [[0, 0, 420, 297]] and "region_note" not in r  # 图框以外的东西不读
+    r13, r14 = kit.cad_file("建施-13"), kit.cad_file("建施-14")
+    assert r13["same_file_sheets"] == ["建施-14"] and r13["dxf"] == r14["dxf"]
+    assert r13["region"] == [[0, 0, 420, 297]] and r14["region"] == [[500, 0, 920, 297]]  # 各取自己的图框
+    a701 = kit.cad_file("PRJ1-A-701")
+    assert a701["where"] == "布局“A-701”" and a701["region"] == [[0, 0, 30000, 20000]]  # 视口看到的模型空间
+    assert kit.cad_file("PRJ1-A-702")["region"] == [[30000, 0, 60000, 20000]]
+    assert kit.cad_file("A-150")["region_note"].startswith("这张图画在布局上")  # Revit MCP 读不到布局上的图
     with pytest.raises(ToolError, match="没有收到 DWG 或 DXF|没有图号"):
         kit.cad_file("建施-15")  # 缺图
 

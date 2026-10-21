@@ -84,6 +84,7 @@ class Viewport:
     vx: float       # 看到的模型空间：中心、高
     vy: float
     vh: float
+    twist: float = 0.0  # 视口里的图转了多少度（DXF 组码 51）；只有翻模取范围时用
 
     def window(self) -> tuple:
         vw = self.vh * self.w / self.h
@@ -485,7 +486,7 @@ def from_dxf_pairs(pairs: list[tuple[str, str]]) -> Drawing:
         elif kind == "VIEWPORT":
             if space != MODEL and get("69") != "1":  # 编号 1 是布局本身那个视口
                 vp = Viewport(space, _f(get("10")), _f(get("20")), _f(get("40")), _f(get("41")),
-                              _f(get("12")), _f(get("22")), _f(get("45")))
+                              _f(get("12")), _f(get("22")), _f(get("45")), _f(get("51")))
                 if vp.w > 0 and vp.h > 0 and vp.vh > 0:
                     d.viewports.append(vp)
             last = None
