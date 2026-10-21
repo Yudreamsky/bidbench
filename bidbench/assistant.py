@@ -392,7 +392,9 @@ class Toolkit:
                             and (i["target"].get("sheet") == sheet["no"] or sheet["no"] in i.get("sheets", []))):
                         review.append(f"这张图有未处理的问题：{i['title']}")
                 value = str(it.get("value") or "").strip()
-                if value and pid and not fail:
+                if value.startswith("推断"):  # Revit MCP 翻模时没有标注、按附近推断的尺寸：图上本来就没有，要人确认
+                    review.append(f"{value}：图上没有标注，尺寸是推断的，待确认（补标注或答疑）")
+                elif value and pid and not fail:
                     review_or_ok = self._value_on_page(str(pid), it.get("bbox"), value)
                     (ok if review_or_ok[0] else review).append(review_or_ok[1])
             status = "不合格" if fail else ("要复核" if review else "对得上")
@@ -430,6 +432,10 @@ class Toolkit:
             row = con.execute("SELECT text FROM pages WHERE page_id=?", (page_id,)).fetchone()
         if row and squash(value) in squash(row["text"]):
             return True, f"{where}这一页的文字里有“{value}”（位置要对照原图）"
+        parts = [x for x in value.split() if len(squash(x)) >= 3]
+        page = squash(detail) + squash(row["text"] if row else "")
+        if len(parts) >= 2 and all(squash(x) in page for x in parts):  # 图上分几处写的（板标注“T=140mm”“EL.+138.600”两行）
+            return True, f"{where}这一页的文字里分开写着“{'”“'.join(parts)}”（位置要对照原图）"
         return False, f"{where}这一页的识别内容和文字里都没有“{value}”，要打开原图看"
 
     # ---------------- 查询：事实、问题 ----------------

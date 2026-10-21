@@ -163,3 +163,14 @@ def test_check_basis_finds_a_sheet_by_its_file_name_and_takes_no_revision(cad_pr
     got = kit.check_basis([{"element": "L12 墙", "sheet": "A-150", "page_id": page, "value": "LEVEL 12"}])["items"][0]
     assert got["status"] == "对得上", got
     assert any("本身没有版次" in c for c in got["checked"])
+
+
+def test_check_basis_value_in_parts_and_inferred_sizes(cad_project):
+    """板标注图上分两行写（建模依据连成一行、顺序可能反过来）：几段都在就算对得上；翻模推断的尺寸直接要复核。"""
+    kit = Toolkit(cad_project)
+    page = kit.get_sheet("S-3036")["current_page_id"]
+    base = {"sheet": "S-3036", "rev": "A0", "page_id": page}
+    got = kit.check_basis([{"element": "板", **base, "value": "indicated FLOOR OFFICE"},
+                           {"element": "核心筒梁", **base, "value": "推断 300x650（同一区域……；把握中）"}])["items"]
+    assert got[0]["status"] == "对得上" and any("分开写着" in c for c in got[0]["checked"])
+    assert got[1]["status"] == "要复核" and any("推断的，待确认" in r for r in got[1]["reasons"])
