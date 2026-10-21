@@ -425,14 +425,14 @@ def _dxf(pairs) -> list[str]:
     return out
 
 
-def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=(), frames=()) -> bytes:
+def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=(), frames=(), model_texts=()) -> bytes:
     """一个 DXF（2007 格式，UTF-8）。sheets：模型空间里一排图框，每个 {no, title, rev, date, texts: [(x, y, 字)],
     callouts: [(x, y, 详图号, 所在图号)], tags: 属性名}；layouts：[(布局名, 图签属性 {属性名: 值} 或 None, [(x, y, 字)])]，
     布局里没有图签块时，图签写成普通文字（Revit 导出的图常这样）；xrefs：[(参照名, 绑定了没有, 布局名或 None, x, y)]，
     附着的参照块记着参照文件的路径，绑定进来的参照里面的块改名成“参照名$0$原名”；
     viewports：[(布局名, 视口在布局上的中心 x, y, 宽, 高, 看到的中心 x, y（视图坐标）, 高[, 扭转角, 目标点 x, y])]；
     frames：[(布局名, [(x, y, 标签)])]，Revit 导出的图框：标签写在图框块的块定义里（没有属性），插在布局的 (0, 0)，
-    值是布局上散放的文字（写在 layouts 里）。"""
+    值是布局上散放的文字（写在 layouts 里）；model_texts：[(x, y, 字)]，模型空间里不在图框里的字（梁的尺寸标注这类）。"""
     tags = ("图号", "图名", "版次", "日期", "比例")
     lines = _dxf([(0, "SECTION"), (2, "HEADER"), (9, "$ACADVER"), (1, "AC1021"), (0, "ENDSEC"),
                   (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (8, 0), (2, "TK"), (70, 2), (10, 0), (20, 0), (30, 0)])
@@ -479,13 +479,18 @@ def cad_dxf(sheets=(), layouts=(), xrefs=(), viewports=(), frames=()) -> bytes:
             lines += text(x, y, tx, space=name)
     for k, (space, _labels) in enumerate(frames):
         lines += _dxf([(0, "INSERT"), (8, 0), (67, 1), (410, space), (2, f"TB-FRAME-{k}"), (10, 0), (20, 0), (30, 0)])
-    for space in dict.fromkeys(v[0] for v in viewports):  # dwg2dxf 的写法：布局本身的视口在前，编号都写 1
-        lines += _dxf([(0, "VIEWPORT"), (8, 0), (67, 1), (410, space), (10, TB_W / 2), (20, TB_H / 2), (30, 0), (40, TB_W),
-                       (41, TB_H), (69, 1), (12, TB_W / 2), (22, TB_H / 2), (45, TB_H)])
-        for _space, cx, cy, w, h, vx, vy, vh, *turn in (v for v in viewports if v[0] == space):
+    for x, y, tx in model_texts:
+        lines += text(x, y, tx)
+    for space in dict.fromkeys(v[0] for v in viewports):
+        # dwg2dxf 的写法：编号都写 1；布局本身的视口是 12×9 的默认视口、看的高却是 12，夹在浮动视口中间
+        own = _dxf([(0, "VIEWPORT"), (8, 0), (67, 1), (410, space), (10, 6), (20, 4.5), (30, 0), (40, 12),
+                    (41, 9), (69, 1), (12, 6), (22, 4.5), (45, 12)])
+        for k, (_space, cx, cy, w, h, vx, vy, vh, *turn) in enumerate(v for v in viewports if v[0] == space):
             twist, tx, ty = turn or (0, 0, 0)
             lines += _dxf([(0, "VIEWPORT"), (8, 0), (67, 1), (410, space), (10, cx), (20, cy), (30, 0), (40, w), (41, h),
                            (69, 1), (12, vx), (22, vy), (17, tx), (27, ty), (37, 0), (45, vh), (51, twist)])
+            if k == 0:
+                lines += own
     for name, _bound, space, x, y in xrefs:
         lines += _dxf([(0, "INSERT"), (8, 0), *([(67, 1), (410, space)] if space else []), (2, name), (10, x), (20, y), (30, 0)])
     lines += _dxf([(0, "ENDSEC"), (0, "EOF")])
@@ -508,6 +513,9 @@ def build_cad(out: Path) -> tuple[Path, str]:
     - PRJ-3036 标准层平面图：Revit 导出的图框，“Sheet No.”这些标签在图框块的块定义里（“Sheet”“No.”分两行写），
       值散放在布局上、写在标签下面那一格的中间，图号写成“-S-3036”（文件名用项目代号，图签是 S-3036）；
       修改记录的表头在布局上，A0 这一行却写死在图框块里、在表头上面（Revit 的表头在下、行往上长）；
+      主视口看模型空间的结构平面（梁的尺寸标注 300x700 在模型空间），另一个视口看一块大样；模型空间里还留着复制图框带过来的
+      旧图签块 S-3002C（布局有自己的图签，它不算一张图）；
+    - PRJ-3008 核心筒平面图：原文件和 AutoCAD 修复出来的副本（_recover），都是 A0、内容有一点不同，算同一份，用原文件；
     - 坏文件.dxf：二进制 DXF，读不出，按文件名暂定；
     - 外部参照：建施-03、建施-04 都附着了“标准层柱网”，A-701、A-702 都绑定了“核心筒-1”——共用参照的图连起来。"""
     root = out / CAD_NAME
@@ -544,7 +552,15 @@ def build_cad(out: Path) -> tuple[Path, str]:
             frames=[("Layout1", [(700, 64, "Sheet"), (700, 61.5, "No."), (700, 90, "Sheet Name"), (700, 36, "Date"),
                                  (700, 33.3, "Drawn"), (731, 36, "Rev Date"), (762, 36, "Revision"), (700, 49, "Stage"),
                                  (700, 26, "Scale"), (712, 26, "Drawn By"), (737, 26, "Checked"),
-                                 (700, 160.6, "A0"), (708, 160.6, "15/12/2025"), (725, 160.6, "FOR INFORMATION")])]),
+                                 (700, 160.6, "A0"), (708, 160.6, "15/12/2025"), (725, 160.6, "FOR INFORMATION")])],
+            sheets=[{"no": "S-3002C", "title": "OLD FRAME", "rev": "A", "date": "2024-01-01"}],
+            model_texts=[(30000, -30000, "KL12 300x700"), (31000, -35000, "T=150mm"), (105000, 4200, "DETAIL 1")],
+            viewports=[("Layout1", 400, 260, 700, 500, 28000, -37000, 56000),
+                       ("Layout1", 720, 500, 120, 90, 104800, 4200, 2300)]),
+        "结构/PRJ-3008 核心筒平面图.dxf": cad_dxf([{"no": "S-3008", "title": "CORE PLAN", "rev": "A0", "date": "2025-12-15",
+                                                "texts": [(50, 250, "CORE"), (60, 200, "SHAFT")]}]),
+        "结构/PRJ-3008 核心筒平面图_recover.dxf": cad_dxf([{"no": "S-3008", "title": "CORE PLAN", "rev": "A0", "date": "2025-12-15",
+                                                        "texts": [(50, 250, "CORE")]}]),
         "建筑/坏文件.dxf": b"AutoCAD Binary DXF\r\n\x1a\x00" + b"\x00" * 64,
     }
     for rel, data in files.items():

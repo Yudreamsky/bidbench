@@ -184,6 +184,22 @@ def test_revit_frame_labels_in_the_block_and_values_on_the_layout(cad_project):
     assert [(r["revision"], r["date"], r["description"]) for r in tb["revision_history"]] == [("A0", "15/12/2025", "FOR INFORMATION")]
     assert "PRJ-3036" not in sheets
     assert not [i for i in st["issues"] if i["id"] == "name:S-3036"]
+    # dwg2dxf 的视口：编号都是 1，布局本身是 12×9 的默认视口（看的高 12）、夹在中间；主视口看到的模型空间字归这张图
+    text = cad_project.connect().execute("SELECT text FROM pages WHERE page_id=?", (s["current_page"],)).fetchone()[0]
+    assert "KL12 300x700" in text and "DETAIL 1" in text
+    assert "S-3002C" not in sheets  # 模型空间里留下来的旧图签块：布局有自己的图签，不算一张图
+
+
+def test_autocad_recover_copy_is_the_same_drawing(cad_project):
+    """AutoCAD 修复出来的副本（图名_recover.dxf）和原文件同版次、内容有一点不同：算同一份，用原文件，不报冲突、不报改图未升版。"""
+    st = state.build(cad_project)
+    s = next(x for x in st["sheets"] if x["no"] == "S-3008")
+    assert s["status"] != "conflict" and [v["state"] for v in s["versions"]] == ["现行"]
+    assert all("_recover" not in p for p in s["versions"][0]["paths"][:1])
+    page = cad_project.connect().execute(
+        "SELECT o.path FROM pages p JOIN occurrences o ON o.sha256 = p.file_sha256 WHERE p.page_id=?", (s["current_page"],)).fetchone()[0]
+    assert not page.endswith("_recover.dxf")
+    assert not [i for i in st["issues"] if i["target"].get("sheet") == "S-3008" and i["kind"] in ("版本冲突", "改图未升版")]
 
 
 def test_cad_xrefs_and_callout_marks(cad_project):
@@ -393,16 +409,21 @@ def test_split_title_blocks_and_nested_grid_bubbles():
 
 
 def test_layout_sheet_gets_model_text_seen_by_its_viewport():
-    """模型空间自己有一张图（只是个小图签标签），布局又按视口看模型空间：视口看得到的字也算布局那张图的，
-    照样留在模型空间那张图上；图签块里没有线的，cad_file 说它只是个标签。"""
+    """布局按视口看模型空间：视口看得到的字算布局那张图的。布局有自己的图签时，模型空间里留下来的图签块（复制图框带过来的
+    旧图号 S-3002C）不算一张图；布局只有布局名时，模型空间那张照样算，字也照样留在上面；图签块里没有线的，cad_file 说它只是个标签。"""
     d = dwg.Drawing(spaces=[dwg.MODEL, "S-2001"])
     d.inserts = [dwg.Insert("TAG", 5000, 5000, 1, 1, 0, dwg.MODEL, [("DRAWING_NO", "S-3002C", 5000, 5000)]),
                  dwg.Insert("TB", 0, 0, 1, 1, 0, "S-2001", [("DRAWING_NO", "S-2001", 90, 5)])]
     d.texts = [dwg.Text("A", 50, 150, dwg.MODEL), dwg.Text("1", 150, 50, dwg.MODEL), dwg.Text("KOLOM K1", 5100, 5100, dwg.MODEL)]
     d.viewports = [dwg.Viewport("S-2001", 50, 50, 100, 100, 100, 100, 200)]
     by = {s.fields["drawing_no"]: s for s in dwg.split_sheets(d)}
+    assert list(by) == ["S-2001"]
     layout = sorted(t.text for t in by["S-2001"].texts)
     assert layout == ["1", "A"] and all(t.space == "S-2001" for t in by["S-2001"].texts)
+
+    d.inserts = d.inserts[:1]  # 布局上没有图签，图号只能用布局名
+    by = {s.fields["drawing_no"]: s for s in dwg.split_sheets(d)}
+    assert set(by) == {"S-3002C", "S-2001"} and by["S-2001"].how == "布局名"
     assert {"A", "1", "KOLOM K1"} <= {t.text for t in by["S-3002C"].texts}
     assert "小标签" in cadfile._region(d, by["S-3002C"])["note"]
 

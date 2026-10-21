@@ -331,7 +331,8 @@ class Toolkit:
         """建模依据核对：模型里每个构件写了依据哪张图哪一版、哪一页哪块地方、读到的数值，逐条对照现在的图纸。
 
         items 每条：element（构件名，必填）、sheet（图号，必填）、rev（用的版次）、page_id、bbox、value（从图上读的数值或文字）、
-        notices_applied（已经按它改过的变更单编号）。结果每条一个 status：对得上 / 要复核 / 不合格，reasons 写为什么。
+        notices_applied（已经按它改过的变更单编号）、needs_value（图上应有标注的构件，如梁、板：value 空着算要复核）。
+        结果每条一个 status：对得上 / 要复核 / 不合格，reasons 写为什么。
         只读：清单由建模的 agent 自己保存在它的工作文件夹里，图纸升版后再核一遍就知道哪些构件受影响。
         """
         if not isinstance(items, list) or not items:
@@ -394,13 +395,18 @@ class Toolkit:
                 value = str(it.get("value") or "").strip()
                 if value.startswith("推断"):  # Revit MCP 翻模时没有标注、按附近推断的尺寸：图上本来就没有，要人确认
                     review.append(f"{value}：图上没有标注，尺寸是推断的，待确认（补标注或答疑）")
+                elif value.startswith("按填充"):  # 这块板自己没有标注，厚度、标高按同样填充的另一块板
+                    review.append(f"{value}：这块板上没有标注，厚度、标高是按同样填充的板定的，待确认")
+                elif not value and it.get("needs_value"):  # 梁、板图上有标注，依据原文空着就什么也没核对
+                    review.append("没写依据原文（value）：图上的尺寸、板标注没有核对")
                 elif value and pid and not fail:
                     review_or_ok = self._value_on_page(str(pid), it.get("bbox"), value)
                     (ok if review_or_ok[0] else review).append(review_or_ok[1])
             status = "不合格" if fail else ("要复核" if review else "对得上")
             count[status] += 1
             rows.append({"element": element or None, "sheet": sheet["no"] if sheet else it.get("sheet"),
-                         "status": status, "reasons": fail + review, **({"checked": ok} if ok else {})})
+                         "status": status, "reasons": fail + review, **({"checked": ok} if ok else {}),
+                         **({"revit_id": it["revit_id"]} if it.get("revit_id") is not None else {})})  # Revit MCP 写回构件用
         return {"summary": count, "items": rows,
                 "hint": "“不合格”的构件没有可靠依据，要改；“要复核”的逐条看 reasons，用 locate(page_id, bbox) 回到原图核对。"
                         "图纸升版、收到变更单后，把整份清单再核一遍，就知道哪些构件受影响。"}

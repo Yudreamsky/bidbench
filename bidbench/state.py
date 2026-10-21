@@ -591,9 +591,25 @@ def _is_cad(p: PageRec) -> bool:
     return bool(p.rec) and p.rec["run"]["executor"] == dwg.EXECUTOR
 
 
+RECOVER = re.compile(r"[\s_\-]*(?:recover(?:ed)?|恢复)$", re.I)  # AutoCAD 修复出来的副本：图名_recover.dwg
+
+
+def _stems(p: PageRec) -> set[str]:
+    return {re.split(r"[/\\]", x)[-1].rsplit(".", 1)[0].strip().lower() for x in p.paths}
+
+
+def _recovered(p: PageRec) -> bool:
+    """这一页只出自 AutoCAD 修复出来的副本（图名_recover.dwg）。"""
+    return all(RECOVER.search(x) for x in _stems(p))
+
+
 def _fits(group: list, p: PageRec) -> bool:
-    """同一版次里，这一页和这一份是不是同一份：同是 PDF（或同是 DWG）的比内容；DWG 和 PDF 配成一份（DWG 转出的 PDF）。"""
+    """同一版次里，这一页和这一份是不是同一份：同是 PDF（或同是 DWG）的比内容；DWG 和 PDF 配成一份（DWG 转出的 PDF）。
+    AutoCAD 修复出来的副本（图名_recover.dwg）和原文件算同一份（修复会改动内容，比不出一样）。"""
     same = [x for x in group if _is_cad(x) == _is_cad(p)]
+    if any({RECOVER.sub("", n) for n in _stems(x)} & {RECOVER.sub("", n) for n in _stems(p)} and _recovered(x) != _recovered(p)
+           for x in same):
+        return True
     return _same_content(same[0], p) if same else True
 
 
@@ -908,7 +924,7 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
                     if not g.get("date"):
                         g.update(_page_date(p, n))
             for g in groups:
-                g["pages"].sort(key=_is_cad)  # DWG 和 PDF 配成一份的，用 PDF 看图、导出
+                g["pages"].sort(key=lambda x: (_is_cad(x), _recovered(x)))  # 配成一份的用 PDF 看图、导出；修复副本排在原文件后面
             revisions.append({"rev": raw_rev[n], "norm": n, "key": rev_key(n) if n != "?" else None,
                               "family": _rev_family(n), "date": max((g["date"] for g in groups if g.get("date")), default=None),
                               "first_batch": min(p.first_batch for p in plist), "groups": groups})

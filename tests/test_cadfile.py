@@ -174,3 +174,11 @@ def test_check_basis_value_in_parts_and_inferred_sizes(cad_project):
                            {"element": "核心筒梁", **base, "value": "推断 300x650（同一区域……；把握中）"}])["items"]
     assert got[0]["status"] == "对得上" and any("分开写着" in c for c in got[0]["checked"])
     assert got[1]["status"] == "要复核" and any("推断的，待确认" in r for r in got[1]["reasons"])
+    # 按同样填充定厚度的板、依据原文空着的梁板（Revit MCP 标 needs_value）：什么也没核对，要复核；墙这类不标的照旧
+    got = kit.check_basis([{"element": "板", **base, "value": "按填充 FP_2（同 T=150mm EL.+138.600）"},
+                           {"element": "梁", **base, "needs_value": True, "revit_id": 102},
+                           {"element": "墙", **base}])["items"]
+    assert got[0]["status"] == "要复核" and any("同样填充" in r for r in got[0]["reasons"])
+    assert got[1]["status"] == "要复核" and any("没写依据原文" in r for r in got[1]["reasons"])
+    assert got[1]["revit_id"] == 102 and "revit_id" not in got[2]  # 原样带回，Revit MCP 写回构件用
+    assert not any("依据原文" in r for r in got[2]["reasons"])
