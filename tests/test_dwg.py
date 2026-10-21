@@ -172,12 +172,16 @@ def test_cad_sheets_join_ledger(cad_project):
 
 
 def test_revit_frame_labels_in_the_block_and_values_on_the_layout(cad_project):
-    """Revit 导出的图框：“Sheet No.”这些标签在块定义里，值散放在布局上，图号写成“-S-3036”；文件名用项目代号 PRJ-3036。
-    修改记录只有表头：没有版次。文件名只是前缀不同，不报“文件名不符”。"""
+    """Revit 导出的图框：“Sheet No.”这些标签在块定义里（分两行写），值散放在标签下面那一格，图号写成“-S-3036”；
+    文件名用项目代号 PRJ-3036。修改记录 A0 那一行写死在图框块里、表头上面。文件名只是前缀不同，不报“文件名不符”。"""
     st = state.build(cad_project)
     sheets = {s["no"]: s for s in st["sheets"]}
     s = sheets["S-3036"]
-    assert s["status"] != "guess" and s["title"] == "TYPICAL OFFICE FLOOR PLAN" and s["current_rev"] == "?"
+    assert s["status"] != "guess" and s["title"] == "TYPICAL OFFICE FLOOR PLAN" and s["current_rev"] == "A0"
+    tb = json.loads(cad_project.connect().execute(
+        "SELECT data FROM recognitions WHERE page_id=?", (s["current_page"],)).fetchone()[0])["title_block"]
+    assert tb["scale"]["value"] == "As indicated" and tb["issue_date"]["value"] == "03/05/24"  # 不是旁边格子里的 Rn
+    assert [(r["revision"], r["date"], r["description"]) for r in tb["revision_history"]] == [("A0", "15/12/2025", "FOR INFORMATION")]
     assert "PRJ-3036" not in sheets
     assert not [i for i in st["issues"] if i["id"] == "name:S-3036"]
 

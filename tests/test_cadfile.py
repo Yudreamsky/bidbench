@@ -153,9 +153,13 @@ def test_check_basis_short_values_need_their_own_line(cad_project):
 
 
 def test_check_basis_finds_a_sheet_by_its_file_name_and_takes_no_revision(cad_project):
-    """以前按文件名暂定时记下的依据（PRJ-3036、没写版次），图签读出来是 S-3036、本来就没有版次：对得上。"""
+    """以前按文件名暂定时记下的依据（PRJ-3036）找得到图签读出的 S-3036；图本身没有版次（A-150）、依据也没写的，对得上。
+    构件的数值在 DWG 页面的文字里也算找到（350x850 和 350×850 一样）。"""
     kit = Toolkit(cad_project)
     page = kit.get_sheet("S-3036")["current_page_id"]
-    got = kit.check_basis([{"element": "L30 梁", "sheet": "PRJ-3036", "page_id": page}])["items"][0]
+    got = kit.check_basis([{"element": "L30 梁", "sheet": "PRJ-3036", "rev": "A0", "page_id": page, "value": "OFFICE"}])["items"][0]
     assert got["sheet"] == "S-3036" and got["status"] == "对得上", got
+    page = kit.get_sheet("A-150")["current_page_id"]
+    got = kit.check_basis([{"element": "L12 墙", "sheet": "A-150", "page_id": page, "value": "LEVEL 12"}])["items"][0]
+    assert got["status"] == "对得上", got
     assert any("本身没有版次" in c for c in got["checked"])

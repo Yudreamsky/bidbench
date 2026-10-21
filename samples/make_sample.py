@@ -505,8 +505,9 @@ def build_cad(out: Path) -> tuple[Path, str]:
     - PRJ1-A-701、A-702 核心筒放大图：一个 DXF 两个布局，图签属性名是自己编的（KD0105、JUDUL1/JUDUL2）；
       各有一个视口看模型空间的一块（翻模时只取这一块），A-702 的视口转了 90°；按 dwg2dxf 的写法，视口编号都是 1；
     - A-150 平面图：布局里的图签是普通文字（“Sheet No.”旁边写图号）；
-    - PRJ-3036 标准层平面图：Revit 导出的图框，“Sheet No.”这些标签在图框块的块定义里，值散放在布局上，图号写成“-S-3036”
-      （文件名用项目代号，图签是 S-3036）；这一期“仅供参考”，修改记录只有表头、没有行（本来就没有版次）；
+    - PRJ-3036 标准层平面图：Revit 导出的图框，“Sheet No.”这些标签在图框块的块定义里（“Sheet”“No.”分两行写），
+      值散放在布局上、写在标签下面那一格的中间，图号写成“-S-3036”（文件名用项目代号，图签是 S-3036）；
+      修改记录的表头在布局上，A0 这一行却写死在图框块里、在表头上面（Revit 的表头在下、行往上长）；
     - 坏文件.dxf：二进制 DXF，读不出，按文件名暂定；
     - 外部参照：建施-03、建施-04 都附着了“标准层柱网”，A-701、A-702 都绑定了“核心筒-1”——共用参照的图连起来。"""
     root = out / CAD_NAME
@@ -536,11 +537,14 @@ def build_cad(out: Path) -> tuple[Path, str]:
             ("Sheet", None, [(700, 40, "Sheet No."), (730, 40, "A-150"), (700, 60, "Drawing Title"),
                              (700, 52, "GENERAL ARRANGEMENT PLAN - LEVEL 12"), (100, 100, "OFFICE")])]),
         "结构/PRJ-3036 标准层平面图.dxf": cad_dxf(
-            layouts=[("Layout1", None, [(700, 55, "-S-3036"), (700, 75, "TYPICAL OFFICE FLOOR PLAN"), (700, 25, "03/05/24"),
-                                        (730, 45, "FOR INFORMATION"), (790, 30, "Rn"), (700, 150, "REV"), (712, 150, "DATE"),
-                                        (730, 150, "DESCRIPTION"), (100, 100, "OFFICE")])],
-            frames=[("Layout1", [(700, 60, "Sheet No."), (700, 80, "Sheet Name"), (700, 30, "Date"), (760, 30, "Revision"),
-                                 (730, 50, "Stage")])]),
+            layouts=[("Layout1", None, [(702, 56, "-S-3036"), (703, 84, "TYPICAL OFFICE FLOOR PLAN"), (715, 31, "03/05/24"),
+                                        (731, 47, "FOR INFORMATION"), (707, 20, "As"), (701, 17, "indicated"), (730, 20, "Rn"),
+                                        (754, 20, "DA"), (702, 155, "REV"), (708, 155, "DATE"), (724, 155, "DESCRIPTION"),
+                                        (100, 100, "OFFICE")])],
+            frames=[("Layout1", [(700, 64, "Sheet"), (700, 61.5, "No."), (700, 90, "Sheet Name"), (700, 36, "Date"),
+                                 (700, 33.3, "Drawn"), (731, 36, "Rev Date"), (762, 36, "Revision"), (700, 49, "Stage"),
+                                 (700, 26, "Scale"), (712, 26, "Drawn By"), (737, 26, "Checked"),
+                                 (700, 160.6, "A0"), (708, 160.6, "15/12/2025"), (725, 160.6, "FOR INFORMATION")])]),
         "建筑/坏文件.dxf": b"AutoCAD Binary DXF\r\n\x1a\x00" + b"\x00" * 64,
     }
     for rel, data in files.items():
