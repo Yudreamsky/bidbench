@@ -100,8 +100,9 @@ def discipline_of(no: str) -> str:
     if role:
         return role
     short = no.count("-") <= 2  # 只凭英文首字母认专业只对 A-101 这类短图号；四段以上的图号，第一段是项目代码
+    letter = re.match(r"[A-Z](?![A-Z])", no)  # 第一段只有一个字母（A-101、A101、S2-01）；ATB-3008 的 ATB 是项目代码
     for prefix, name in DISCIPLINES:
-        if no.startswith(prefix) and (short or not prefix.isascii()):
+        if no.startswith(prefix) and (not prefix.isascii() or (short and letter)):
             return name
     return "其他"
 

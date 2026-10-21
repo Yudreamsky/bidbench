@@ -254,3 +254,12 @@ def test_shared_xref_relation(drill, monkeypatch):
     out = Toolkit(drill).related_sheets("建施-02", types=["共用参照"])
     assert [(r["no"], r["via"][0]["text"]) for r in out["sheets"]] == [("建施-03", "CORE - 1F~4F")]
     assert navigate.shared_xrefs(with_xrefs(drill)) == {"CORE - 1F~4F": ["建施-02", "建施-03"]}
+
+
+def test_keywords_match_english_and_indonesian_titles():
+    """中文关键词找得到英文、印尼文图名，反过来也行；英文缩写按整词认。"""
+    assert navigate._hit("柱", "COLUMN LAYOUT PLAN") and navigate._hit("柱", "DENAH KOLOM LT.5")
+    assert navigate._hit("轴网", "GRID & COLUMN PLAN") and navigate._hit("COLUMN", "三层柱平面布置图")
+    assert navigate._hit("墙", "COREWALL DETAIL") and navigate._hit("剖面", "POTONGAN A-A")
+    assert not navigate._hit("轴网", "GLASS SCHEDULE")  # AS 不算 GLASS 里的
+    assert navigate._hit("平面", "TYPICAL FLOOR PLAN") and not navigate._hit("平面", "PLANTER DETAIL")

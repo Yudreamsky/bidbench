@@ -93,7 +93,7 @@ bidbench 一节用“接到 Codex”写入，Revit 一节照 revit-mcp 的 `clie
 3. `cad_file(图号)` 拿到这张图现行版的 DXF：DWG 用安装包附带的 LibreDWG（dwg2dxf）转好，放在项目的 `exports/dxf`。
    返回里 `region` 是这张图在 DXF 模型空间里的范围（一个 DWG 里排了几张图、或者按布局出图时，只有这一块是这张图），
    `read_cad`、`cad_to_model`、`compare_cad_with_model` 都要带上同一个 `region`，不然同一个文件里的其他图（`same_file_sheets`）也会被读进去；
-   框不出范围时 `region_note` 说该怎么办。`where` 是这张图在模型空间还是哪个布局，`xrefs` 是外部参照（轴网、底图常在里面，收到了的也转好）。
+   框不出范围时 `region_note` 说该怎么办；`dxf_warning` 说 DXF 里丢了块（多半是动态块的轴号），要在 AutoCAD 里另存 DXF。`where` 是这张图在模型空间还是哪个布局，`xrefs` 是外部参照（轴网、底图常在里面，收到了的也转好）。
    只有 PDF 的图会报错，可以列进答疑。
 4. Revit MCP 的 `read_cad(dxf, region=...)` 看图层，和你确认哪层是轴网、柱、墙、梁，再 `cad_to_model` 翻模；
    `basis` 填 `cad_file` 返回的图号、版次、`page_id`，建出来的构件会记下依据。
@@ -128,7 +128,9 @@ bidbench 一节用“接到 Codex”写入，Revit 一节照 revit-mcp 的 `clie
 建模的 AI 不用一张张翻卡片，按这个顺序查：
 
 1. `find_sheets_for_task(floor, discipline, keyword)`：例如 `floor="3F", discipline="结构", keyword="梁"`。
-   楼层可以写 3F、3层、三层、B1、屋面，或项目图名里的写法（Level 03）；关键词几个用空格隔开。
+   楼层可以写 3F、3层、三层、B1、屋面，或项目图名里的写法（Level 03）；关键词几个用空格隔开，
+   中文、英文、印尼文的常用词互相找得到（柱 = COLUMN = KOLOM，墙 = WALL = DINDING，梁 = BEAM = BALOK，
+   轴网 = GRID = AS，标高 = LEVEL = EL，剖面 = SECTION = POTONGAN，平面 = PLAN = DENAH……，`bidbench/navigate.py` 的 `SYNONYMS`）。
    每张图有 `role`：
 
    | role | 是什么 |

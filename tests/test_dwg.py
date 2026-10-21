@@ -89,6 +89,7 @@ def test_read_dwg_with_fake_tool(tmp_path, monkeypatch):
     f.write_bytes(b"AC1015")
     assert dwg.find_tool() == str(tool)
     assert len(dwg.split_sheets(dwg.read_dwg(f))) == 3
+    assert dwg.insert_blocks(f) == {65: "TB", 76: "TB"}  # 每个块参照用的块：给 dwg2dxf 写丢的匿名块名补回
 
     tool.write_text("#!/bin/sh\nexit 1\n")
     with pytest.raises(dwg.ReadError, match="读不出"):
@@ -248,3 +249,42 @@ def test_layout_name_as_sheet_number():
     lines = data.decode("utf-8").splitlines()
     recs = _recs(dwg.from_dxf_pairs([(lines[i].strip(), lines[i + 1]) for i in range(0, len(lines) - 1, 2)]))
     assert _no(recs[0]) == "A-224" and "布局名" in recs[0]["content"]["summary"]
+
+
+def _pairs(*groups) -> list[tuple[str, str]]:
+    flat = [x for g in groups for x in g]
+    return [(str(flat[i]), str(flat[i + 1])) for i in range(0, len(flat), 2)]
+
+
+def test_split_title_blocks_and_nested_grid_bubbles():
+    """实测的印尼图：图签拆成两个块（ATT KOP 写图号 NOGBR、图名；STATUS KOP 写版次 REV、日期 TGL），合成一张图；
+    轴号是轴网块里套着的轴号圈块的属性（AS），也读出来，check_basis 才能按轴号核对。"""
+    def ins(name, x, y, attrs=(), space="S-2001", rot=0):
+        out = [0, "INSERT", 8, "0", *([67, 1, 410, space] if space else []), 66, 1 if attrs else 0, 2, name,
+               10, x, 20, y, 30, 0, 50, rot]
+        for k, (tag, val) in enumerate(attrs):
+            out += [0, "ATTRIB", 8, "0", 10, x + 10, 20, y + 5 * k, 30, 0, 40, 2.5, 1, val, 2, tag, 70, 0]
+        return out + ([0, "SEQEND", 8, "0"] if attrs else [])
+    pairs = _pairs(
+        [0, "SECTION", 2, "BLOCKS"],
+        [0, "BLOCK", 8, "0", 2, "ATT KOP", 70, 2, 10, 0, 20, 0],
+        [0, "LINE", 8, "0", 10, 0, 20, 0, 11, 840, 21, 0], [0, "LINE", 8, "0", 10, 840, 20, 0, 11, 840, 21, 594],
+        [0, "ENDBLK", 8, "0"],
+        [0, "BLOCK", 8, "0", 2, "BUBBLE", 70, 2, 10, 0, 20, 0], [0, "ENDBLK", 8, "0"],
+        [0, "BLOCK", 8, "0", 2, "*U4", 70, 1, 10, 0, 20, 0],  # 动态块：一根轴线，两头各一个轴号圈
+        [0, "LINE", 8, "CENTER", 10, 0, 20, 0, 11, 0, 21, 30000],
+        ins("BUBBLE", 0, -800, [("AS", "3")], space=None), ins("BUBBLE", 0, 30800, [("AS", "3")], space=None),
+        [0, "ENDBLK", 8, "0"],
+        [0, "ENDSEC"], [0, "SECTION", 2, "ENTITIES"],
+        ins("ATT KOP", 0, 0, [("NOGBR", "S-2001"), ("JUDUL2", "STRUCTURAL SECTION"), ("SCALE", "1:200")]),
+        ins("STATUS KOP", 700, 20, [("REV", "A0"), ("TGL", "2026-09-30"), ("DES", "FOR TENDER")]),
+        ins("*U4", 100000, 0, space=None),
+        [0, "ENDSEC"], [0, "EOF"])
+    d = dwg.from_dxf_pairs(pairs)
+    sheets = dwg.split_sheets(d)
+    assert len(sheets) == 1
+    f = sheets[0].fields
+    assert f["drawing_no"] == "S-2001" and f["revision"] == "A0" and f["issue_date"] == "2026-09-30"
+    bubbles = [i for i in d.inserts if i.nested]
+    assert [(round(i.x), round(i.y), i.attrs[0][1]) for i in bubbles] == [(100000, -800, "3"), (100000, 30800, "3")]
+    assert not any(dwg.is_title_block(i) for i in bubbles)

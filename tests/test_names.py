@@ -172,3 +172,11 @@ def test_recognize_on_demand(named, monkeypatch):
     task = recognition.latest_task(named)
     items = json.loads((task / "manifest_in.json").read_text(encoding="utf-8"))["pages"]
     assert [it["page_id"] for it in items] == want
+
+
+def test_project_code_is_not_a_discipline_letter():
+    """ATB-3008：第一段 ATB 是项目代码，不按首字母 A 认成建筑；放在 Structure 文件夹里的按文件夹认结构。"""
+    assert state.discipline_of("ATB-3008") == "其他"
+    assert state.discipline_of("A-101") == "建筑" and state.discipline_of("S2-01") == "结构"
+    assert names.words_discipline("Structure - DSP") == "结构" and names.words_discipline("Gambar Struktur") == "结构"
+    assert names.words_discipline("For Information Structure_CAD") == "结构"
