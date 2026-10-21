@@ -31,7 +31,7 @@ from . import debuglog, names, proc
 log = logging.getLogger(__name__)
 
 EXECUTOR = "dwg"
-INSTRUCTION_VERSION = "dwg-6"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
+INSTRUCTION_VERSION = "dwg-7"  # 认图签、分图的规则改了就加 1；按旧规则读的文件下次读 DWG（收图后、点“读 DWG”）时自动重读
 ATTR_CONF = 0.95  # 图签块属性：图上原样写的，把握高
 NEAR_CONF = 0.75  # 按位置配对的图签文字、按值认的图号、布局名：中
 TEXT_CONF = 0.7   # 从文字里找出的引用、目录行：中
@@ -710,6 +710,11 @@ def _no_value(v: str) -> str:
     return re.sub(r"^[-－—–_\s]+", "", v or "")
 
 
+def _th(*texts) -> float:
+    """字高，配位置用：没写字高的按 2.5；图框里的小字（1 mm 上下）按 2 算，不然格子、行距都太窄。"""
+    return max(max((t.h for t in texts), default=0.0) or 2.5, 2.0)
+
+
 def _labelish(t: str) -> bool:
     """标签、两个标签连写的（“Rev Date”）、表头（“DESCRIPTION”）：不当别的标签的值。"""
     t = t.strip()
@@ -728,7 +733,7 @@ def _merge_fragments(texts: list) -> list:
         group = [t]
         for j in range(i + 1, len(rows)):
             u, last = rows[j], group[-1]
-            h = max(last.h, u.h) or 2.5
+            h = _th(last, u)
             if (j not in used and abs(u.x - last.x) <= max(1.0, h * 0.5) and 0 < last.y - u.y <= h * 2.0
                     and len(u.text) <= 20 and not re.search(r"\d", last.text + u.text)):
                 group.append(u)
@@ -765,7 +770,7 @@ def _static(t) -> bool:
 
 def _right_edge(lab, statics: list) -> float:
     """这个标签的格子到哪：同一行右边下一个标签。"""
-    h = lab.h or 2.5
+    h = _th(lab)
     return min((o.x for o in statics if o is not lab and abs(o.y - lab.y) <= h * 0.8 and o.x > lab.x + h), default=math.inf)
 
 
@@ -789,7 +794,7 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
                     best = (0.0, rest, None, lab)
                     break
                 continue
-            h = lab.h or 2.5
+            h = _th(lab)
             edge = _right_edge(lab, statics)
             for t in texts:
                 if t is lab or _static(t) or _labelish(t.text) or len(t.text) > 120 or t.x >= edge:
@@ -811,7 +816,7 @@ def label_fields(texts: list) -> tuple[dict[str, str], dict[str, float]]:
         if best:
             value, t0, lab = best[1], best[2], best[3]
             if role in CELL_LINES and t0 is not None:
-                h = max(t0.h, lab.h) or 2.5
+                h = _th(t0, lab)
                 edge, prev = _right_edge(lab, statics), t0
                 for u in sorted(texts, key=lambda u: -u.y):  # 同一格里接着往下写的几行
                     if (u is not t0 and not _static(u) and lab.x - h * 2 <= u.x < edge
@@ -830,7 +835,7 @@ def schedule_rows(texts: list) -> list[dict]:
     """修改记录表：表头“REV | DATE | DESCRIPTION”同一行，版次一格一格挨着往上或往下排（Revit 的表头在下、行往上长）。
     返回从表头往外的各行 {revision, date, description}，离表头最远的是最新一版。"""
     for head in sorted((t for t in texts if REV_HEAD.match(t.text.strip())), key=lambda t: (-t.y, t.x)):
-        h = head.h or 2.5
+        h = _th(head)
         row = sorted((t for t in texts if t is not head and abs(t.y - head.y) <= h * 0.8 and t.x > head.x), key=lambda t: t.x)
         date_h = next((t for t in row if DATE_HEAD.match(t.text.strip())), None)
         desc_h = next((t for t in row if DESC_HEAD.match(t.text.strip())), None)
