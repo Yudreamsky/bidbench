@@ -68,7 +68,7 @@ def test_dwg_converted_with_dwg2dxf(tmp_path, monkeypatch):
     monkeypatch.setattr(cadfile.dwg, "timeout_for", lambda size: 0.5)
     with pytest.raises(cadfile.CadError, match="太久"):
         cadfile.to_dxf(proj, src, "ef" * 32, "慢.dwg")
-    assert sorted(p.name for p in cadfile.out_dir(proj).iterdir()) == ["结施-04 三层梁-abababab.dxf"]  # 没写完的删掉
+    assert sorted(p.name for p in cadfile.out_dir(proj).iterdir()) == ["结施-04 三层梁-abababab.blocks", "结施-04 三层梁-abababab.dxf"]  # 没写完的删掉
 
     monkeypatch.setenv("BIDBENCH_DWG2DXF", str(tmp_path / "没有"))
     with pytest.raises(cadfile.CadError, match="另存为 DXF"):
@@ -97,21 +97,48 @@ def _insert(name: str, handle: str) -> list[str]:
     return ["0", "INSERT", "5", handle, "8", "TNOT", "2", name, "10", "0", "20", "0", "30", "0"]
 
 
+def _anon_dxf(path: Path) -> Path:
+    """dwg2dxf 转出的样子：块记录表里写着 *U4、*U6（句柄 A1、A2），块定义也在，块参照却写成“*U”。"""
+    body = ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "BLOCK_RECORD",
+            "0", "BLOCK_RECORD", "5", "A1", "2", "*U4", "0", "BLOCK_RECORD", "5", "A2", "2", "*U6",
+            "0", "BLOCK_RECORD", "5", "A3", "2", "*U9", "0", "ENDTAB", "0", "ENDSEC",
+            "0", "SECTION", "2", "BLOCKS", "0", "BLOCK", "330", "A1", "2", "*U4", "70", "1", "0", "ENDBLK",
+            "0", "BLOCK", "330", "A2", "2", "*U6", "70", "1", "0", "ENDBLK", "0", "ENDSEC",
+            "0", "SECTION", "2", "ENTITIES", *_insert("*U", "1A"), *_insert("*U", "1B"), *_insert("*U", "1D"),
+            *_insert("*U4", "1C"), "0", "ENDSEC", "0", "EOF"]
+    path.write_text("\n".join(body) + "\n")
+    return path
+
+
 def test_anonymous_block_names_are_put_back(tmp_path, monkeypatch):
-    """dwg2dxf 把动态块的参照写成“*U”（块定义叫 *U4、*U6）：用 dwgread 读出的块名补回；补不了的 cad_file 提醒。"""
-    body = ["0", "SECTION", "2", "BLOCKS", "0", "BLOCK", "2", "*U4", "70", "1", "0", "ENDBLK",
-            "0", "BLOCK", "2", "*U6", "70", "1", "0", "ENDBLK", "0", "ENDSEC",
-            "0", "SECTION", "2", "ENTITIES", *_insert("*U", "1A"), *_insert("*U", "1B"), *_insert("*U4", "1C"),
-            "0", "ENDSEC", "0", "EOF"]
-    dxf = tmp_path / "a.dxf"
-    dxf.write_text("\n".join(body) + "\n")
+    """dwgread 读出的块名也是“*U”：只用它给的块记录句柄，名字到 DXF 自己的块记录表里找；名字没有块定义的不算补上。"""
+    dxf = _anon_dxf(tmp_path / "a.dxf")
     lines = dxf.read_bytes().split(b"\n")
-    assert [h for _line, h in cadfile.broken_blocks(lines)] == [0x1A, 0x1B]
-    monkeypatch.setattr(cadfile.dwg, "insert_blocks", lambda src: {0x1A: "*U6", 0x1C: "*U4"})
+    assert [h for _line, h in cadfile.broken_blocks(lines)] == [0x1A, 0x1B, 0x1D]
+    monkeypatch.setattr(cadfile.dwg, "insert_blocks", lambda src: {0x1A: 0xA2, 0x1C: 0xA1, 0x1D: 0xA3})
     assert cadfile.fix_anonymous_blocks(dxf, tmp_path / "a.dwg") == 1
     lines = dxf.read_bytes().split(b"\n")
-    assert [h for _line, h in cadfile.broken_blocks(lines)] == [0x1B]  # 0x1B 在 DWG 里也找不到，留着
-    assert b"*U6" in lines[lines.index(b"1A") + 4]
+    assert [h for _line, h in cadfile.broken_blocks(lines)] == [0x1B, 0x1D]  # 1B 在 DWG 里找不到；1D 的 *U9 没有块定义
+    assert lines[lines.index(b"1A") + 4] == b"*U6"
+    assert cadfile.fix_anonymous_blocks(dxf, tmp_path / "a.dwg") == 0  # 再跑一遍不会出错
+
+
+def test_old_cached_dxf_is_fixed_again(tmp_path, monkeypatch):
+    """以前转好的 DXF 是旧办法补的（还是“*U”）：下次用到时再补一遍，算好的范围作废；补过一次就不再读 DWG。"""
+    proj = Project.init(tmp_path / "p", "x")
+    src = tmp_path / "blob.dwg"
+    src.write_bytes(b"AC1015")
+    cadfile.out_dir(proj).mkdir(parents=True)
+    out = _anon_dxf(cadfile.out_dir(proj) / "结施-04-abababab.dxf")
+    stale = out.with_name(out.stem + ".regions.json")
+    stale.write_text("{}")
+    calls = []
+    monkeypatch.setattr(cadfile.dwg, "insert_blocks", lambda s: calls.append(s) or {0x1A: 0xA2, 0x1B: 0xA1})
+    assert cadfile.to_dxf(proj, src, "ab" * 32, "结施-04.dwg") == out
+    assert [h for _line, h in cadfile.broken_blocks(out.read_bytes().split(b"\n"))] == [0x1D]
+    assert not stale.exists() and len(calls) == 1
+    cadfile.to_dxf(proj, src, "ab" * 32, "结施-04.dwg")
+    assert len(calls) == 1
 
 
 def test_check_basis_short_values_need_their_own_line(cad_project):
