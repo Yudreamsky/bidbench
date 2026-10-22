@@ -194,6 +194,32 @@ def cmd_connect_codex(args):
     print("重新打开 Codex（命令行、桌面版或编辑器插件）后就能用 bidbench 的工具；输入 /mcp 可以查看。")
 
 
+def cmd_chatgpt(args):
+    from . import chatgpt
+    if args.action == "logout":
+        r = chatgpt.logout()
+        print({True: "已退出 ChatGPT 账号，OpenAI 那边的授权也已吊销。",
+               False: "已退出，本机的登录信息已删除；但没能确认 OpenAI 那边已吊销，可以到 ChatGPT 设置里断开 bidbench。",
+               None: "本来就没有登录。"}[r["revoked"]])
+        return
+    if args.action == "login":
+        lg = chatgpt.start_login(new_account=args.new_account)
+        print("已在浏览器里打开 ChatGPT 的授权页。没有自动打开的话，复制下面的网址到浏览器：")
+        print(lg.url)
+        print("等你在浏览器里登录、同意……（最多等十分钟，Ctrl+C 取消）")
+        lg.wait()
+        lg.close()
+        if lg.error:
+            sys.exit(f"错误：{lg.error}")
+    st = chatgpt.status()
+    if not st["signed_in"]:
+        print("还没有用 ChatGPT 账号登录。登录：bidbench chatgpt login")
+        return
+    print(f"已用 ChatGPT 账号登录：{st['email'] or '（没有邮箱）'}")
+    print(st["hint"] or "识别、智能分类会直接调用 OpenAI 模型，用 ChatGPT 套餐的额度，不再经过 Codex 命令行。")
+    print(f"用量：{st['usage_url']}")
+
+
 def cmd_proposals(args):
     from .assistant import Toolkit
     rows = Toolkit(_proj(args), source="命令行").list_proposals("all" if args.all else "pending")
@@ -621,6 +647,11 @@ def main(argv=None):
     s = sub.add_parser("connect-codex", help="把这个项目接到本机的 Codex（写进 ~/.codex/config.toml）")
     s.add_argument("--print", action="store_true", help="只显示要写的设置，不写")
     s.set_defaults(fn=cmd_connect_codex)
+
+    s = sub.add_parser("chatgpt", help="用 ChatGPT 账号登录：识别、分类直接调用 OpenAI 模型，用套餐额度，不用装 Codex")
+    s.add_argument("action", nargs="?", default="status", choices=["login", "logout", "status"])
+    s.add_argument("--new-account", action="store_true", help="换个账号登录（重新登记）")
+    s.set_defaults(fn=cmd_chatgpt)
 
     s = sub.add_parser("proposals", help="查看 AI 助手的提议")
     s.add_argument("--all", action="store_true", help="包括已处理的提议")

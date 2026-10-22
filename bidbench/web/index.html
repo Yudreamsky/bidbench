@@ -2188,7 +2188,7 @@ async function renderRecognizePick(title, pages) {
   const R = RECOG || { claude: { ready: APP && APP.claude_ready }, codex: { ready: false, hint: '读不到 Codex 的状态' }, prefs: {} };
   const pref = R.prefs || {};
   const executor = el('select', { 'aria-label': '识别方式' },
-    el('option', { value: 'codex' }, 'Codex（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费）'));
+    el('option', { value: 'codex' }, 'ChatGPT 账号（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费）'));
   executor.value = pref.executor || (R.codex.ready ? 'codex' : 'claude');
   const tier = el('select', { 'aria-label': '档位' },
     el('option', { value: 'economy' }, '经济档'), el('option', { value: 'strong' }, '强档（加局部切片，看得更细）'));
@@ -2467,7 +2467,38 @@ function renderReceive() {
     el('p', { class: 'meta' }, APP.antivirus ? `收图时会用 ${APP.antivirus} 扫描新文件。` : '本机没有找到杀毒软件，只做静态检查。'));
 }
 
-/* 识别：Codex（ChatGPT 订阅）或 Claude API；可以选模型，记住上次的选择 */
+/* ChatGPT 账号登录：登录后识别、分类直接调用 OpenAI 模型（套餐额度），不经过 Codex 命令行。
+   在浏览器里打开授权页，登录结果回到本机；这里每两秒查一次，登录完了调用 done() 刷新面板。 */
+async function chatgptLogin(done, newAccount) {
+  const r = await api('/api/app/chatgpt/login', { new_account: !!newAccount });
+  if (!r.ok) return;
+  toast('已在浏览器里打开 ChatGPT 的授权页，登录并同意后回到这里');
+  for (let i = 0; i < 300; i++) {
+    await new Promise(res => setTimeout(res, 2000));
+    let st;
+    try { st = await (await fetch('/api/chatgpt')).json(); } catch (e) { continue; }
+    if (st.login && st.login.running) continue;
+    if (st.login && st.login.error) toast(st.login.error); else if (st.ready) toast('已用 ChatGPT 账号登录' + (st.email ? '：' + st.email : ''));
+    break;
+  }
+  done();
+}
+async function chatgptLogout(done) {
+  const r = await api('/api/app/chatgpt/logout', {});
+  if (r.ok) toast(r.data.revoked === false ? '已退出；没能确认 OpenAI 那边已吊销，可以到 ChatGPT 设置里断开 bidbench' : '已退出 ChatGPT 账号');
+  done();
+}
+function chatgptBox(g, done) {
+  g = g || {};
+  const btn = (text, fn, primary) => el('button', { class: 'btn' + (primary ? ' primary' : ''), type: 'button', style: 'margin-left:8px', onclick: fn }, text);
+  if (g.ready) return el('p', { class: 'meta' }, `已用 ChatGPT 账号登录${g.email ? '（' + g.email + '）' : ''}：直接调用 OpenAI 模型，用套餐额度，不经过 Codex 命令行。`,
+    btn('退出登录', () => chatgptLogout(done)), btn('换个账号', () => chatgptLogin(done, true)));
+  if (g.signed_in) return el('div', { class: 'note warn' }, g.hint || '登录时没有同意使用 ChatGPT 套餐额度。', btn('重新登录', () => chatgptLogin(done), true), btn('退出登录', () => chatgptLogout(done)));
+  return el('div', { class: 'note' }, '用 ChatGPT 账号登录后，直接调用 OpenAI 模型，不用装 Codex（Plus、Pro 等套餐，额度和 ChatGPT 共用）。',
+    btn('用 ChatGPT 登录', () => chatgptLogin(done), true));
+}
+
+/* 识别：ChatGPT 账号（直连或经本机 Codex）或 Claude API；可以选模型，记住上次的选择 */
 let RECOG = null;
 async function renderRecognize(refresh) {
   const back = el('button', { class: 'btn', type: 'button', onclick: clearAll }, '← 问题中心');
@@ -2478,7 +2509,7 @@ async function renderRecognize(refresh) {
   const R = RECOG || { claude: { ready: APP.claude_ready, models: [], defaults: {} }, codex: { ready: false, models: [], hint: '读不到 Codex 的状态' }, prefs: {} };
   const pref = R.prefs || {};
   const executor = el('select', { id: 'rg-exec', 'aria-label': '识别方式' },
-    el('option', { value: 'codex' }, 'Codex（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费）'));
+    el('option', { value: 'codex' }, 'ChatGPT 账号（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费）'));
   executor.value = pref.executor || (R.codex.ready ? 'codex' : 'claude');
   const scope = el('select', { id: 'rg-scope', 'aria-label': '识别范围' },
     [['new', '新页面（默认）'], ['weak', '识别不完整的页面'], ['conflict', '涉及冲突的页面'], ['all', '全部页面']].map(([v, t]) => el('option', { value: v }, t)));
@@ -2499,12 +2530,14 @@ async function renderRecognize(refresh) {
     model.replaceChildren(...opts.map(([v, t]) => el('option', { value: v }, t)));
     model.value = opts.some(o => o[0] === keep) ? keep : '';
     if (ex === 'codex') {
+      const direct = info.backend === 'chatgpt';
       box.replaceChildren(...[  // replaceChildren 会把 null 显示成文字，先去掉
-        info.ready ? el('p', { class: 'meta' }, `本机的 Codex ${info.version}，已登录 ChatGPT 账号。`)
+        chatgptBox(info.chatgpt, () => renderRecognize(true)),
+        direct ? null : info.ready ? el('p', { class: 'meta' }, `现在用本机的 Codex ${info.version}（已登录 ChatGPT 账号）。`)
           : el('div', { class: 'note warn' }, info.hint || 'Codex 还不能用。',
             el('button', { class: 'btn', type: 'button', onclick: () => renderRecognize(true), style: 'margin-left:8px' }, '重新检查')),
         info.ready && info.hint ? el('div', { class: 'note warn' }, info.hint) : null,
-        el('div', { class: 'note' }, '图纸页面会通过 Codex 发送给 OpenAI 识别。图纸涉密时，先确认这符合项目的保密要求。每页约半分钟到一分钟，占用 ChatGPT 账号的 Codex 额度。')].filter(Boolean));
+        el('div', { class: 'note' }, `图纸页面会${direct ? '' : '通过 Codex '}发送给 OpenAI 识别。图纸涉密时，先确认这符合项目的保密要求。每页约半分钟到一分钟，占用 ChatGPT 账号的额度。`)].filter(Boolean));
       go.textContent = '估算用时';
     } else {
       box.replaceChildren(...[
@@ -2537,7 +2570,7 @@ async function renderClassify() {
     : `已分好图纸 ${c.sheets_done}/${c.sheets} 张、事实 ${c.facts_done}/${c.facts} 条。上次用 ${CLS_BY[c.last.executor] || c.last.executor}`
       + `${c.last.model ? '（' + c.last.model + '）' : ''}，${c.last.at.slice(0, 16).replace('T', ' ')}。`;
   const executor = el('select', { id: 'cl-exec', 'aria-label': '分类方式' },
-    el('option', { value: 'codex' }, 'Codex（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费，一般几美分）'));
+    el('option', { value: 'codex' }, 'ChatGPT 账号（用你的 ChatGPT 订阅，不另外花钱）'), el('option', { value: 'claude' }, 'Claude API（按量付费，一般几美分）'));
   executor.value = (R.prefs || {}).executor || (R.codex.ready ? 'codex' : 'claude');
   const redo = el('input', { type: 'checkbox', id: 'cl-redo' });
   const box = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
@@ -2545,11 +2578,12 @@ async function renderClassify() {
   const fill = () => {
     const ex = executor.value, info = R[ex] || {};
     box.replaceChildren(...[  // replaceChildren 会把 null 显示成文字，先去掉
+      ex === 'codex' ? chatgptBox(info.chatgpt, renderClassify) : null,
       ex === 'codex' && !info.ready ? el('div', { class: 'note warn' }, info.hint || 'Codex 还不能用。',
         el('button', { class: 'btn', type: 'button', onclick: renderClassify, style: 'margin-left:8px' }, '重新检查')) : null,
       ex === 'claude' && !info.ready ? el('div', { class: 'note warn' }, '还没有设置 Claude API 密钥。',
         el('button', { class: 'btn', type: 'button', onclick: renderSettings, style: 'margin-left:8px' }, '去设置')) : null,
-      el('div', { class: 'note' }, `只把图号、图名、所在文件夹和事实的名称、示例数值发给 ${ex === 'codex' ? 'OpenAI（通过 Codex）' : 'Anthropic'}，`
+      el('div', { class: 'note' }, `只把图号、图名、所在文件夹和事实的名称、示例数值发给 ${ex === 'codex' ? 'OpenAI' : 'Anthropic'}，`
         + '不发图纸页面。几百张图一般几分钟，分好一批左边就更新一批。')].filter(Boolean));
     go.disabled = !info.ready;
   };
@@ -2586,6 +2620,8 @@ function renderSettings() {
     el('div', { class: 'ptitle' }, el('h2', {}, '设置'), el('p', { class: 'meta' }, '保存在本机用户目录，更新和重装都不会丢。')),
     field('Claude API 密钥', key, '在 console.anthropic.com 创建。只存在这台电脑上，页面不会再显示它。'),
     field('下载加速前缀', prefix, '在国内下载更新慢时填写，会加在 GitHub 下载地址前面。'),
+    field('ChatGPT 账号', chatgptBox(st.chatgpt, async () => { APP = await (await fetch('/api/app')).json(); renderSettings(); }),
+      '登录后识别、智能分类直接调用 OpenAI 模型，用 ChatGPT 套餐的额度；登录信息只存在这台电脑上。AI 助手仍用本机的 Codex。'),
     el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => save({}) }, '保存'),
       st.api_key_hint ? el('button', { class: 'btn', type: 'button', onclick: () => save({ api_key: '' }) }, '删除密钥') : null),
     section('关于', el('p', { class: 'meta' }, VER ? `bidbench ${VER.version}${VER.build ? '（构建 b' + VER.build + '）' : ''}${VER.commit ? ' · ' + VER.commit : ''}` : ''),

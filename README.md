@@ -209,10 +209,31 @@ LibreDWG 是 GPLv3 的单独程序，安装目录 `_internal\libredwg` 里附许
 
 | 识别方式 | 费用 | 需要 |
 | --- | --- | --- |
-| Codex | 不另外花钱，占用 ChatGPT 账号的 Codex 用量额度 | 本机装好 Codex 命令行并用 ChatGPT 账号登录 |
+| ChatGPT 账号（`--executor codex`） | 不另外花钱，占用 ChatGPT 套餐的用量额度 | 在 bidbench 里用 ChatGPT 账号登录；或者本机装好 Codex 命令行并登录 |
 | Claude API | 按用量付费，先估算花费 | Anthropic API 密钥 |
 
-### 用 Codex 识别
+### 用 ChatGPT 账号识别（直连，不用装 Codex）
+
+在工作台「设置」或「识别」里点“用 ChatGPT 登录”，或者运行：
+
+```bash
+bidbench chatgpt login       # 在浏览器里登录 ChatGPT、同意授权，结果回到本机
+bidbench chatgpt             # 看登录了哪个账号
+bidbench chatgpt logout      # 退出（同时请 OpenAI 吊销授权）
+```
+
+登录以后，识别、智能分类、智能收图都直接调用 OpenAI 的模型（Responses 接口），用 ChatGPT 套餐的额度，
+不再经过 Codex 命令行；命令照旧是 `--executor codex`，工作台里选“ChatGPT 账号”。没登录时自动退回本机的 Codex 命令行
+（环境变量 `BIDBENCH_OPENAI=cli` 可以强制用命令行）。
+
+- 用的是 OpenAI 给开源本地软件的“Sign in with ChatGPT”（预览）：第一次登录时自动登记，不用另外申请；
+  登录信息只存在本机用户设置目录的 `chatgpt.json`（只有本人能读），不写日志。一小时过期，快到期自动续。
+- 额度和 ChatGPT、Codex 共用（Plus 的 5 小时额度也算在一起），用量见 <https://chatgpt.com/settings/usage>。
+  额度用完会停下，任务包保留，之后续跑（整夜识别会等着续跑）。
+- 账号或工作区不支持把套餐额度给第三方软件用时会说明，可以换账号或改用 Codex 命令行。
+- 工作台的 AI 助手要调用 bidbench 的工具，仍然用本机的 Codex 命令行。
+
+### 用 Codex 命令行识别
 
 ```bash
 npm install -g @openai/codex@latest    # 装好或更新 Codex 命令行（gpt-6.1-sol 需要 0.162 以上）

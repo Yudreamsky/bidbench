@@ -1,12 +1,14 @@
-"""Codex 执行器：用本机的 Codex 命令行（codex exec）识别图纸页面。
+"""Codex 执行器：用 ChatGPT 账号的套餐额度（OpenAI 模型）识别图纸页面。
 
-用的是你在 Codex 里登录的 ChatGPT 账号：不另外计费，占用账号的 Codex 用量额度。
+两种连法，自动选：在 bidbench 里用 ChatGPT 账号登录过（chatgpt.py），就直接调用 OpenAI 的 Responses 接口，
+不用装 Codex；没登录就用本机的 Codex 命令行（codex exec），用的是你在 Codex 里登录的 ChatGPT 账号。
+两种都不另外计费，占用 ChatGPT 账号的用量额度。环境变量 BIDBENCH_OPENAI=cli 可以强制用 Codex 命令行。
 
 每页单独调用一次 codex exec：附上整页缩略图和图签放大图（强档另加 3×3 局部切片），提示里是和 Claude 执行器
 同一份识别要求（claude.SYSTEM_PROMPT）和这一页的文字层，按给定格式输出 JSON。结果在本地用完整 schema 校验，
 没通过就带着错误重试一次。续跑、先试第一页、并发、逐页记录（results/progress.log）都和 Claude 执行器共用一套流程。
 
-安全：Codex 在只读沙箱里运行（--sandbox read-only），不读你的 Codex 设置（--ignore-user-config，
+安全（命令行）：Codex 在只读沙箱里运行（--sandbox read-only），不读你的 Codex 设置（--ignore-user-config，
 不带上设置里的全权限、插件、MCP 和通知），不保存会话记录（--ephemeral），工作目录是只放了这一页图片的临时文件夹。
 图纸页面会发送给 OpenAI。执行器只读任务包、只写 results/。
 """
@@ -29,6 +31,7 @@ from types import SimpleNamespace
 
 import jsonschema
 
+from .. import chatgpt
 from ..debuglog import tail
 from ..proc import NO_WINDOW
 from ..recognition import load_schema
@@ -157,8 +160,42 @@ def list_models(codex: Codex) -> list[dict]:
             for m in rows]
 
 
+def direct() -> bool:
+    """用 ChatGPT 账号直连：在 bidbench 里登录过、授权了套餐额度就用它。BIDBENCH_OPENAI=cli 强制用 Codex 命令行。"""
+    return os.environ.get("BIDBENCH_OPENAI") != "cli" and chatgpt.ready()
+
+
+def _direct_models(refresh: bool) -> tuple[list[dict], str | None]:
+    def look():
+        try:
+            return chatgpt.list_models(), None
+        except chatgpt.ChatGPTError as e:
+            return [], str(e)
+    return _cached(("chatgpt_models", chatgpt.status()["email"]), look, refresh)  # 换了账号就重新查
+
+
 def status(refresh: bool = False) -> dict:
-    """给工作台看的 Codex 状态：装没装、什么版本、登录没有、能用哪些模型。"""
+    """给工作台看的状态：ready=识别、分类能不能用（ChatGPT 直连或 Codex 命令行，有一样就行），backend 是用哪一种；
+    cli_ready、cli_hint 只看 Codex 命令行（AI 助手要用它）；chatgpt 是 ChatGPT 登录的情况。"""
+    cli = _cli_status(refresh)
+    g = chatgpt.status()
+    out = {**cli, "cli_ready": cli["ready"], "cli_hint": cli["hint"], "chatgpt": g, "backend": "cli"}
+    if direct():
+        models, err = _direct_models(refresh)
+        hint = None
+        if err:
+            hint = f"已用 ChatGPT 账号登录，但读不到能用的模型：{err}"
+        elif models and DEFAULT_MODEL not in [m["slug"] for m in models]:
+            hint = f"这个 ChatGPT 账号的模型里没有 {DEFAULT_MODEL}，请在“模型”里选一个"
+        out.update(ready=True, backend="chatgpt", models=models or cli["models"], hint=hint)
+    elif not cli["ready"]:
+        out["hint"] = g["hint"] or ("点“用 ChatGPT 登录”，登录后直接调用，不用装 Codex。或者用本机的 Codex 命令行："
+                                    + (cli["hint"] or "Codex 还不能用"))
+    return out
+
+
+def _cli_status(refresh: bool = False) -> dict:
+    """本机 Codex 命令行的状态：装没装、什么版本、登录没有、能用哪些模型。"""
     def look():
         c = find_codex(refresh)
         if c is None:
@@ -296,8 +333,24 @@ def _call(cmd_prefix, runner, workdir: Path, model: str, effort: str, schema_pat
     return Call(text, usage, None)
 
 
-def recognize_page(cmd_prefix, runner, task_dir: Path, item: dict, model: str, effort: str, tiles: int, usage,
-                   validator, schema_path: Path, note=None) -> dict:
+def _direct_call(model: str, effort: str, schema: dict, images: list[Path], prompt: str, resume: str = RESUME,
+                 name: str = "page") -> Call:
+    """用 ChatGPT 账号直接问一次模型。额度暂时用完抛 LimitError，整次都会失败抛 FatalError，其余只算这一次失败。"""
+    try:
+        r = chatgpt.ask(prompt, model, effort, schema, [p.read_bytes() for p in images], name)
+    except chatgpt.ChatGPTError as e:
+        if e.kind == "limit":
+            raise LimitError(f"{e}。等额度恢复后，{resume}") from e
+        if e.kind in ("fatal", "auth"):
+            raise FatalError(str(e)) from e
+        raise RecognitionError(f"OpenAI 出错：{e}", "OpenAI 出错") from e
+    return Call(r.text, {"input_tokens": r.usage["input_tokens"], "output_tokens": r.usage["output_tokens"],
+                         "cached_input_tokens": r.usage["cached_tokens"]}, None)
+
+
+def recognize_page(call, task_dir: Path, item: dict, model: str, effort: str, tiles: int, usage,
+                   validator, note=None) -> dict:
+    """call(工作目录, 图片, 提示) -> Call：Codex 命令行或 ChatGPT 直连问一次。"""
     with tempfile.TemporaryDirectory(prefix="bidbench-codex-") as tmp:
         tmp = Path(tmp)
         images, notes = [], []
@@ -311,21 +364,21 @@ def recognize_page(cmd_prefix, runner, task_dir: Path, item: dict, model: str, e
         for attempt in range(2):  # 第二次只在本地校验失败时，带着错误重来
             if attempt and note:
                 note(f"  ↻ {claude.page_label(item)}：输出没有通过格式校验，带着错误重试一次")
-            call = _call(cmd_prefix, runner, tmp, model, effort, schema_path, images, prompt)
-            u = call.usage
+            reply = call(tmp, images, prompt)
+            u = reply.usage
             usage.add(SimpleNamespace(input_tokens=u.get("input_tokens", 0), output_tokens=u.get("output_tokens", 0),
                                       cache_read_input_tokens=u.get("cached_input_tokens", 0), cache_creation_input_tokens=0))
-            if call.error:
-                fatal = fatal_error(call.error, model)
+            if reply.error:
+                fatal = fatal_error(reply.error, model)
                 if fatal:
                     raise fatal
-                raise RecognitionError(f"Codex 出错：{call.error}", "Codex 出错")
+                raise RecognitionError(f"Codex 出错：{reply.error}", "Codex 出错")
             try:
-                body = claude._parse_json(call.text or "")
+                body = claude._parse_json(reply.text or "")
                 if not isinstance(body, dict):
                     raise ValueError("不是对象")
             except ValueError as e:  # json.JSONDecodeError 也是 ValueError
-                raise RecognitionError(f"Codex 的输出不是合法 JSON：{e}", "输出不是合法 JSON") from e
+                raise RecognitionError(f"模型的输出不是合法 JSON：{e}", "输出不是合法 JSON") from e
             body = claude._sanitize({k: body.get(k) for k in BODY_KEYS})
             record = {
                 "schema_version": "0.1",
@@ -340,29 +393,40 @@ def recognize_page(cmd_prefix, runner, task_dir: Path, item: dict, model: str, e
                 return record
             last_error = "；".join(f"{'/'.join(str(x) for x in e.absolute_path) or '(根)'}: {e.message}" for e in errs[:5])
             prompt = (build_prompt(task_dir, item, notes) + f"\n\n上一次的输出没有通过校验：{last_error}。"
-                      f"请输出修正后的完整 JSON。上一次的输出：\n{call.text}")
+                      f"请输出修正后的完整 JSON。上一次的输出：\n{reply.text}")
     raise RecognitionError(f"两次输出都没有通过校验：{last_error}", "两次输出都没有通过格式校验")
 
 
 def ask_json(prompt: str, schema: dict, model: str | None = None, effort: str = "medium", runner=None,
              usage=None, resume: str = "再试一次") -> dict:
-    """不带图片问一次 Codex，按给定格式输出 JSON（智能分类用）。整次都会失败的错误抛 FatalError，其余抛 RecognitionError。"""
+    """不带图片问一次模型（ChatGPT 直连或 Codex 命令行），按给定格式输出 JSON（智能分类用）。整次都会失败的错误抛 FatalError，其余抛 RecognitionError。"""
     model = model or DEFAULT_MODEL
     found = None
-    if runner is None:
+    if runner is None and direct():
+        call = _direct_call(model, effort, strict_schema(claude._api_compatible(schema)), [], prompt, resume, "answer")
+    elif runner is None:
         found = find_codex()
         if found is None:
             raise FatalError(f"没有找到 Codex。安装：{INSTALL_HINT}，再运行 codex login 登录 ChatGPT 账号")
         runner = _subprocess_runner
+    if runner is not None:
+        call = _ask_cli(found, runner, prompt, schema, model, effort)
+    return _answer(call, model, usage, resume)
+
+
+def _ask_cli(found: Codex | None, runner, prompt: str, schema: dict, model: str, effort: str) -> Call:
     with tempfile.TemporaryDirectory(prefix="bidbench-codex-") as tmp:
         tmp = Path(tmp)
         schema_path = tmp / "schema.json"
         schema_path.write_text(json.dumps(strict_schema(claude._api_compatible(schema)), ensure_ascii=False),
                                encoding="utf-8")
         try:
-            call = _call(found.cmd if found else ["codex"], runner, tmp, model, effort, schema_path, [], prompt)
+            return _call(found.cmd if found else ["codex"], runner, tmp, model, effort, schema_path, [], prompt)
         except OSError as e:
             raise FatalError(f"Codex 没能运行：{e}") from e
+
+
+def _answer(call: Call, model: str, usage, resume: str) -> dict:
     u = call.usage
     if usage is not None:
         usage.add(SimpleNamespace(input_tokens=u.get("input_tokens", 0), output_tokens=u.get("output_tokens", 0),
@@ -375,21 +439,23 @@ def ask_json(prompt: str, schema: dict, model: str | None = None, effort: str = 
     try:
         body = claude._parse_json(call.text or "")
     except ValueError as e:
-        raise RecognitionError(f"Codex 的输出不是合法 JSON：{e}", "输出不是合法 JSON") from e
+        raise RecognitionError(f"模型的输出不是合法 JSON：{e}", "输出不是合法 JSON") from e
     if not isinstance(body, dict):
-        raise RecognitionError("Codex 的输出不是 JSON 对象", "输出不是合法 JSON")
+        raise RecognitionError("模型的输出不是 JSON 对象", "输出不是合法 JSON")
     return body
 
 
 def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
         tiles: int | None = None, workers: int = DEFAULT_WORKERS, progress=None, log_fn=None, runner=None,
         codex: Codex | None = None, stop=None) -> RunResult:
-    """runner(cmd, prompt, timeout) -> (返回码, 标准输出, 标准错误)，测试用假的；不给就调用本机的 Codex。
-    stop 见 claude.run_pages：返回真就不再开始新的页。"""
+    """runner(cmd, prompt, timeout) -> (返回码, 标准输出, 标准错误)，测试用假的；不给就用 ChatGPT 账号直连（登录过的话），
+    否则调用本机的 Codex。stop 见 claude.run_pages：返回真就不再开始新的页。"""
     cfg = TIERS[tier]
     model = model or cfg["model"]
     effort = effort or cfg["effort"]
     tiles = cfg["tiles"] if tiles is None else tiles
+    if runner is None and codex is None and direct():
+        return _run_direct(Path(task_dir), tier, model, effort, tiles, workers, progress, log_fn, stop)
     if runner is None:
         codex = codex or find_codex()
         if codex is None:
@@ -403,9 +469,11 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
         schema_path = Path(tmp) / "schema.json"
         schema_path.write_text(json.dumps(output_schema(), ensure_ascii=False), encoding="utf-8")
 
+        def call(workdir, images, prompt):
+            return _call(cmd_prefix, runner, workdir, model, effort, schema_path, images, prompt)
+
         def recognize(item, usage, note):
-            return recognize_page(cmd_prefix, runner, task_dir, item, model, effort, tiles, usage, validator,
-                                  schema_path, note)
+            return recognize_page(call, task_dir, item, model, effort, tiles, usage, validator, note)
 
         def fatal(e: Exception) -> str | None:
             if isinstance(e, OSError):
@@ -419,14 +487,37 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
     return res
 
 
-def _write_log(task_dir: Path, res: RunResult, tier: str, effort: str, tiles: int, version: str | None) -> None:
+def _run_direct(task_dir: Path, tier: str, model: str, effort: str, tiles: int, workers: int, progress, log_fn,
+                stop) -> RunResult:
+    """用 ChatGPT 账号直接调用 OpenAI：流程和命令行一样，只是每页不再启动 codex exec。"""
+    validator = jsonschema.Draft202012Validator(load_schema())
+    note = ProgressLog(task_dir, log_fn)
+    schema = output_schema()
+
+    def call(workdir, images, prompt):
+        return _direct_call(model, effort, schema, images, prompt)
+
+    def recognize(item, usage, note):
+        return recognize_page(call, task_dir, item, model, effort, tiles, usage, validator, note)
+
+    email = chatgpt.status()["email"]
+    settings = f"ChatGPT 账号直连{f'（{email}）' if email else ''}，模型 {model}，思考强度 {effort}" + \
+        (f"，局部切片 {tiles}×{tiles}" if tiles > 1 else "")
+    res = run_pages(task_dir, recognize, settings, workers, note, model, progress, None, stop)
+    _write_log(task_dir, res, tier, effort, tiles, None, via="chatgpt")
+    return res
+
+
+def _write_log(task_dir: Path, res: RunResult, tier: str, effort: str, tiles: int, version: str | None,
+               via: str = "cli") -> None:
     u = res.usage
+    how = "ChatGPT 账号直连" if via == "chatgpt" else f"Codex {version}" if version else ""
     lines = ["# 运行记录", "",
-             f"执行器：{EXECUTOR}{f'（Codex {version}）' if version else ''}　档位：{tier}　模型：{res.model}　思考强度：{effort}"
+             f"执行器：{EXECUTOR}{f'（{how}）' if how else ''}　档位：{tier}　模型：{res.model}　思考强度：{effort}"
              f"　局部切片：{f'{tiles}×{tiles}' if tiles > 1 else '无'}", "",
              f"本次识别 {res.done} 页，跳过已有结果 {res.skipped} 页，失败 {len(res.failed)} 页，用时 {res.seconds:.0f} 秒。", "",
              f"用量：输入 {u.input} tokens（其中缓存 {u.cache_read}），输出 {u.output} tokens。"
-             "用的是 ChatGPT 账号的 Codex 额度，不另外计费。"]
+             + ("用的是 ChatGPT 套餐的额度，不另外计费。" if via == "chatgpt" else "用的是 ChatGPT 账号的 Codex 额度，不另外计费。")]
     if res.failed:
         lines += ["", "## 失败页面", "", "| 页面 | 文件 | 原因 |", "| --- | --- | --- |"]
         lines += [f"| {x['page_id']} | {x['file']} | {x['error']} |" for x in res.failed]
@@ -434,7 +525,7 @@ def _write_log(task_dir: Path, res: RunResult, tier: str, effort: str, tiles: in
         lines += ["", "问题：无"]
     (task_dir / "results" / "run_log.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (task_dir / "results" / "usage.json").write_text(json.dumps({
-        "executor": EXECUTOR, "codex_version": version, "model": res.model, "tier": tier, "effort": effort,
+        "executor": EXECUTOR, "via": via, "codex_version": version, "model": res.model, "tier": tier, "effort": effort,
         "input_tokens": u.input, "cached_input_tokens": u.cache_read, "output_tokens": u.output,
         "done": res.done, "failed": len(res.failed)}, ensure_ascii=False, indent=2), encoding="utf-8")
 
