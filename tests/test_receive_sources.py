@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -458,3 +459,38 @@ def test_count_files_parses_tool_listings(monkeypatch):
     assert extractors.count_files(Path("x.rar"), "bsdtar") == 1
     assert extractors.count_files(Path("x.rar"), "7-Zip", "pw") == 2
     assert extractors.count_files(Path("x.rar"), "unrar") is None
+
+
+def test_folder_pdfs_are_read_several_at_once(tmp_path, monkeypatch):
+    """收文件夹时几个进程同时读 PDF（几千个 PDF 一个个渲染算指纹要好几个小时）：登记的页面、问题和一个个读的一样，
+    加密的、坏的照样登记；压缩包里的 PDF 照原来那样登记时读。"""
+    import pymupdf
+    root, date = make_sample.build_folder(tmp_path / "in")
+    (root / "建筑" / "坏的.pdf").write_bytes(b"\0garbage" * 50)
+    doc = pymupdf.open(stream=make_sample.sheet_pdf("建施-20", "加密的图", "A", "2026-10-20", ["x"]), filetype="pdf")
+    doc.save(str(root / "建筑" / "建施-20 加密的图.pdf"), encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="2", user_pw="1")
+    doc.close()
+
+    def receive(name):
+        proj = Project.init(tmp_path / name, name)
+        logs = []
+        ops.receive(proj, root, date, av=False, log=logs.append)
+        with proj.connect() as con:
+            pages = [tuple(r) for r in con.execute("SELECT * FROM pages ORDER BY page_id")]
+            issues = sorted((a, k, re.sub(r"'[^']*'", "'…'", d)) for a, k, d in con.execute(  # 原因里的文件路径各项目不同
+                "SELECT path, kind, detail FROM extraction_issues"))
+        return pages, issues, logs
+
+    one = receive("one")
+    pools = []
+    real = ingest.ProcessPoolExecutor
+
+    def pool(workers, **kw):
+        pools.append(workers)
+        return real(workers, **kw)
+
+    monkeypatch.setattr(ingest, "PDF_WORKERS", 3)
+    monkeypatch.setattr(ingest, "ProcessPoolExecutor", pool)
+    three = receive("three")
+    assert three[:2] == one[:2] and pools == [3] and any("3 个同时读" in x for x in three[2])
+    assert {k for _p, k, _d in one[1]} >= {"encrypted", "corrupt"} and len(one[0]) >= 4
