@@ -256,3 +256,4 @@ def test_focus_on_one_floor_of_one_tower(towers):
         recognition.focus_pages(towers, recognition.Focus(floor="九楼半"))
     assert recognition.focus_floors("LEVEL 09", 1) == {10} and recognition.focus_floors("LEVEL 09", 0) == {9}
     assert recognition.focus_floors("9", 1) == {9} == recognition.focus_floors("9F", 0)
+    assert state.build(towers, with_diff=False)["floor_bases"]["*"] in (0, 1)  # 英文写法按项目的数法换算
