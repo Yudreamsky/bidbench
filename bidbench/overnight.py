@@ -99,7 +99,8 @@ def run(proj: Project, executor: str = "codex", scope: str = "new", tier: str = 
             say("DWG、DXF 都读过了。")
         if focus:  # 图号认不出专业的，靠智能分类按图名、文件夹认：先分好，才知道哪些是要识别的
             n.out["classify"] = n.classify()
-        steps = stages or [k for k, _lb, _d in recognition.STAGES]
+        # 聚焦的先识别图纸目录建大地图（不按聚焦筛）：文件名只有图号的，靠目录上的图名才知道哪张是这一层的图
+        steps = stages or [*([recognition.MAP_STAGE] if focus else []), *(k for k, _lb, _d in recognition.STAGES)]
         why = n.step("识别", lambda: n.recognize(steps))
         for i in range(FOLLOW_ROUNDS if focus else 0):
             more = n.left() if why is None else None
@@ -179,13 +180,13 @@ class _Night:
             if self.late():
                 return f"到了截止时间 {self.until:%H:%M}，{label}和后面几步没有开始"
             self.say(f"—— {label} ——")
+            focus = None if key == recognition.MAP_STAGE else self.focus  # 大地图：全部的图纸目录、发图单
             if self.executor == "codex":
                 est = self.step(f"准备{label}", lambda: ops.prepare_codex(self.proj, self.scope, self.tier, self.model,
-                                                                         workers=self.workers, stages=[key],
-                                                                         focus=self.focus))
+                                                                         workers=self.workers, stages=[key], focus=focus))
             else:
                 est = self.step(f"准备{label}", lambda: ops.prepare_claude(self.proj, self.scope, self.tier, self.model,
-                                                                          stages=[key], focus=self.focus))
+                                                                          stages=[key], focus=focus))
             if est is FAILED:
                 continue
             if est is None:

@@ -61,11 +61,11 @@ FACT_GROUPS = [
 # ---------------- 规范化 ----------------
 
 def norm_no(s: str | None) -> str | None:
-    """图号规范化：去空格，统一连接符，数字补到两位。建施05 / 建施 -5 / 建施－05 → 建施-05。
+    """图号规范化：去空格、方括号，统一连接符，数字补到两位。建施05 / 建施 -5 / 建施－05 → 建施-05，ST-[T1]-05-013E → ST-T1-05-13E。
     已确认图号格式的项目，套得上格式的图号各段照原样，去掉末尾的版次段（docs/图纸字段.md 9.5）。"""
     if not s:
         return None
-    s = re.sub(r"\s+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
+    s = re.sub(r"[\s\[\]]+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
     fmt = _NUMBERING.get()
     if fmt is not None and fmt.confirmed:
         m = fmt.match(s)

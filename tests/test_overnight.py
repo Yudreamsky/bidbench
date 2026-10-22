@@ -4,6 +4,7 @@
 import json
 from datetime import datetime, timedelta
 
+import make_sample
 import pytest
 from conftest import _recognize
 from test_claude_executor import FakeClient, mimic
@@ -199,9 +200,9 @@ def test_overnight_only_the_disciplines_asked_for(night):
     fake, lines = _codex(), []
     r = overnight.run(night, runner=fake, log=lines.append, sleep=_no_sleep, clock=Clock(), workers=1,
                       focus=recognition.Focus(("结构",)))
-    assert (r["done"], r["failed"], r["stopped"], r["left"]) == (1, 0, None, 0)
+    assert (r["done"], r["failed"], r["stopped"], r["left"]) == (2, 0, None, 0)  # 先识别了建施-00 图纸目录建大地图
     left = recognition.pick_pages(night, "new")
-    assert len(left) == 5 and all("建施" in x["first_path"] for x in left)
+    assert len(left) == 4 and all("建施" in x["first_path"] and "建施-00" not in x["first_path"] for x in left)
     log = "\n".join(_log_lines(r))
     assert "只识别聚焦 结构 要用的图" in log and log.index("—— 智能分类 ——") < log.index("—— 建模主图 ——")
     assert cli._disciplines("建筑，结构") == ("建筑", "结构")
@@ -257,3 +258,39 @@ def test_focus_on_one_floor_of_one_tower(towers):
     assert recognition.focus_floors("LEVEL 09", 1) == {10} and recognition.focus_floors("LEVEL 09", 0) == {9}
     assert recognition.focus_floors("9", 1) == {9} == recognition.focus_floors("9F", 0)
     assert state.build(towers, with_diff=False)["floor_bases"]["*"] in (0, 1)  # 英文写法按项目的数法换算
+
+
+def _cn(k: int) -> str:
+    digits = "一二三四五六七八九"
+    return digits[k - 1] if k < 10 else "十" + (digits[k - 11] if k > 10 else "")
+
+
+def test_focus_builds_the_map_from_catalogs_first(tmp_path):
+    """文件名只有图号、看不出图名和楼层：先识别图纸目录（页面文字里列了一串图号）建大地图，再按目录上的图名找出九层的图。"""
+    rows = [(f"结施-{k:02d}", f"{_cn(k)}层梁配筋图", "A") for k in range(1, 14)]
+    files = {
+        "T1/结施-00.pdf": make_sample.sheet_pdf("结施-00", "结构图纸目录", "A", "2026-01-01", [], catalog=rows),
+        "T1/结施-09.pdf": pdf("结施-09", "九层梁配筋图", "KL1 截面 300×650"),
+        "T1/结施-03.pdf": pdf("结施-03", "三层梁配筋图"),
+    }
+    for rel, data in files.items():
+        (tmp_path / "图纸" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "图纸" / rel).write_bytes(data)
+    proj = Project.init(tmp_path / "p", "双塔")
+    ingest.receive(proj, tmp_path / "图纸", "2026-01-01")
+    assert [r["first_path"].split(" / ")[-1] for r in recognition.pick_pages(proj, "new", stages=[recognition.MAP_STAGE])] == ["结施-00.pdf"]
+    focus = recognition.Focus(("结构",), "T1", "9F")
+    assert "结施-09.pdf" not in _focus_files(proj, focus)  # 还不知道结施-09 是哪一层的图
+    r = overnight.run(proj, runner=_codex(), log=lambda s: None, sleep=_no_sleep, clock=Clock(), workers=1, focus=focus)
+    log = "\n".join(_log_lines(r))
+    assert log.index("—— 图纸目录（大地图） ——") < log.index("—— 重点图 ——")
+    assert "结施-09.pdf" in _focus_files(proj, focus) and "结施-03.pdf" not in _focus_files(proj, focus)
+    left = {x["first_path"].split(" / ")[-1] for x in recognition.pick_pages(proj, "new")}
+    assert left == {"结施-03.pdf"}  # 九层的识别了，三层的留着
+
+
+def _focus_files(proj, focus) -> set[str]:
+    keep = recognition.focus_pages(proj, focus)
+    with proj.connect() as con:
+        return {r["path"].split(" / ")[-1] for r in con.execute(
+            "SELECT o.path, p.page_id FROM pages p JOIN occurrences o ON o.sha256 = p.file_sha256") if r["page_id"] in keep}

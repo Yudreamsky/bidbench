@@ -604,8 +604,9 @@ def main(argv=None):
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="挑选哪些页面（默认 new）")
     s.add_argument("--all", action="store_true", help="等同于 --scope all")
     s.add_argument("--no-images", action="store_true", help="不渲染页面图片（仅文字层）")
-    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
-                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES))
+    s.add_argument("--stage", action="append", choices=[recognition.MAP_STAGE, *(k for k, _l, _d in recognition.STAGES)],
+                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES)
+                        + f"；{recognition.MAP_STAGE}=只识别图纸目录、发图单（建大地图）")
     s.set_defaults(fn=cmd_tasks)
 
     s = sub.add_parser("stages", help="分步识别的进度：地图认出了多少，重点图、建模主图、按需深入各还剩几页")
@@ -627,8 +628,9 @@ def main(argv=None):
     s.add_argument("--tiles", type=int, help="局部切片 N×N，0 表示不切")
     s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
     s.add_argument("--dry-run", action="store_true", help="只生成任务包并估算花费，不调用 API")
-    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
-                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES))
+    s.add_argument("--stage", action="append", choices=[recognition.MAP_STAGE, *(k for k, _l, _d in recognition.STAGES)],
+                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES)
+                        + f"；{recognition.MAP_STAGE}=只识别图纸目录、发图单（建大地图）")
     s.set_defaults(fn=cmd_recognize)
 
     s = sub.add_parser("classify", help="智能分类：让 AI 给图纸分专业、分小类、起中文简称，给事实分多级目录")
@@ -645,8 +647,8 @@ def main(argv=None):
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="识别哪些页面（默认 new）")
     s.add_argument("--tier", default="economy", choices=["economy", "strong"], help="同 recognize")
     s.add_argument("--model", help="覆盖档位的默认模型")
-    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
-                   help="只识别这几步（可写几次）；默认重点图、建模主图、按需深入依次都做")
+    s.add_argument("--stage", action="append", choices=[recognition.MAP_STAGE, *(k for k, _l, _d in recognition.STAGES)],
+                   help="只识别这几步（可写几次）；默认重点图、建模主图、按需深入依次都做，聚焦时先识别图纸目录（map）建大地图")
     s.add_argument("--until", help="最晚做到几点（时:分，如 07:30）：到点不再开始新的页、不再等额度，照样分类、出报告；不写就做完为止")
     s.add_argument("--wait", type=float, default=overnight.WAIT_MINUTES,
                    help=f"额度用完后隔几分钟再试（默认 {overnight.WAIT_MINUTES}）")
