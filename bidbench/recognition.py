@@ -240,13 +240,25 @@ def stage_group(r, hints: dict | None = None, guess: dict | None = None) -> str:
     return kind or "other"
 
 
-def stage_plan(proj: Project, scope: str = "new") -> dict:
+def discipline_pages(proj: Project, disciplines) -> set[str]:
+    """这几个专业的图用到的页。专业按图纸台账认（图号、图号格式、智能分类、所在文件夹），和工作台上看到的一样。"""
+    from .state import build  # 避免循环导入
+    out: set[str] = set()
+    for sh in build(proj, with_diff=False)["sheets"]:
+        if sh["discipline"] in disciplines:
+            out |= {x for x in [*(sh.get("pages") or []), *(sh.get("depth_pages") or []),
+                                *(v.get("page_id") for v in sh.get("versions") or [])] if x}
+    return out
+
+
+def stage_plan(proj: Project, scope: str = "new", disciplines=None) -> dict:
     """分步识别的进度：第一步（地图）认出了多少，后面每一步有几页、识别了几页、还要识别哪些（按组举例）。
 
-    每一步的页数按像素去重；“还要识别”按 scope 算（默认是还没看图识别的页）。"""
-    left = {r["page_id"] for r in pick_pages(proj, scope)} if scope != "all" else None
+    每一步的页数按像素去重；“还要识别”按 scope 算（默认是还没看图识别的页）；disciplines 给了就只算这几个专业的图。"""
+    keep = discipline_pages(proj, disciplines) if disciplines else None
+    left = {r["page_id"] for r in pick_pages(proj, scope) if keep is None or r["page_id"] in keep} if scope != "all" else None
     with proj.connect() as con:
-        everything = pages_to_recognize(con, scope="all")
+        everything = [r for r in pages_to_recognize(con, scope="all") if keep is None or r["page_id"] in keep]
         hints = {**map_hints(con), **depth_targets(proj)}
         cad = con.execute("SELECT COUNT(*) AS n, SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE version = ?)) AS done,"
                           " SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE sheets > 0)) AS ok"
@@ -277,7 +289,8 @@ def stage_plan(proj: Project, scope: str = "new") -> dict:
         out.append({**st, "done": st["total"] - st["left"] if left is not None else 0, "groups": groups})
     return {
         "map": {"pages": len(everything), "numbered": numbered, "titles": len(hints["titles"]), "skipped": skipped,
-                "dwg_files": cad["n"] or 0, "dwg_read": cad["done"] or 0, "dwg_ok": cad["ok"] or 0, "dwg_sheets": dwg_sheets},
+                "dwg_files": cad["n"] or 0, "dwg_read": cad["done"] or 0, "dwg_ok": cad["ok"] or 0, "dwg_sheets": dwg_sheets,
+                "disciplines": list(disciplines or [])},
         "stages": out,
         "_rows": rows_left,  # 给估算用：还要识别的页（不往外给）
         "_hints": hints,
@@ -294,15 +307,18 @@ def stage_rows(rows, stages: list[str], hints: dict) -> list:
 
 
 def pick_pages(proj: Project, scope: str = "new", priorities: list[str] | None = None,
-               pages: list[str] | None = None, stages: list[str] | None = None) -> list:
+               pages: list[str] | None = None, stages: list[str] | None = None, disciplines=None) -> list:
     """按范围挑要识别的页面，按优先级排好；priorities 给了就只要这几档；stages 给了就只要分步识别的这几步，
-    按步骤排；pages 给了就只识别这几页（按需识别）。"""
+    按步骤排；pages 给了就只识别这几页（按需识别）；disciplines 给了就只要这几个专业的图。"""
     if scope not in SCOPES:
         raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(SCOPES)}")
     only = set(pages) if pages is not None else _conflict_pages(proj) if scope == "conflict" else None
     with proj.connect() as con:
         rows = pages_to_recognize(con, scope=scope, only=only)
         hints = map_hints(con) if stages is not None else None
+    if disciplines:
+        keep = discipline_pages(proj, disciplines)
+        rows = [r for r in rows if r["page_id"] in keep]
     if stages is not None:
         return stage_rows(rows, stages, {**hints, **depth_targets(proj)})
     if priorities is not None:
@@ -371,12 +387,13 @@ def pages_to_recognize(con, include_done: bool = False, scope: str = "new", only
 
 def make_task(proj: Project, include_done: bool = False, render: bool = True, scope: str = "new",
               priorities: list[str] | None = None, progress=None, pages: list[str] | None = None,
-              stages: list[str] | None = None) -> Path | None:
-    """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档，pages 给了就只放这几页。
+              stages: list[str] | None = None, disciplines=None) -> Path | None:
+    """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档，pages 给了就只放这几页，
+    disciplines 给了就只放这几个专业的图。
 
     渲染页面图片较慢，progress(已完成, 总数) 用来报进度。某一页取文字、出图出错（文件坏了、被删了）不放进任务包，
     记在清单的 skipped 里，别的页照常放。"""
-    rows = pick_pages(proj, "all" if include_done else scope, priorities, pages, stages)
+    rows = pick_pages(proj, "all" if include_done else scope, priorities, pages, stages, disciplines)
     if not rows:
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
