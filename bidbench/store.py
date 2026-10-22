@@ -155,6 +155,8 @@ CREATE TABLE IF NOT EXISTS classifications(
 """
 
 
+DB_TIMEOUT = 120  # 秒：工作台、整夜识别、AI 助手可能同时开着一个项目，别人正在写就等着，不马上报“数据库被占用”
+
 # 数据库结构版本。修改已有表的结构时：SCHEMA_SQL 写成最新的样子，SCHEMA_VERSION 加 1，
 # 并在 MIGRATIONS 里写从上一版升级过来的 SQL。旧项目打开时自动升级，升级前先备份数据库。
 # 只新增表（CREATE TABLE IF NOT EXISTS）不用升版本号：旧项目打开时自动建表，回退到旧程序也照样能打开。
@@ -233,7 +235,7 @@ class Project:
         return json.loads(self.meta_path.read_text(encoding="utf-8"))
 
     def connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.db_path)
+        con = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT)
         con.row_factory = sqlite3.Row
         migrate(con, self.db_path)
         con.executescript(SCHEMA_SQL)  # 新增的表直接补建（都是 IF NOT EXISTS）
