@@ -55,9 +55,10 @@ def _no_real_ai(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _read_cad_here(monkeypatch):
-    """读 DWG 默认在本进程里一个个读：测试换掉的读图函数到了另开的读图进程里不起作用。要同时读的测试自己传 workers。"""
+def _read_in_this_process(monkeypatch):
+    """读 DWG、PDF 默认在本进程里一个个读：测试换掉的读图函数到了另开的进程里不起作用。要同时读的测试自己改。"""
     monkeypatch.setattr(ops, "CAD_WORKERS", 1)
+    monkeypatch.setattr(ingest, "PDF_WORKERS", 1)
 
 
 @pytest.fixture(scope="session")
