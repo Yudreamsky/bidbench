@@ -33,8 +33,9 @@ def folder(proj: Project) -> Path:
 
 
 def receive_title(paths) -> str:
+    from .ingest import folder_label
     paths = [Path(p) for p in paths]
-    what = paths[0].name + ("（文件夹）" if paths[0].is_dir() else "")
+    what = folder_label(paths[0]) + ("（文件夹）" if paths[0].is_dir() else "")
     return f"收图：{what}" + (f" 等 {len(paths)} 个文件" if len(paths) > 1 else "")
 
 

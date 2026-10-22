@@ -37,7 +37,8 @@ def receive(proj: Project, sources, date: str, name: str | None = None, password
             av: bool = True, log: Log = print, progress=None) -> dict:
     """收一批图纸：sources 是一个压缩包、文件或文件夹，或者同时收到的几个文件（列表）。"""
     srcs = [Path(s) for s in sources] if isinstance(sources, (list, tuple)) else [Path(sources)]
-    r = ingest.receive(proj, srcs if len(srcs) > 1 else srcs[0], date, name, list(passwords), note, progress=progress)
+    r = ingest.receive(proj, srcs if len(srcs) > 1 else srcs[0], date, name, list(passwords), note, progress=progress,
+                       log=log)
     kinds = "、".join(f"{reports.KIND_LABEL.get(k, k)} {n}" for k, n in sorted(r.by_kind.items()))
     how = {"folder": "（文件夹）", "files": f"（{len(srcs)} 个文件）"}.get(r.source, "")
     verb = "收进" if r.source in ("folder", "files") else "解出"
