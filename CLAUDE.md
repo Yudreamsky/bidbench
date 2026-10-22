@@ -20,6 +20,7 @@
 - 一级识别（只看文件名、文件夹、PDF 文字）在 `bidbench/names.py`，`state._first_guess` 把还没看图识别、或没读出图号的页面暂定成图纸（status `guess`），每项带来源和把握；暂定的图不参与缺图、版本判断，不导出。
 - 识别执行器只读任务包、只写 `results/`；新执行器放在 `bidbench/executors/`，逐页流程用 `claude.run_pages`，测试用假的 API 客户端或假的 Codex（`tests/test_codex_executor.py` 的 FakeCodex），不联网。
 - 调用外部命令行程序（解压工具、杀毒软件、Codex）都加 `**proc.NO_WINDOW`，桌面版才不会弹出黑色命令行窗口。
+- ChatGPT 账号登录和直连 OpenAI 在 `bidbench/chatgpt.py`（Sign in with ChatGPT：OAuth + PKCE，令牌存用户设置目录的 chatgpt.json，不写日志）。Codex 执行器（`executors/codex.py`）登录了就直连，没登录用 Codex 命令行；测试换掉 `chatgpt._urlopen`（`tests/test_chatgpt.py` 的 FakeOpenAI），conftest 不许连真的 OpenAI。AI 助手仍用命令行。
 - Claude 执行器的提示词在 `bidbench/executors/claude.py` 的 `SYSTEM_PROMPT`，改识别要求时与 `spec/任务说明.md` 保持一致。
 - AI 助手的工具都在 `bidbench/assistant.py`，MCP 只是一层注册（`bidbench/mcp_server.py`）。改动类工具只能写 `proposals` 表，确认、驳回不得暴露给 AI。工作台的 AI 助手面板（`bidbench/chat.py`）让 Codex 通过同一个 MCP 服务查询和提议，不另开后门；助手对软件本身的意见只能走 `propose_improvement`，确认后进本机的改进建议清单（`bidbench suggestions`），不给它改代码或碰 GitHub 的能力。
 - 修改已有数据表结构时：`store.SCHEMA_SQL` 写成最新样子，`SCHEMA_VERSION` 加 1，在 `MIGRATIONS` 里写升级 SQL，并加迁移测试。

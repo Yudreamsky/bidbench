@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "samples"))
 
 import make_sample  # noqa: E402
 
-from bidbench import debuglog, ingest, recognition, state  # noqa: E402
+from bidbench import chatgpt, debuglog, ingest, recognition, state  # noqa: E402
 from bidbench.executors import codex, simulated  # noqa: E402
 from bidbench.store import Project  # noqa: E402
 
@@ -40,13 +40,18 @@ class RealServiceCalled(BaseException):
 
 @pytest.fixture(autouse=True)
 def _no_real_ai(monkeypatch):
-    """测试不联网、不占额度：没有 Claude 密钥，真的 Codex 一调用就报错。要用 AI 的测试传入假的客户端或 FakeCodex。"""
+    """测试不联网、不占额度：没有 Claude 密钥，真的 Codex、真的 OpenAI 一调用就报错。要用 AI 的测试传入假的客户端或 FakeCodex。"""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
 
     def refuse(cmd, prompt, timeout):
         raise RealServiceCalled("测试调用了真的 Codex，请传入假的 runner（FakeCodex）")
     monkeypatch.setattr(codex, "_subprocess_runner", refuse)
+
+    def offline(req, timeout):
+        raise RealServiceCalled(f"测试连了真的 OpenAI：{req.full_url}，请换成假的 chatgpt._urlopen")
+    monkeypatch.setattr(chatgpt, "_urlopen", offline)
+    monkeypatch.setattr(chatgpt, "_current", None)
 
 
 @pytest.fixture(scope="session")

@@ -23,7 +23,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import antivirus, appconfig, chat, debuglog, export, navigate, numbering, oplog, ops, recognition, release, state, updater
+from . import antivirus, appconfig, chat, chatgpt, debuglog, export, navigate, numbering, oplog, ops, recognition, release, state, updater
 from .store import Project, SchemaTooNew, add_decision, latest_decisions, now_iso, revoke_decision
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev", "name_check",
@@ -165,7 +165,7 @@ class _App:
         eng = antivirus.find_engine()
         return {"mode": self.mode, "installed": release.is_installed(),
                 "project": ({**self.proj.meta, "root": str(self.proj.root)} if self.proj else None),
-                "recent": appconfig.recent(), "settings": appconfig.public_settings(),
+                "recent": appconfig.recent(), "settings": {**appconfig.public_settings(), "chatgpt": chatgpt.status()},
                 "default_dir": str(appconfig.default_projects_dir()), "today": date.today().isoformat(),
                 "antivirus": eng.name if eng else None, "claude_ready": ops.has_claude_credentials(),
                 "log_dir": str(debuglog.folder()), "job": self.job.as_dict() if self.job else None}
@@ -417,6 +417,11 @@ def _model(body: dict) -> str | None:
     return m
 
 
+def _chat_codex(st: dict) -> dict:
+    """AI 助手要靠 Codex 命令行调用 bidbench 的工具，ChatGPT 直连代替不了：只看命令行能不能用。"""
+    return {**st, "ready": st.get("cli_ready", st["ready"]), "hint": st.get("cli_hint", st.get("hint"))}
+
+
 def _recognizers(refresh: bool = False) -> dict:
     """识别页面用：两种识别方式能不能用、有哪些模型。"""
     from .executors import claude
@@ -488,11 +493,13 @@ def make_handler(app: _App):
                 if "status" in parse_qs(u.query):  # 打开面板时才查 Codex（要调用几次命令行）
                     from . import codexlink
                     from .assistant import list_suggestions
-                    st.update(codex=ops.codex_status(refresh="refresh" in parse_qs(u.query)),
+                    st.update(codex=_chat_codex(ops.codex_status(refresh="refresh" in parse_qs(u.query))),
                               codex_link={"project": codexlink.connected_project(), "here": str(app.proj.root),
                                           "path": str(codexlink.config_path())},
                               prefs=appconfig.prefs().get("assistant") or {}, suggestions=len(list_suggestions()))
                 return self._json(st)
+            if u.path == "/api/chatgpt":  # 登录进行到哪了（界面在等浏览器里登录完时查）
+                return self._json(chatgpt.status())
             if u.path == "/api/recognizers":
                 return self._json(_recognizers(refresh="refresh" in parse_qs(u.query)))
             if u.path == "/api/log":
@@ -618,7 +625,7 @@ def make_handler(app: _App):
                 return self._json(st)
             if path == "/api/chat":
                 model = _model(body)
-                st = ops.codex_status()
+                st = _chat_codex(ops.codex_status())
                 if not st["ready"]:
                     raise ValueError(st["hint"] or "Codex 还不能用")
                 app.chat.ask(str(body.get("question") or ""), model)
@@ -652,6 +659,11 @@ def make_handler(app: _App):
                 changed = [k for k in ("api_key", "download_prefix") if body.get(k) is not None]
                 log.info("修改设置：%s", "、".join(changed) or "无")  # 只记改了哪几项，不记内容
                 return self._json(app.info())
+            if path == "/api/app/chatgpt/login":  # 用 ChatGPT 账号登录：在浏览器里打开授权页，结果回到本机
+                lg = chatgpt.start_login(new_account=bool(body.get("new_account")))
+                return self._json({"url": lg.url, **chatgpt.status()})
+            if path == "/api/app/chatgpt/logout":
+                return self._json(chatgpt.logout())
             if path == "/api/app/open_folder":
                 p = Path(str(body.get("path") or ""))
                 if not p.is_dir():
