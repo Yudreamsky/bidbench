@@ -229,7 +229,8 @@ def plan(root: Folder, include: dict[str, str], exclude: dict[str, str]) -> list
         b = batch(node, [x for x in exclude if below(x, node)], why)
         if not b["files"]:
             return
-        if not b["too_big"] or not node.children:
+        deliveries = sum(1 for c in node.children if date_in(c.name)) >= 2  # 下面是一次次接收的图纸：每次一批，各用各的日期
+        if (not b["too_big"] and not deliveries) or not node.children:
             out.append(b)
             return
         for c in node.children:
