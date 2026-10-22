@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import threading
 import time
 import uuid
@@ -257,13 +258,29 @@ class Login:
     def wait(self, timeout: float | None = LOGIN_TIMEOUT) -> bool:
         return self.done.wait(timeout)
 
-    def close(self) -> None:
+    def close(self, wait: bool = False) -> None:
+        """关掉回调服务。wait：等它关好再返回（回调处理里不能等，自己会卡住）。"""
         httpd, self.httpd = self.httpd, None
         if httpd:
             def stop():
                 httpd.shutdown()
                 httpd.server_close()
-            threading.Thread(target=stop, daemon=True).start()
+            t = threading.Thread(target=stop, daemon=True)
+            t.start()
+            if wait:
+                t.join(5)
+
+
+class _CallbackServer(ThreadingHTTPServer):
+    """独占端口：Windows 上默认的地址复用会让两个程序同时占着同一个端口，登录结果可能送到别的程序
+    （比如正在登录的 Codex）或上一次没关掉的回调服务那里。"""
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)  # type: ignore[attr-defined]
+        super().server_bind()
 
 
 _current: Login | None = None
@@ -361,17 +378,18 @@ def start_login(new_account: bool = False, open_browser=webbrowser.open) -> Logi
     返回后在浏览器里完成；Login.wait() 等结果。"""
     global _current
     with _lock:
-        if _current is not None and not _current.done.is_set():
-            _current.error = "又开始了一次新的登录，这次作废"
-            _current.done.set()
-            _current.close()
+        if _current is not None:
+            if not _current.done.is_set():
+                _current.error = "又开始了一次新的登录，这次作废"
+                _current.done.set()
+            _current.close(wait=True)
         d = _load()
         hid = host_id()
         client_id = None if new_account else d.get("client_id")
         httpd = None
         for port in PORTS:
             try:
-                httpd = ThreadingHTTPServer(("127.0.0.1", port), BaseHTTPRequestHandler)
+                httpd = _CallbackServer(("127.0.0.1", port), BaseHTTPRequestHandler)
                 break
             except OSError:
                 continue
