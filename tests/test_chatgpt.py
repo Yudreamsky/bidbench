@@ -121,7 +121,9 @@ def fake(monkeypatch):
     f = FakeOpenAI()
     monkeypatch.setattr(chatgpt, "_urlopen", f)
     monkeypatch.setattr(chatgpt, "_sleep", lambda s: None)
-    return f
+    yield f
+    if chatgpt._current is not None:  # 关掉最后一次登录的回调服务，不留给下一个测试
+        chatgpt._current.close(wait=True)
 
 
 def _login(fake, new_account=False, **extra):
