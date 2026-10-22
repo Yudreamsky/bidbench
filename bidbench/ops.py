@@ -34,11 +34,11 @@ def _stop_error(e: Exception, message: str) -> OpError:
 # ---------------- 收图 ----------------
 
 def receive(proj: Project, sources, date: str, name: str | None = None, passwords=(), note: str | None = None,
-            av: bool = True, log: Log = print, progress=None) -> dict:
-    """收一批图纸：sources 是一个压缩包、文件或文件夹，或者同时收到的几个文件（列表）。"""
+            av: bool = True, log: Log = print, progress=None, label: str | None = None, exclude=()) -> dict:
+    """收一批图纸：sources 是一个压缩包、文件或文件夹，或者同时收到的几个文件（列表）。label、exclude 见 ingest.receive。"""
     srcs = [Path(s) for s in sources] if isinstance(sources, (list, tuple)) else [Path(sources)]
     r = ingest.receive(proj, srcs if len(srcs) > 1 else srcs[0], date, name, list(passwords), note, progress=progress,
-                       log=log)
+                       log=log, label=label, exclude=exclude)
     kinds = "、".join(f"{reports.KIND_LABEL.get(k, k)} {n}" for k, n in sorted(r.by_kind.items()))
     how = {"folder": "（文件夹）", "files": f"（{len(srcs)} 个文件）"}.get(r.source, "")
     verb = "收进" if r.source in ("folder", "files") else "解出"

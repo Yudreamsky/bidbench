@@ -472,10 +472,12 @@ class _Receiver:
 
 
 def receive(proj: Project, source, received_at: str, name: str | None = None,
-            passwords: list[str] | None = None, note: str | None = None, progress=None, log=None) -> ReceiveResult:
+            passwords: list[str] | None = None, note: str | None = None, progress=None, log=None,
+            label: str | None = None, exclude=()) -> ReceiveResult:
     """收一批图纸。source 是一个压缩包或文件、一个文件夹，或者同时收到的几个文件（列表）。
 
     progress(已处理, 总数) 只在收文件夹和多个文件时调用；log(一行字) 报列文件、复制到哪一步了。
+    收文件夹时 label 是出处里文件夹的叫法（默认文件夹名，智能收图用“上一层 › 这一层”），exclude 是不收的子文件夹。
     """
     sources = [Path(s) for s in source] if isinstance(source, (list, tuple)) else [Path(source)]
     if not sources:
@@ -485,7 +487,7 @@ def receive(proj: Project, source, received_at: str, name: str | None = None,
             raise FileNotFoundError(f"找不到 {s}")
     if len(sources) == 1 and sources[0].is_file():
         return _receive_file(proj, sources[0], received_at, name, passwords or [], note)
-    return _receive_collection(proj, sources, received_at, name, passwords or [], note, progress, log)
+    return _receive_collection(proj, sources, received_at, name, passwords or [], note, progress, log, label, exclude)
 
 
 def _receive_file(proj: Project, archive: Path, received_at: str, name: str | None, passwords: list[str],
@@ -544,12 +546,12 @@ def _too_big(n: int, total: int, counting: bool) -> str | None:
     return None
 
 
-def _walk(top: Path, skip: str, log=None) -> tuple[list[_Src], list[str], int, list[OSError]]:
+def _walk(top: Path, skip: str, log=None, exclude=()) -> tuple[list[_Src], list[str], int, list[OSError]]:
     """一层层列出文件夹里的文件：深度优先、同一层按名字排（和以前用 os.walk 时顺序一样）。
 
     链接、大小、修改时间都用列目录时一起拿到的信息，不再一个个文件去问：网络文件夹上每问一次都要来回一趟。
-    数到超过上限马上停，不用等整个文件夹列完才说收不下。符号链接和目录联接不跟进去，skip（项目自己的目录）整个跳过。
-    返回 (文件, 跳过的系统文件, 跳过的链接数, 打不开的子文件夹)。"""
+    数到超过上限马上停，不用等整个文件夹列完才说收不下。符号链接和目录联接不跟进去，skip（项目自己的目录）整个跳过，
+    exclude 里的子文件夹（相对路径，用 / 分开）也不收。返回 (文件, 跳过的系统文件, 跳过的链接数, 打不开的子文件夹)。"""
     entries, noise, links, unlisted, total = [], [], 0, [], 0
     stack = [(top, [])]
     while stack:
@@ -570,8 +572,9 @@ def _walk(top: Path, skip: str, log=None) -> tuple[list[_Src], list[str], int, l
             except OSError:
                 is_dir = False
             if is_dir:
-                if _plain(Path(e.path)) != skip:  # 项目目录在这个文件夹里：不收项目自己的数据
-                    subdirs.append((Path(e.path), prefix + [e.name]))
+                rel = prefix + [e.name]
+                if _plain(Path(e.path)) != skip and "/".join(rel) not in exclude:  # 项目目录在这个文件夹里：不收项目自己的数据
+                    subdirs.append((Path(e.path), rel))
                 continue
             if _is_noise(e.name):
                 noise.append("/".join(prefix + [e.name]))
@@ -592,7 +595,7 @@ def _walk(top: Path, skip: str, log=None) -> tuple[list[_Src], list[str], int, l
     return entries, noise, links, unlisted
 
 
-def _collect(proj: Project, sources: list[Path], log=None) -> tuple[str, list[_Src], list[str], int, list]:
+def _collect(proj: Project, sources: list[Path], log=None, exclude=()) -> tuple[str, list[_Src], list[str], int, list]:
     """列出这一批要收的文件。
 
     返回 (folder / files, 文件, 跳过的系统文件, 跳过的链接数, 打不开的子文件夹)。
@@ -605,7 +608,7 @@ def _collect(proj: Project, sources: list[Path], log=None) -> tuple[str, list[_S
             raise ValueError("这个文件夹在项目目录里面，不能当作收图来源")
         if log:
             log(f"列出文件夹里的文件：{_unlong(top)}")
-        entries, noise, links, unlisted = _walk(top, root, log)
+        entries, noise, links, unlisted = _walk(top, root, log, set(exclude))
         return "folder", entries, noise, links, unlisted
     if any(p.is_dir() for p in sources):
         raise ValueError("一次只能收一个文件夹；多个文件可以一起收")
@@ -676,9 +679,11 @@ def _stage(proj: Project, src: _Src, staging: Path, index: dict[str, str]) -> No
 
 
 def _receive_collection(proj: Project, sources: list[Path], received_at: str, name: str | None,
-                        passwords: list[str], note: str | None, progress, log=None) -> ReceiveResult:
-    kind, entries, noise, links, unlisted = _collect(proj, sources, log)
+                        passwords: list[str], note: str | None, progress, log=None, label: str | None = None,
+                        exclude=()) -> ReceiveResult:
+    kind, entries, noise, links, unlisted = _collect(proj, sources, log, exclude)
     folder = sources[0].resolve() if kind == "folder" else None
+    label = (label or folder_label(folder)).replace(SEP, " › ") if folder else None
     if not entries:
         raise ValueError("这个文件夹里没有可收的文件" if folder else "没有选中文件")
     total = sum(e.size or 0 for e in entries)
@@ -705,7 +710,7 @@ def _receive_collection(proj: Project, sources: list[Path], received_at: str, na
         if dup:
             raise ValueError(f"{'这个文件夹里的文件' if folder else '这几个文件'}和批次 #{dup['seq']} 收到的完全一样，已经收过了")
         if folder:
-            bname, source_name = name or folder_label(folder), folder_label(folder) + FOLDER_MARK
+            bname, source_name = name or label, label + FOLDER_MARK
         else:
             bname = name or f"{sources[0].stem} 等 {len(sources)} 个文件"
             source_name = "、".join(p.name for p in sources)
@@ -727,7 +732,7 @@ def _receive_collection(proj: Project, sources: list[Path], received_at: str, na
         )
         r = _Receiver(proj, con, seq, passwords)
         r.result = ReceiveResult(seq=seq, name=bname, source=kind, skipped=noise)
-        root_display = f"批次#{seq}" + (f"{SEP}{folder_label(folder)}{FOLDER_MARK}" if folder else "")
+        root_display = f"批次#{seq}" + (f"{SEP}{label}{FOLDER_MARK}" if folder else "")
         for i, e in enumerate(entries):
             if progress:
                 progress(i, len(entries))

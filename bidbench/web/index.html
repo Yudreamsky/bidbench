@@ -2462,8 +2462,15 @@ function renderReceive() {
     el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => {
       const paths = picked || [path.value.trim()];
       if (!paths[0]) { toast('请先选择压缩包、文件或文件夹'); return; }
+      ui.receive = { path: paths.length === 1 ? paths[0] : null, date: day.value };
       startJob('receive', { paths, date: day.value, passwords: pw.value.split(/\s+/).filter(Boolean), note: note.value.trim(), av: true });
-    } }, '开始收图')),
+    } }, '开始收图'),
+      el('button', { class: 'btn', type: 'button', onclick: () => {
+        const paths = picked || [path.value.trim()];
+        if (!paths[0] || paths.length > 1) { toast('智能收图请选一个文件夹（一级目录）'); return; }
+        startSurvey(paths[0], day.value);
+      } }, '智能收图（给一级目录）')),
+    el('p', { class: 'meta' }, '整个共享盘这样的一级目录，点「智能收图」：只列文件夹、不读文件内容，判断收哪些子文件夹、分几批，先给你看计划。'),
     el('p', { class: 'meta' }, APP.antivirus ? `收图时会用 ${APP.antivirus} 扫描新文件。` : '本机没有找到杀毒软件，只做静态检查。'));
 }
 
@@ -2496,6 +2503,37 @@ function chatgptBox(g, done) {
   if (g.signed_in) return el('div', { class: 'note warn' }, g.hint || '登录时没有同意使用 ChatGPT 套餐额度。', btn('重新登录', () => chatgptLogin(done), true), btn('退出登录', () => chatgptLogout(done)));
   return el('div', { class: 'note' }, '用 ChatGPT 账号登录后，直接调用 OpenAI 模型，不用装 Codex（Plus、Pro 等套餐，额度和 ChatGPT 共用）。',
     btn('用 ChatGPT 登录', () => chatgptLogin(done), true));
+}
+
+const sizeText = n => n >= 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1048576))} MB`;
+
+function startSurvey(path, day) {
+  ui.receive = { path, date: day || APP.today };
+  startJob('survey', { path });
+}
+
+/* 智能收图的计划：每批一行，默认都勾上；看过再按计划一批批收 */
+function surveyPlan(res) {
+  const gb = sizeText;
+  const take = new Set(res.batches.map((b, i) => i + 1).filter(i => !res.batches[i - 1].too_big));
+  const go = el('button', { class: 'btn primary', type: 'button', onclick: () => {
+    if (!take.size) { toast('至少勾一批'); return; }
+    startJob('receive_plan', { plan: res.file, only: [...take], date: (ui.receive && ui.receive.date) || APP.today, av: true });
+  } });
+  const sum = () => {
+    const bs = res.batches.filter((b, i) => take.has(i + 1));
+    go.textContent = `按计划收 ${bs.length} 批（${bs.reduce((a, b) => a + b.files, 0)} 个文件，${gb(bs.reduce((a, b) => a + b.bytes, 0))}）`;
+  };
+  const row = (b, i) => el('li', {}, el('label', {},
+    el('input', { type: 'checkbox', checked: take.has(i + 1) ? '' : null, disabled: b.too_big ? '' : null,
+      onchange: ev => { ev.target.checked ? take.add(i + 1) : take.delete(i + 1); sum(); } }),
+    el('span', {}, `第 ${i + 1} 批 ${b.label}：${b.files} 个文件（${gb(b.bytes)}）${b.too_big ? '，超过上限收不下' : ''}`)),
+    el('small', { class: 'meta' }, b.reason + (b.exclude.length ? `；不收 ${b.exclude.join('、')}` : '')));
+  sum();
+  return [el('p', { class: 'meta' }, `${res.how}判断。一级目录共 ${res.total.files} 个文件（${gb(res.total.bytes)}），PDF ${res.total.pdf}、DWG/DXF ${res.total.cad}。`),
+    el('ul', { class: 'list prio' }, res.batches.map(row)),
+    res.not_taken.length ? el('p', { class: 'meta' }, '不收：' + res.not_taken.map(x => `${x.rel}（${x.files} 个文件）`).join('、')) : null,
+    el('div', { class: 'opts' }, go, el('button', { class: 'btn', type: 'button', onclick: () => { ui.jobView = false; renderReceive(); } }, '换一个文件夹'))];
 }
 
 /* 识别：ChatGPT 账号（直连或经本机 Codex）或 Claude API；可以选模型，记住上次的选择 */
@@ -2878,7 +2916,7 @@ function renderJob(j) {
   if (j.error) parts.push(el('div', { class: 'note crit' }, j.error));
   const logBox = el('pre', { class: 'joblog', 'aria-label': '运行记录' }, j.lines.join('\n') || '…');
   // 估算完成后，运行记录和下面的分步列表重复：收起来，分步和“开始识别”直接排在标题下面
-  parts.push(j.kind === 'estimate' && j.status === 'done' && j.result ? el('details', {}, el('summary', {}, '运行记录'), logBox) : logBox);
+  parts.push((j.kind === 'estimate' || j.kind === 'survey') && j.status === 'done' && j.result ? el('details', {}, el('summary', {}, '运行记录'), logBox) : logBox);
   const res = j.result;
   if (j.status === 'done' && j.kind === 'estimate') {
     if (!res) parts.push(el('div', { class: 'note' }, '没有需要识别的页面。'));
@@ -2933,7 +2971,11 @@ function renderJob(j) {
     el('button', { class: 'btn', type: 'button', onclick: () => { ui.jobView = false; setView('graph'); clearAll(); } }, '看图谱')));
   if (j.status === 'done' && j.kind === 'export' && res) parts.push(el('div', { class: 'opts' },
     el('button', { class: 'btn primary', type: 'button', onclick: () => openFolder(res.path) }, '打开文件夹'), el('span', { class: 'mono' }, res.path)));
-  if (j.status === 'done' && j.kind === 'receive') parts.push(el('div', { class: 'opts' },
+  if (j.status === 'done' && j.kind === 'survey' && res) parts.push(...surveyPlan(res));
+  if (j.status === 'error' && j.kind === 'receive' && /一批收不下/.test(j.error || '') && ui.receive && ui.receive.path) parts.push(
+    el('div', { class: 'opts' }, el('button', { class: 'btn primary', type: 'button', onclick: () => startSurvey(ui.receive.path, ui.receive.date) },
+      '改用智能收图：判断收哪些子文件夹、分几批')));
+  if (j.status === 'done' && (j.kind === 'receive' || j.kind === 'receive_plan')) parts.push(el('div', { class: 'opts' },
     el('button', { class: 'btn primary', type: 'button', onclick: renderRecognize }, '识别新页面'),
     el('button', { class: 'btn', type: 'button', onclick: () => { ui.jobView = false; clearAll(); } }, '查看问题中心')));
   if (j.kind === 'update' || j.kind === 'rollback') {
