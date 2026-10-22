@@ -471,3 +471,41 @@ def test_reread_keeps_page_ids(cad_project, monkeypatch):
     old = pid.rsplit("-p", 1)[0] + "-p099"
     row = Toolkit(cad_project).check_basis([{"element": "梁 #7", "sheet": no, "rev": None, "page_id": old, "revit_id": 7}])["items"][0]
     assert row["page_id_now"] == pid and any("已经没有了" in r for r in row["reasons"]) and row["status"] != "不合格"
+
+
+def test_read_dwg_goes_on_past_a_file_that_breaks_the_reader(cad_project, monkeypatch):
+    """一个文件让读图、分图出了意外的错（不是 ReadError）：记成读不出、按文件名暂定，别的文件照读；
+    下次读 DWG 不再卡在它上面（整夜识别不会因为一个坏文件停在原地）。"""
+    real_read, real_split = dwg.read, dwg.split_sheets
+    base = ops.read_cad(cad_project, again=True, log=lambda s: None)["failed"]  # 样例里本来就有读不出的
+    hit = []
+
+    def read(path, ext=None, tool=None):
+        if not hit:
+            hit.append(path)
+            raise KeyError("handle")
+        return real_read(path, ext, tool)
+
+    monkeypatch.setattr(dwg, "read", read)
+    logs = []
+    r = ops.read_cad(cad_project, again=True, log=logs.append)
+    assert r["failed"] == base + 1 and r["files"] > 2 and r["sheets"] > 0
+    assert any("意外的错（KeyError）" in x for x in logs)
+    con = cad_project.connect()
+    assert [s for (s,) in con.execute("SELECT status FROM cad_reads")].count("failed") == base + 1
+    assert ops.read_cad(cad_project, log=lambda s: None)["files"] == 0  # 记下了，不会每次都从它读起
+
+    monkeypatch.setattr(dwg, "read", real_read)
+    split = []
+
+    def split_sheets(d):
+        if not split:
+            split.append(d)
+            raise IndexError("list index out of range")
+        return real_split(d)
+
+    monkeypatch.setattr(dwg, "split_sheets", split_sheets)
+    r = ops.read_cad(cad_project, again=True, log=logs.append)
+    assert r["failed"] == base + 1 and r["sheets"] > 0 and any("分图时出了意外的错（IndexError）" in x for x in logs)
+    unreadable = [i for i in state.build(cad_project)["issues"] if i["kind"] == "DWG 读不出"]
+    assert len(unreadable) == base + 1 and any("分图时出了意外的错" in i["detail"] for i in unreadable)  # 问题中心里列出来

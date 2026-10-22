@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ import jsonschema
 
 from . import dwg, names, pdfpages
 from .store import PLACEHOLDER_EXECUTORS, Project, now_iso
+
+log = logging.getLogger(__name__)
 
 TITLEBLOCK_CLIP = (0.62, 0.70, 1.0, 1.0)  # 图签常见位置：右下角
 
@@ -371,7 +374,8 @@ def make_task(proj: Project, include_done: bool = False, render: bool = True, sc
               stages: list[str] | None = None) -> Path | None:
     """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档，pages 给了就只放这几页。
 
-    渲染页面图片较慢，progress(已完成, 总数) 用来报进度。"""
+    渲染页面图片较慢，progress(已完成, 总数) 用来报进度。某一页取文字、出图出错（文件坏了、被删了）不放进任务包，
+    记在清单的 skipped 里，别的页照常放。"""
     rows = pick_pages(proj, "all" if include_done else scope, priorities, pages, stages)
     if not rows:
         return None
@@ -384,19 +388,26 @@ def make_task(proj: Project, include_done: bool = False, render: bool = True, sc
     spec = resources.files("bidbench").joinpath("spec")
     (task / "任务说明.md").write_text(spec.joinpath("任务说明.md").read_text(encoding="utf-8"), encoding="utf-8")
     (task / "schema.json").write_text(spec.joinpath("schema.json").read_text(encoding="utf-8"), encoding="utf-8")
-    items = []
-    for r in rows:
+    items, skipped = [], []
+    for i, r in enumerate(rows, 1):
         pdf = proj.root / r["stored_path"]
         pid = r["page_id"]
-        lines = pdfpages.text_lines(pdf, r["page_index"])
-        tdir = task / "text"
-        tdir.mkdir(exist_ok=True)
-        (tdir / f"{pid}.txt").write_text(r["text"], encoding="utf-8")
-        (tdir / f"{pid}.json").write_text(json.dumps({"lines": lines}, ensure_ascii=False, indent=1), encoding="utf-8")
-        if render:
-            pdfpages.render_page(pdf, r["page_index"], task / "pages" / f"{pid}.png", dpi=150)
-            pdfpages.render_page(pdf, r["page_index"], task / "pages" / f"{pid}-titleblock.png", dpi=300,
-                                 clip_frac=TITLEBLOCK_CLIP)
+        try:
+            lines = pdfpages.text_lines(pdf, r["page_index"])
+            tdir = task / "text"
+            tdir.mkdir(exist_ok=True)
+            (tdir / f"{pid}.txt").write_text(r["text"], encoding="utf-8")
+            (tdir / f"{pid}.json").write_text(json.dumps({"lines": lines}, ensure_ascii=False, indent=1), encoding="utf-8")
+            if render:
+                pdfpages.render_page(pdf, r["page_index"], task / "pages" / f"{pid}.png", dpi=150)
+                pdfpages.render_page(pdf, r["page_index"], task / "pages" / f"{pid}-titleblock.png", dpi=300,
+                                     clip_frac=TITLEBLOCK_CLIP)
+        except Exception as e:  # noqa: BLE001 - 一页出不了图不能让整个任务包做不成
+            log.warning("任务包里放不进 %s：%s", pid, type(e).__name__)
+            skipped.append({"page_id": pid, "file_path": r["first_path"], "error": f"{type(e).__name__}: {e}"})
+            if progress:
+                progress(i, len(rows))
+            continue
         items.append({
             "page_id": pid,
             "priority": priority_of(r["first_path"]),
@@ -413,12 +424,11 @@ def make_task(proj: Project, include_done: bool = False, render: bool = True, sc
             "text_lines": f"text/{pid}.json",
         })
         if progress:
-            progress(len(items), len(rows))
-    (task / "manifest_in.json").write_text(
-        json.dumps({"created_at": now_iso(), "project": proj.meta["name"], "scope": scope, "pages": items},
-                   ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+            progress(i, len(rows))
+    manifest = {"created_at": now_iso(), "project": proj.meta["name"], "scope": scope, "pages": items}
+    if skipped:
+        manifest["skipped"] = skipped
+    (task / "manifest_in.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (task / "results" / "pages").mkdir(parents=True, exist_ok=True)
     return task
 

@@ -277,6 +277,10 @@ class FatalError(Exception):
     """整次运行无法继续：凭据缺失或无效、模型不存在、没有权限。"""
 
 
+class LimitError(FatalError):
+    """额度暂时用完：这次停下，额度恢复后用同一个任务包接着做（整夜识别会等着续跑）。"""
+
+
 def _fatal(e: Exception) -> str | None:
     name = type(e).__name__
     if name == "AuthenticationError" or (isinstance(e, TypeError) and "authentication" in str(e).lower()):
@@ -469,15 +473,21 @@ class RunResult:
     model: str = ""
     seconds: float = 0.0
     structured: bool = True
+    later: int = 0  # 到了截止时间还没开始的页，留着下次续跑
+
+
+class _Later(Exception):
+    """到了截止时间：这一页这次不识别，下次续跑再做。"""
 
 
 def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: ProgressLog, model: str = "",
-              progress=None, fatal=None) -> RunResult:
+              progress=None, fatal=None, stop=None) -> RunResult:
     """各执行器共用的逐页流程：跳过已有合格结果（续跑）；先单独跑第一页，凭据、模型这类整体性问题在这里暴露，
     不会让每一页各失败一次；其余页并发。每页一行识别过程日志。
 
     recognize(item, usage, note) 返回一页的识别记录，单页失败抛 RecognitionError，要停下整次运行抛 FatalError；
     fatal(e) 判断其他异常是否要停下整次运行（返回给人看的原因），不停就记为这一页失败。
+    stop() 返回真就不再开始新的页（整夜识别到了截止时间）：正在识别的照常做完，没开始的留着下次续跑。
     """
     task_dir = Path(task_dir)
     manifest = json.loads((task_dir / "manifest_in.json").read_text(encoding="utf-8"))
@@ -504,6 +514,8 @@ def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: Prog
     log.info("识别开始：%s 页，跳过 %s 页，%s，并发 %s", len(todo), res.skipped, settings, workers)
 
     def one(item):
+        if stop and stop():
+            raise _Later
         u, t = Usage(), time.monotonic()
         try:
             rec = recognize(item, u, note)
@@ -513,7 +525,7 @@ def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: Prog
         (out / f"{item['page_id']}.md").write_text(page_markdown(rec), encoding="utf-8")
         return rec, u, time.monotonic() - t
 
-    def stop(reason: str, e: Exception):
+    def halt(reason: str, e: Exception):
         note(f"停止：{reason}")
         log.error("识别停止：%s（%s: %s）", reason, type(e).__name__, e)
 
@@ -523,8 +535,11 @@ def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: Prog
             rec, u, secs = fn()
             res.done += 1
             note(f"  ✓ {n} {page_label(it)} → {_found(rec)}（{secs:.0f} 秒，输入 {u.input} / 输出 {u.output} tokens）")
+        except _Later:
+            res.later += 1
+            return
         except FatalError as e:
-            stop(str(e), e)
+            halt(str(e), e)
             raise
         except RecognitionError as e:
             res.failed.append({"page_id": it["page_id"], "file": it["source"]["file_path"], "error": str(e)})
@@ -533,7 +548,7 @@ def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: Prog
         except Exception as e:  # noqa: BLE001 - API 错误等，记下后继续其他页面
             reason = fatal(e) if fatal else None
             if reason:
-                stop(reason, e)
+                halt(reason, e)
                 raise FatalError(reason) from e
             res.failed.append({"page_id": it["page_id"], "file": it["source"]["file_path"],
                                "error": f"{type(e).__name__}: {e}"})
@@ -554,6 +569,8 @@ def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: Prog
         raise
     pool.shutdown(wait=True)
     res.seconds = time.monotonic() - t0
+    if res.later:
+        note(f"到了截止时间，还有 {res.later} 页没开始，下次用同一个任务包续跑时接着识别。")
     if todo:
         note(f"结束：识别 {res.done} 页，失败 {len(res.failed)} 页，用时 {res.seconds:.0f} 秒。", show=False)
     log.info("识别结束：完成 %s 页，失败 %s 页，用时 %.0f 秒，输入 %s / 输出 %s tokens", res.done, len(res.failed),
@@ -562,8 +579,8 @@ def run_pages(task_dir: Path, recognize, settings: str, workers: int, note: Prog
 
 
 def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort: str | None = None,
-        tiles: int | None = None, workers: int = 4, client=None, progress=None, log_fn=None) -> RunResult:
-    """log_fn 收到逐页的识别过程（给人看的一行字）。"""
+        tiles: int | None = None, workers: int = 4, client=None, progress=None, log_fn=None, stop=None) -> RunResult:
+    """log_fn 收到逐页的识别过程（给人看的一行字）；stop 见 run_pages。"""
     cfg = TIERS[tier]
     model = model or cfg["model"]
     effort = effort or cfg["effort"]
@@ -580,7 +597,7 @@ def run(task_dir: Path, tier: str = "economy", model: str | None = None, effort:
         return recognize_page(client, Path(task_dir), item, model, effort, tiles, usage, validator, schema, mode, note)
 
     settings = f"模型 {model}，effort {effort}" + (f"，局部切片 {tiles}×{tiles}" if tiles > 1 else "")
-    res = run_pages(task_dir, recognize, settings, workers, note, model, progress, _fatal)
+    res = run_pages(task_dir, recognize, settings, workers, note, model, progress, _fatal, stop)
     res.structured = mode.structured
     _write_log(task_dir, res, tier, effort, tiles)
     return res
