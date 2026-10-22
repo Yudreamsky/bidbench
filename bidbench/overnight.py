@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 WAIT_MINUTES = 20  # 额度用完后隔多久再试
 RETRY_ROUNDS = 1   # 一步识别完，失败的页再试几轮
+FOLLOW_ROUNDS = 2  # 聚焦识别：识别出的索引又指到新的图，再识别几轮
 EXECUTORS = ("codex", "claude")
 FAILED = object()  # 某一步出错了（和“这一步没有要做的”区分开）
 
@@ -74,34 +75,41 @@ def _keep_awake(on: bool) -> None:
 def run(proj: Project, executor: str = "codex", scope: str = "new", tier: str = "economy", model: str | None = None,
         stages: list[str] | None = None, until: datetime | None = None, wait: float = WAIT_MINUTES,
         workers: int | None = None, log: ops.Log = print, sleep=time.sleep, clock=datetime.now,
-        runner=None, client=None, disciplines: list[str] | None = None) -> dict:
-    """整夜识别，返回各步的结果和日志文件的位置。disciplines 给了只识别这几个专业的图（先智能分类认出专业）。
-    runner（假的 Codex）、client（假的 Claude）、sleep、clock 只在测试里换。"""
+        runner=None, client=None, focus: recognition.Focus | None = None) -> dict:
+    """整夜识别，返回各步的结果和日志文件的位置。focus 给了只识别聚焦要用的图：先智能分类认出专业，识别出的索引
+    又指到新的图，再识别 FOLLOW_ROUNDS 轮。runner（假的 Codex）、client（假的 Claude）、sleep、clock 只在测试里换。"""
     if executor not in EXECUTORS:
         raise ValueError(f"整夜识别用 Codex 或 Claude 识别（收到的是 {executor}）")
     if scope not in recognition.SCOPES:
         raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(recognition.SCOPES)}")
+    if focus:
+        recognition.focus_pages(proj, focus)  # 塔楼写错、楼层看不出：开始以前就说
     path = oplog.folder(proj) / f"整夜识别-{clock():%Y%m%d-%H%M%S}.log"
     say = _Log(path, log)
-    n = _Night(proj, say, executor, scope, tier, model, until, wait, workers, sleep, clock, runner, client, disciplines)
+    n = _Night(proj, say, executor, scope, tier, model, until, wait, workers, sleep, clock, runner, client, focus)
     _keep_awake(True)
     try:
         say(f"整夜识别开始：项目「{proj.meta['name']}」，用 {ops.CLASSIFY_BY[executor]}，范围：{recognition.SCOPES[scope]}"
-            + (f"，只识别{'、'.join(disciplines)}的图" if disciplines else "")
+            + (f"，只识别聚焦 {focus.text()} 要用的图" if focus else "")
             + (f"，最晚做到 {until:%m-%d %H:%M}" if until else "，做完为止") + "。")
         say(f"日志：{path}")
         say("—— 读 DWG ——")
         n.out["dwg"] = n.value(n.step("读 DWG", lambda: ops.read_cad(proj, log=say)))
         if n.out["dwg"] and not n.out["dwg"]["files"] and not n.out["dwg"]["no_tool"]:
             say("DWG、DXF 都读过了。")
-        if disciplines:  # 图号认不出专业的，靠智能分类按图名、文件夹认：先分好，才知道哪些是要识别的
+        if focus:  # 图号认不出专业的，靠智能分类按图名、文件夹认：先分好，才知道哪些是要识别的
             n.out["classify"] = n.classify()
-        before = n.left()
-        why = n.step("识别", lambda: n.recognize(stages or [k for k, _lb, _d in recognition.STAGES]))
+        steps = stages or [k for k, _lb, _d in recognition.STAGES]
+        why = n.step("识别", lambda: n.recognize(steps))
+        for i in range(FOLLOW_ROUNDS if focus else 0):
+            more = n.left() if why is None else None
+            if not more:
+                break
+            say(f"—— 识别出的索引指到新的图，还有 {more} 页：再识别一轮（第 {i + 1} 轮） ——")
+            why = n.step("识别", lambda: n.recognize(steps))
         n.out["stopped"] = "识别出了意外的错，见上面" if why is FAILED else why
-        after = n.left()
-        if before is not None and after is not None:  # 中途停下、续跑过的也算准：按还剩多少页算
-            n.out["done"], n.out["left"] = before - after, after
+        n.out["left"] = n.left()
+        n.out["done"] = n.value(n.step("统计识别了几页", n.done)) or 0
         n.out["classify"] = n.classify() or n.out["classify"]
         n.out["build"] = n.value(n.step("算报告", lambda: ops.build(proj, log=say)))
         n.summary()
@@ -112,13 +120,19 @@ def run(proj: Project, executor: str = "codex", scope: str = "new", tier: str = 
 
 class _Night:
     def __init__(self, proj, say, executor, scope, tier, model, until, wait, workers, sleep, clock, runner, client,
-                 disciplines=None):
+                 focus=None):
         self.proj, self.say, self.executor, self.scope, self.tier, self.model = proj, say, executor, scope, tier, model
         self.until, self.wait_minutes, self.workers, self.sleep, self.clock = until, wait, workers, sleep, clock
-        self.runner, self.client, self.disciplines = runner, client, disciplines
+        self.runner, self.client, self.focus = runner, client, focus
         self.out = {"log": str(say.path), "dwg": None, "done": 0, "failed": 0, "skipped_pages": 0, "stopped": None,
                     "classify": None, "build": None, "left": None}
         self.plan = None  # 最后一次统计的还剩多少（给结尾的汇总用）
+        self.tried: set[str] = set()  # 这次放进过任务包的页
+
+    def done(self) -> int:
+        """这次识别了几页：放进过任务包、现在不用再识别的页（中途停下续跑过、聚焦的图越跟越多也算得准）。"""
+        still = {r["page_id"] for r in recognition.pick_pages(self.proj, self.scope, focus=self.focus)}
+        return len(self.tried - still)
 
     def late(self) -> bool:
         return self.until is not None and self.clock() >= self.until
@@ -127,7 +141,7 @@ class _Night:
         """范围内还要识别几页（不出图、不调用 AI，几千页也很快）；统计不了返回 None。"""
         plan = self.step("统计还剩多少", lambda: ops.plan_recognition(self.proj, self.scope, self.executor, self.tier,
                                                                       self.model, workers=self.workers,
-                                                                      disciplines=self.disciplines))
+                                                                      focus=self.focus))
         if plan is FAILED:
             return None
         self.plan = plan
@@ -168,10 +182,10 @@ class _Night:
             if self.executor == "codex":
                 est = self.step(f"准备{label}", lambda: ops.prepare_codex(self.proj, self.scope, self.tier, self.model,
                                                                          workers=self.workers, stages=[key],
-                                                                         disciplines=self.disciplines))
+                                                                         focus=self.focus))
             else:
                 est = self.step(f"准备{label}", lambda: ops.prepare_claude(self.proj, self.scope, self.tier, self.model,
-                                                                          stages=[key], disciplines=self.disciplines))
+                                                                          stages=[key], focus=self.focus))
             if est is FAILED:
                 continue
             if est is None:
@@ -186,7 +200,9 @@ class _Night:
         return None
 
     def _report_skipped(self, task: Path) -> None:
-        skipped = json.loads((task / "manifest_in.json").read_text(encoding="utf-8")).get("skipped") or []
+        manifest = json.loads((task / "manifest_in.json").read_text(encoding="utf-8"))
+        self.tried |= {it["page_id"] for it in manifest["pages"]}
+        skipped = manifest.get("skipped") or []
         self.out["skipped_pages"] += len(skipped)
         for s in skipped[:10]:
             self.say(f"  ✗ 出不了图，没放进任务包：{s['file_path']}——{s['error']}")
@@ -260,7 +276,7 @@ class _Night:
         if o["stopped"]:
             self.say(f"识别停在：{o['stopped']}。再运行一次整夜识别会接着做。")
         if o["left"] == 0:
-            m = self.value(self.step("统计", lambda: recognition.stage_plan(self.proj, self.scope, self.disciplines)["map"]))
+            m = self.value(self.step("统计", lambda: recognition.stage_plan(self.proj, self.scope, self.focus)["map"]))
             self.say("范围内的页都识别过了。" + (ops.map_text(m) if m else ""))
         elif self.plan:
             self.say(ops.stages_text(self.plan))
