@@ -141,54 +141,77 @@ def find_tool() -> str | None:
 
 # ---------------- 读 DWG（LibreDWG） ----------------
 
-WANT = {"BLOCK_HEADER", "LAYOUT", "TEXT", "MTEXT", "INSERT", "MINSERT", "ATTRIB", "LINE", "LWPOLYLINE", "VIEWPORT", "SEQEND"}
-KIND_LINE = re.compile(r'^\s*"(?:entity|object)": "([A-Z0-9_]+)"')
+WANT = {b"BLOCK_HEADER", b"LAYOUT", b"TEXT", b"MTEXT", b"INSERT", b"MINSERT", b"ATTRIB", b"LINE", b"LWPOLYLINE", b"VIEWPORT",
+        b"SEQEND"}
+CHUNK = 1 << 22  # 一次读 4 MB
+OBJECTS_START = b'\n  "OBJECTS": ['
+OBJECTS_END = b"\n  ]"  # 对象表的结尾：对象里面的行缩进都更深，缩进两格的“]”只有这一个
+OBJ_END = b"\n    }"
+OBJ_START = re.compile(rb'\n    \{\r?\n\s*"(?:entity|object)": "([A-Z0-9_]+)"')
+READER = re.compile(rb'\n  "created_by": "([^"\r\n]*)"')
+VERSION = re.compile(rb'\n    "version": "?([^",\r\n]*)')
 
 
-def iter_json(lines):
-    """dwgread -O JSON 的输出逐行读：返回 ({"version", "reader"}, 只含要用的对象的迭代器)。
-    输出是排好版的：OBJECTS 里每个对象从一行“    {”开始，到“    }”或“    },”结束。"""
+def iter_json(src):
+    """dwgread -O JSON 的输出（二进制流，或一行行的列表）：返回 ({"version", "reader", "closed"}, 只含要用的对象的迭代器)。
+    输出是排好版的：OBJECTS 里每个对象从一行“    {”开始，到“    }”或“    },”结束，对象里面的行缩进更深。
+    几 MB 的 DWG 出来几百万行，一行行用 Python 过一遍比 dwgread 自己还慢，同时读几个也快不了（Python 一次只跑一个线程）：
+    成块读进来，用正则找每个对象的开头和种类，只解析要用的。"""
     meta = {"version": "", "reader": "", "closed": False}
 
     def objects():
-        inside, buf, skip = False, None, False
-        for raw in lines:
-            line = (raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw).rstrip("\r\n")
-            if not inside:
-                if line.startswith('  "OBJECTS": ['):
-                    inside = True
-                elif line.startswith('  "created_by":'):
-                    meta["reader"] = line.split(":", 1)[1].strip().strip('",')
-                elif line.startswith('    "version":') and not meta["version"]:
-                    meta["version"] = line.split(":", 1)[1].strip().strip('",')
-                continue
-            if line.startswith("  ]"):
-                inside = False
+        chunks = _chunks(src)
+        data = b"\n"
+        for chunk in chunks:
+            data += chunk
+            if data.find(OBJECTS_START, max(0, len(data) - len(chunk) - len(OBJECTS_START))) != -1:
+                break
+        head, found, data = data.partition(OBJECTS_START)
+        for key, rx in (("reader", READER), ("version", VERSION)):
+            if m := rx.search(head):
+                meta[key] = m.group(1).decode("utf-8", "replace")
+        if not found:
+            return  # 没有对象表（dwgread 一开始就崩了）：上面已经读到结尾
+        while True:
+            end = data.find(OBJECTS_END)
+            if end != -1:
+                yield from _wanted(data[:end])
                 meta["closed"] = True
-                continue
-            if line == "    {":
-                buf, skip = [line], False
-                continue
-            if buf is None:
-                continue
-            if line in ("    }", "    },"):
-                if not skip:
-                    try:
-                        yield json.loads("\n".join(buf) + "\n    }")
-                    except ValueError:
-                        pass  # 坏了一个对象不影响别的
-                buf = None
-                continue
-            if skip:
-                continue
-            if len(buf) == 1:
-                m = KIND_LINE.match(line)
-                if not m or m.group(1) not in WANT:
-                    skip = True
-                    continue
-            buf.append(line)
+                break
+            end = data.rfind(OBJ_END)
+            end = end + len(OBJ_END) if end != -1 else 0  # 读进来的这一块里写完了的对象
+            yield from _wanted(data[:end])
+            chunk = next(chunks, None)
+            if chunk is None:
+                break  # dwgread 读到一半崩了：最后那个没写完的对象不要
+            data = data[end:] + chunk
+        for _ in chunks:
+            pass  # 读到结尾：dwgread 才不会卡在写不出去上
 
     return meta, objects()
+
+
+def _chunks(src):
+    if hasattr(src, "read"):
+        while chunk := src.read(CHUNK):
+            yield chunk
+    else:
+        for line in src:
+            yield line if isinstance(line, bytes) else line.encode("utf-8")
+
+
+def _wanted(data: bytes):
+    """data 里写完了的对象，只解析要用的几种；文字里夹着的坏字节换成替代符。"""
+    for m in OBJ_START.finditer(data):
+        if m.group(1) not in WANT:
+            continue
+        end = data.find(OBJ_END, m.end())
+        if end == -1:
+            break
+        try:
+            yield json.loads(data[m.start() + 1:end + len(OBJ_END)].decode("utf-8", "replace"))
+        except ValueError:
+            pass  # 坏了一个对象不影响别的
 
 
 def _dwgread(path: Path, tool: str | None, consume):

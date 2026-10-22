@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "samples"))
 
 import make_sample  # noqa: E402
 
-from bidbench import chatgpt, debuglog, ingest, recognition, state  # noqa: E402
+from bidbench import chatgpt, debuglog, ingest, ops, recognition, state  # noqa: E402
 from bidbench.executors import codex, simulated  # noqa: E402
 from bidbench.store import Project  # noqa: E402
 
@@ -52,6 +52,12 @@ def _no_real_ai(monkeypatch):
         raise RealServiceCalled(f"测试连了真的 OpenAI：{req.full_url}，请换成假的 chatgpt._urlopen")
     monkeypatch.setattr(chatgpt, "_urlopen", offline)
     monkeypatch.setattr(chatgpt, "_current", None)
+
+
+@pytest.fixture(autouse=True)
+def _read_cad_here(monkeypatch):
+    """读 DWG 默认在本进程里一个个读：测试换掉的读图函数到了另开的读图进程里不起作用。要同时读的测试自己传 workers。"""
+    monkeypatch.setattr(ops, "CAD_WORKERS", 1)
 
 
 @pytest.fixture(scope="session")
