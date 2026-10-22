@@ -23,14 +23,15 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import antivirus, appconfig, chat, chatgpt, debuglog, export, navigate, numbering, oplog, ops, recognition, release, state, updater
+from . import (antivirus, appconfig, chat, chatgpt, debuglog, export, ingest, navigate, numbering, oplog, ops, recognition,
+               release, state, survey, updater)
 from .store import Project, SchemaTooNew, add_decision, latest_decisions, now_iso, revoke_decision
 
 DECISION_KINDS = {"sheet_pick", "sheet_current", "sheet_void", "missing", "fact", "risk", "catalog_rev", "name_check",
                   "file_tower", "tower_alias", "rev_check", "floor_base", "numbering", "depth"}
 PAGE_ID = re.compile(r"[0-9a-f]{12}-p\d{3}")
 TOKEN_META = '<meta name="bidbench-token" content="">'
-PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan", "read_dwg"}  # 记进项目操作日志的任务
+PROJECT_JOBS = {"receive", "estimate", "recognize", "classify", "build", "export", "scan", "read_dwg", "survey", "receive_plan"}  # 记进项目操作日志的任务
 SOURCE = "工作台"
 
 log = logging.getLogger(__name__)
@@ -253,6 +254,38 @@ def _job_fn(app: _App, kind: str, body: dict):
             ops.classify_if_ready(proj, log=job.log)  # 用过 Codex、Claude 识别的：新图纸先按名字分一下类
             return r
         return oplog.receive_title(paths), fn
+
+    if kind == "survey":  # 智能收图：给一级目录，判断收哪些子文件夹、分几批
+        top = Path(str(body.get("path") or "").strip()).expanduser()
+        if not str(top).strip() or not top.is_dir():
+            raise ValueError("智能收图要选一个文件夹（一级目录）")
+        executor = "codex" if ops.codex_status()["ready"] else "rules"
+
+        def fn(job):
+            job.stage = "列文件夹"
+            return survey.make_plan(need_proj(), top, executor, log=job.log)
+        return f"{oplog.TITLES['survey']}：{ingest.folder_label(top)}", fn
+
+    if kind == "receive_plan":  # 按智能收图的计划一批批收
+        plan = Path(str(body.get("plan") or ""))
+        if not plan.is_file():
+            raise ValueError("找不到收图计划，请重新做一次智能收图")
+        when = str(body.get("date") or date.today().isoformat())
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", when):
+            raise ValueError("收图日期格式应为 YYYY-MM-DD")
+        only = [int(x) for x in body.get("only") or [] if isinstance(x, int) or str(x).isdigit()] or None
+
+        def fn(job):
+            def progress(n, total):
+                job.progress = (n, total)
+            r = survey.receive_plan(need_proj(), plan, when, av=bool(body.get("av", True)), log=job.log,
+                                    progress=progress, only=only)
+            job.progress = None
+            ops.build(proj, log=job.log)
+            job.stage = "智能分类"
+            ops.classify_if_ready(proj, log=job.log)
+            return r
+        return f"{oplog.TITLES['receive_plan']}：{plan.name}", fn
 
     if kind == "estimate":
         scope, tier = body.get("scope") or "new", body.get("tier") or "economy"
