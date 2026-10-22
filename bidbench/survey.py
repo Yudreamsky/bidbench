@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -369,7 +370,7 @@ def receive_plan(proj: Project, plan_or_path, date: str, av: bool = True, log=pr
             else:
                 log(f"  ✗ 这一批没收成：{e}")
                 out["failed"].append({"batch": i, "error": str(e)})
-        except OSError as e:
+        except (OSError, sqlite3.OperationalError) as e:  # 网络断了、数据库一直被占用：这一批先放下，接着收下一批
             log(f"  ✗ 这一批没收成（{type(e).__name__}: {e}），再按计划收一次会接着收")
             out["failed"].append({"batch": i, "error": f"{type(e).__name__}: {e}"})
     log(f"按计划收图完成：收了 {len(out['received'])} 批，以前收过 {len(out['skipped'])} 批，"

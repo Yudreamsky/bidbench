@@ -120,6 +120,28 @@ def test_receive_by_plan_and_again(share, proj):
     assert len(again["skipped"]) == 2 and not again["received"]  # 断了再按计划收：收过的批次跳过
 
 
+def test_receive_plan_goes_on_when_the_database_is_busy(share, proj, monkeypatch):
+    """收某一批时数据库一直被别的程序占着（工作台开着在算）：这一批记成没收成，接着收下一批，不整个停下。"""
+    import sqlite3
+
+    from bidbench import ops, store
+    assert store.DB_TIMEOUT >= 60  # 别人正在写，先等一阵
+    p = survey.make_plan(proj, share, "rules", log=lambda s: None)
+    real, calls = ops.receive, []
+
+    def receive(*a, **kw):
+        calls.append(kw["label"])
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(ops, "receive", receive)
+    lines = []
+    r = survey.receive_plan(proj, p, "2026-10-22", av=False, log=lines.append)
+    assert [x["batch"] for x in r["failed"]] == [1] and [x["batch"] for x in r["received"]] == [2]
+    assert any("database is locked" in x and "再按计划收一次会接着收" in x for x in lines)
+
+
 def test_cli_survey_and_receive_plan(share, proj, capsys):
     cli.main(["-p", str(proj.root), "survey", str(share), "--executor", "rules"])
     out = capsys.readouterr().out
