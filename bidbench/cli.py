@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import debuglog, guide, numbering, oplog, ops, overnight, recognition, state
+from . import debuglog, guide, numbering, oplog, ops, overnight, recognition, state, survey
 from .store import Project, add_decision, latest_decisions, now_iso, revoke_decision
 
 SOURCE = "命令行"
@@ -42,6 +42,19 @@ def cmd_receive(args):
 
 def cmd_scan(args):
     return ops.scan(_proj(args), av=not args.no_av)
+
+
+def cmd_survey(args):
+    return survey.make_plan(_proj(args), Path(args.folder), args.executor, args.model)
+
+
+def cmd_receive_plan(args):
+    def progress(n, total):
+        if total >= 20:
+            print(f"\r  已处理 {n}/{total} 个文件", end="" if n < total else "\n", flush=True)
+
+    only = [int(x) for x in args.only.split(",") if x.strip()] if args.only else None
+    return survey.receive_plan(_proj(args), Path(args.plan), args.date, av=not args.no_av, progress=progress, only=only)
 
 
 def cmd_read_dwg(args):
@@ -438,6 +451,10 @@ def _op(args) -> tuple[str, str, str] | None:
         return "init", f"新建项目「{args.name}」", args.dir
     if c == "receive":
         return "receive", oplog.receive_title(args.archive), args.project
+    if c == "survey":
+        return "survey", f"{oplog.TITLES['survey']}：{Path(args.folder).name or args.folder}", args.project
+    if c == "receive-plan":
+        return "receive_plan", f"{oplog.TITLES['receive_plan']}：{Path(args.plan).name}", args.project
     if c == "recognize":
         if args.executor == "simulated":
             return "recognize", oplog.TITLES["simulated"], args.project
@@ -545,6 +562,21 @@ def main(argv=None):
     s.add_argument("--note")
     s.add_argument("--no-av", action="store_true", help="不调用杀毒软件（静态检查照做）")
     s.set_defaults(fn=cmd_receive)
+
+    s = sub.add_parser("survey", help="智能收图：给一级目录（比如整个共享盘），只列文件夹不读文件内容，判断收哪些子文件夹、"
+                                      "分几批，写成收图计划（项目 reports 里）")
+    s.add_argument("folder")
+    s.add_argument("--executor", default="codex", choices=["codex", "rules"],
+                   help="codex=让 Codex 判断（只发文件夹名字、各类文件数量和几个图纸文件名）；rules=只按名字和数量的规则")
+    s.add_argument("--model", help="换 Codex 模型")
+    s.set_defaults(fn=cmd_survey)
+
+    s = sub.add_parser("receive-plan", help="按收图计划一批批收（bidbench survey 写的 json）；收过的批次跳过，断了再运行接着收")
+    s.add_argument("plan")
+    s.add_argument("--date", required=True, help="收图日期 YYYY-MM-DD")
+    s.add_argument("--only", help="只收这几批，如 1,3,4")
+    s.add_argument("--no-av", action="store_true", help="不调用杀毒软件（静态检查照做）")
+    s.set_defaults(fn=cmd_receive_plan)
 
     s = sub.add_parser("scan", help="风险文件检查：按最新规则重查全部文件，并用本机杀毒软件扫描")
     s.add_argument("--no-av", action="store_true", help="只做静态检查")
