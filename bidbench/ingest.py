@@ -30,6 +30,7 @@ from .store import Project, sha256_file
 MAX_DEPTH = 8
 MAX_TOTAL_BYTES = 20 * 1024**3  # 单批次解压总量上限，防压缩炸弹
 MAX_SOURCE_FILES = 20000        # 一个文件夹最多收这么多文件，防止选错文件夹（比如整个磁盘）
+LIST_NOTE_EVERY = 2000          # 列文件夹时每找到这么多个文件报一次数（网络文件夹列得慢，不报看着像卡住）
 SEP = " / "
 FOLDER_MARK = "（文件夹）"       # 文件夹批次出处路径里，文件夹名后面加这个标记
 NEED_PASSWORD = "需要密码（工作台收图时填“压缩包密码”，命令行加 --password）"
@@ -130,25 +131,17 @@ def _long(p: Path) -> Path:
     return Path("\\\\?\\UNC\\" + s[2:]) if s.startswith("\\\\") else Path("\\\\?\\" + s)
 
 
-def _plain(p: Path) -> str:
-    """去掉 _long 加的前缀，用来比较路径。"""
+def _unlong(p: Path) -> str:
+    """去掉 _long 加的前缀（给人看的路径）。"""
     s = str(p)
     if s.startswith("\\\\?\\UNC\\"):
-        s = "\\\\" + s[8:]
-    elif s.startswith("\\\\?\\"):
-        s = s[4:]
-    return os.path.normcase(s)
+        return "\\\\" + s[8:]
+    return s[4:] if s.startswith("\\\\?\\") else s
 
 
-def _is_link(p: Path) -> bool:
-    return p.is_symlink() or bool(getattr(os.path, "isjunction", lambda _: False)(p))
-
-
-def _size(p: Path) -> int | None:
-    try:
-        return p.stat().st_size
-    except OSError:
-        return None
+def _plain(p: Path) -> str:
+    """去掉 _long 加的前缀，用来比较路径。"""
+    return os.path.normcase(_unlong(p))
 
 
 def _win_open_error(path: Path) -> int | None:
@@ -479,10 +472,10 @@ class _Receiver:
 
 
 def receive(proj: Project, source, received_at: str, name: str | None = None,
-            passwords: list[str] | None = None, note: str | None = None, progress=None) -> ReceiveResult:
+            passwords: list[str] | None = None, note: str | None = None, progress=None, log=None) -> ReceiveResult:
     """收一批图纸。source 是一个压缩包或文件、一个文件夹，或者同时收到的几个文件（列表）。
 
-    progress(已处理, 总数) 只在收文件夹和多个文件时调用。
+    progress(已处理, 总数) 只在收文件夹和多个文件时调用；log(一行字) 报列文件、复制到哪一步了。
     """
     sources = [Path(s) for s in source] if isinstance(source, (list, tuple)) else [Path(source)]
     if not sources:
@@ -492,7 +485,7 @@ def receive(proj: Project, source, received_at: str, name: str | None = None,
             raise FileNotFoundError(f"找不到 {s}")
     if len(sources) == 1 and sources[0].is_file():
         return _receive_file(proj, sources[0], received_at, name, passwords or [], note)
-    return _receive_collection(proj, sources, received_at, name, passwords or [], note, progress)
+    return _receive_collection(proj, sources, received_at, name, passwords or [], note, progress, log)
 
 
 def _receive_file(proj: Project, archive: Path, received_at: str, name: str | None, passwords: list[str],
@@ -526,10 +519,83 @@ def _receive_file(proj: Project, archive: Path, received_at: str, name: str | No
         return r.result
 
 
-def _collect(proj: Project, sources: list[Path]) -> tuple[str, list[tuple[Path, list[str]]], list[str], int, list]:
+def folder_label(p) -> str:
+    """文件夹的名字；共享盘、磁盘的根目录没有名字，用整个路径（\\\\服务器\\共享 → 服务器/共享）。"""
+    return p.name or p.anchor.strip("\\/").replace("\\", "/") or str(p)
+
+
+@dataclass
+class _Src:
+    disk: Path                  # 收图来源里的文件
+    rel: list[str]              # 出处路径的各段
+    size: int | None = None
+    mtime: int | None = None    # 纳秒；续收时认“这个文件上次已经复制进项目了”
+    local: Path | None = None   # 复制进项目以后，项目里的那份
+    sha: str | None = None
+
+
+def _too_big(n: int, total: int, counting: bool) -> str | None:
+    more = f"（数到第 {n} 个文件就停下了）" if counting else ""
+    if n > MAX_SOURCE_FILES:
+        return f"文件夹里超过 {MAX_SOURCE_FILES} 个文件{more}，一批收不下，请确认选对了文件夹；图纸多的话分几个子文件夹收"
+    if total > MAX_TOTAL_BYTES:
+        return (f"文件夹里的文件超过 {MAX_TOTAL_BYTES / 1024**3:.0f} GB{more}，一批收不下，"
+                "请确认选对了文件夹；图纸多的话分几个子文件夹收")
+    return None
+
+
+def _walk(top: Path, skip: str, log=None) -> tuple[list[_Src], list[str], int, list[OSError]]:
+    """一层层列出文件夹里的文件：深度优先、同一层按名字排（和以前用 os.walk 时顺序一样）。
+
+    链接、大小、修改时间都用列目录时一起拿到的信息，不再一个个文件去问：网络文件夹上每问一次都要来回一趟。
+    数到超过上限马上停，不用等整个文件夹列完才说收不下。符号链接和目录联接不跟进去，skip（项目自己的目录）整个跳过。
+    返回 (文件, 跳过的系统文件, 跳过的链接数, 打不开的子文件夹)。"""
+    entries, noise, links, unlisted, total = [], [], 0, [], 0
+    stack = [(top, [])]
+    while stack:
+        here, prefix = stack.pop()
+        try:
+            with os.scandir(here) as it:
+                items = sorted(it, key=lambda e: e.name)
+        except OSError as e:
+            unlisted.append(e)
+            continue
+        subdirs = []
+        for e in items:
+            try:
+                if e.is_symlink() or getattr(e, "is_junction", lambda: False)():
+                    links += 1
+                    continue
+                is_dir = e.is_dir(follow_symlinks=False)
+            except OSError:
+                is_dir = False
+            if is_dir:
+                if _plain(Path(e.path)) != skip:  # 项目目录在这个文件夹里：不收项目自己的数据
+                    subdirs.append((Path(e.path), prefix + [e.name]))
+                continue
+            if _is_noise(e.name):
+                noise.append("/".join(prefix + [e.name]))
+                continue
+            try:
+                st = e.stat(follow_symlinks=False)
+                size, mtime = st.st_size, st.st_mtime_ns
+            except OSError:
+                size = mtime = None
+            entries.append(_Src(Path(e.path), prefix + [e.name], size, mtime))
+            total += size or 0
+            why = _too_big(len(entries), total, counting=True)
+            if why:
+                raise ValueError(why)
+            if log and len(entries) % LIST_NOTE_EVERY == 0:
+                log(f"  正在列出文件：已找到 {len(entries)} 个（{total / 1024**3:.1f} GB）……")
+        stack.extend(reversed(subdirs))
+    return entries, noise, links, unlisted
+
+
+def _collect(proj: Project, sources: list[Path], log=None) -> tuple[str, list[_Src], list[str], int, list]:
     """列出这一批要收的文件。
 
-    返回 (folder / files, [(磁盘路径, 出处路径的各段)], 跳过的系统文件, 跳过的链接数, 打不开的子文件夹)。
+    返回 (folder / files, 文件, 跳过的系统文件, 跳过的链接数, 打不开的子文件夹)。
     文件夹里的符号链接和目录联接不跟进去；项目自己的目录在里面时整个跳过。
     """
     root = _plain(proj.root.resolve())
@@ -537,57 +603,101 @@ def _collect(proj: Project, sources: list[Path]) -> tuple[str, list[tuple[Path, 
         top = _long(sources[0])
         if _plain(top) == root or _plain(top).startswith(root + os.sep):
             raise ValueError("这个文件夹在项目目录里面，不能当作收图来源")
-        entries, noise, links, unlisted = [], [], 0, []
-        for dirpath, dirnames, filenames in os.walk(top, onerror=unlisted.append):
-            here = Path(dirpath)
-            keep = []
-            for d in sorted(dirnames):
-                sub = here / d
-                if _is_link(sub):
-                    links += 1
-                elif _plain(sub) != root:  # 项目目录在这个文件夹里：不收项目自己的数据
-                    keep.append(d)
-            dirnames[:] = keep
-            for f in sorted(filenames):
-                p = here / f
-                rel = list(p.relative_to(top).parts)
-                if _is_link(p):
-                    links += 1
-                elif _is_noise(f):
-                    noise.append("/".join(rel))
-                else:
-                    entries.append((p, rel))
+        if log:
+            log(f"列出文件夹里的文件：{_unlong(top)}")
+        entries, noise, links, unlisted = _walk(top, root, log)
         return "folder", entries, noise, links, unlisted
     if any(p.is_dir() for p in sources):
         raise ValueError("一次只能收一个文件夹；多个文件可以一起收")
     for p in sources:
         if _plain(_long(p)).startswith(root + os.sep):
             raise ValueError(f"{p.name} 在项目目录里面，不能当作收图来源")
-    return "files", [(_long(p), [p.name]) for p in sources], [], 0, []
+    out = []
+    for p in sources:
+        try:
+            st = _long(p).stat()
+            size, mtime = st.st_size, st.st_mtime_ns
+        except OSError:
+            size = mtime = None
+        out.append(_Src(_long(p), [p.name], size, mtime))
+    return "files", out, [], 0, []
+
+
+def _staging(proj: Project) -> tuple[Path, dict[str, str]]:
+    """复制进项目时用的临时文件夹，和“哪个来源文件已经复制过、内容指纹是什么”的记录（断了重收时不再从网络读）。"""
+    d = proj.dir("blobs", ".staging")
+    index: dict[str, str] = {}
+    try:
+        with open(d / "index.jsonl", encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    row = json.loads(ln)
+                    index[row["key"]] = row["sha256"]
+                except (ValueError, KeyError, TypeError):
+                    continue  # 写到一半断电的那一行
+    except OSError:
+        pass
+    return d, index
+
+
+def _stage(proj: Project, src: _Src, staging: Path, index: dict[str, str]) -> None:
+    """把收图来源里的一个文件复制进项目（直接放进 blobs），复制完在本机算指纹：网络文件夹上每个文件只读一遍，
+    之后认类型、查风险、读 PDF 都读项目里这份。上次复制过、大小和修改时间都没变的直接用。
+    读不出来就不动它：登记时按原来的办法再读一次，记成“读不出来”或“被拦截”。"""
+    ext = _ext_of(src.rel[-1])
+    key = f"{_plain(src.disk)}|{src.size}|{src.mtime}"
+    sha = index.get(key) if src.size is not None and src.mtime is not None else None
+    if sha and proj.blob_path(sha, ext).exists():
+        src.local, src.sha = proj.blob_path(sha, ext), sha
+        return
+    tmp_dir = Path(tempfile.mkdtemp(dir=staging))
+    tmp = tmp_dir / src.rel[-1]  # 临时文件和原来同名：读不出来时报的名字对得上
+    try:
+        shutil.copyfile(src.disk, tmp)
+        sha = sha256_file(tmp)
+        dst = proj.blob_path(sha, ext)
+        if dst.exists():
+            tmp.unlink()
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp, dst)
+    except OSError:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    src.local, src.sha = dst, sha
+    if src.size is not None and src.mtime is not None:
+        index[key] = sha
+        try:
+            with open(staging / "index.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps({"key": key, "sha256": sha}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass  # 记不下来只是下次要重新复制
 
 
 def _receive_collection(proj: Project, sources: list[Path], received_at: str, name: str | None,
-                        passwords: list[str], note: str | None, progress) -> ReceiveResult:
-    kind, entries, noise, links, unlisted = _collect(proj, sources)
+                        passwords: list[str], note: str | None, progress, log=None) -> ReceiveResult:
+    kind, entries, noise, links, unlisted = _collect(proj, sources, log)
     folder = sources[0].resolve() if kind == "folder" else None
     if not entries:
         raise ValueError("这个文件夹里没有可收的文件" if folder else "没有选中文件")
-    if len(entries) > MAX_SOURCE_FILES:
-        raise ValueError(f"文件夹里有 {len(entries)} 个文件，超过 {MAX_SOURCE_FILES} 个，请确认选对了文件夹")
-    sizes = {str(p): _size(p) for p, _ in entries}
-    total = sum(s or 0 for s in sizes.values())
-    if total > MAX_TOTAL_BYTES:
-        raise ValueError(f"文件夹里的文件共 {total / 1024**3:.1f} GB，超过上限，请确认选对了文件夹")
+    total = sum(e.size or 0 for e in entries)
+    why = _too_big(len(entries), total, counting=False)
+    if why:
+        raise ValueError(why)
 
-    # 先算好每个文件的指纹：整批内容和以前某一批完全一样时直接拒收
-    shas: dict[str, str | None] = {}
-    for p, _ in entries:
-        try:
-            shas[str(p)] = sha256_file(p)
-        except OSError:
-            shas[str(p)] = None  # 登记时会再读一次，按原因记成“读不出来”或“被拦截”
-    listing = sorted(("/".join(rel), shas[str(p)] or "?") for p, rel in entries)
+    # 先把每个文件复制进项目、算好指纹（每个文件只从来源读一遍）：整批内容和以前某一批完全一样时直接拒收
+    if log:
+        log(f"  {len(entries)} 个文件，共 {total / 1024**3:.2f} GB；复制进项目（每个文件只读一遍，断了重收时复制过的不再读）……")
+    staging, index = _staging(proj)
+    for i, e in enumerate(entries):
+        if progress:
+            progress(i, len(entries))
+        _stage(proj, e, staging, index)
+    listing = sorted(("/".join(e.rel), e.sha or "?") for e in entries)
     fingerprint = hashlib.sha256("\n".join(f"{a}\t{b}" for a, b in listing).encode("utf-8")).hexdigest()
+    if log:
+        log("  登记文件、读 PDF 页面……")
 
     with proj.connect() as con:
         seq = (con.execute("SELECT COALESCE(MAX(seq), 0) FROM batches").fetchone()[0]) + 1
@@ -595,16 +705,19 @@ def _receive_collection(proj: Project, sources: list[Path], received_at: str, na
         if dup:
             raise ValueError(f"{'这个文件夹里的文件' if folder else '这几个文件'}和批次 #{dup['seq']} 收到的完全一样，已经收过了")
         if folder:
-            bname, source_name = name or folder.name, folder.name + FOLDER_MARK
+            bname, source_name = name or folder_label(folder), folder_label(folder) + FOLDER_MARK
         else:
             bname = name or f"{sources[0].stem} 等 {len(sources)} 个文件"
             source_name = "、".join(p.name for p in sources)
             source_name = source_name if len(source_name) <= 200 else source_name[:199] + "…"
         safe = re.sub(r'[\\/:*?"<>|]+', "_", bname)[:60]
         manifest = proj.path("archives", f"{seq:03d}-{safe}-文件清单.json")
+        if manifest.exists():  # 上次收到一半断了留下的（批次没记上），换成这次的
+            os.chmod(manifest, stat.S_IREAD | stat.S_IWRITE)
+            manifest.unlink()
         manifest.write_text(json.dumps({
             "kind": kind, "sources": [str(s.resolve()) for s in sources], "received_at": received_at,
-            "files": [{"path": "/".join(rel), "size": sizes[str(p)], "sha256": shas[str(p)]} for p, rel in entries],
+            "files": [{"path": "/".join(e.rel), "size": e.size, "sha256": e.sha} for e in entries],
             "skipped": noise,
         }, ensure_ascii=False, indent=1), encoding="utf-8")
         os.chmod(manifest, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
@@ -614,12 +727,13 @@ def _receive_collection(proj: Project, sources: list[Path], received_at: str, na
         )
         r = _Receiver(proj, con, seq, passwords)
         r.result = ReceiveResult(seq=seq, name=bname, source=kind, skipped=noise)
-        root_display = f"批次#{seq}" + (f"{SEP}{folder.name}{FOLDER_MARK}" if folder else "")
-        for i, (p, rel) in enumerate(entries):
+        root_display = f"批次#{seq}" + (f"{SEP}{folder_label(folder)}{FOLDER_MARK}" if folder else "")
+        for i, e in enumerate(entries):
             if progress:
                 progress(i, len(entries))
-            r.known_sha[str(p)] = shas[str(p)]
-            r.handle(p, root_display + SEP + SEP.join(rel), 0, source=True)
+            disk = e.local or e.disk  # 复制不进来的照原来那样再读一次来源，按原因登记
+            r.known_sha[str(disk)] = e.sha
+            r.handle(disk, root_display + SEP + SEP.join(e.rel), 0, source=e.local is None)
         if progress:
             progress(len(entries), len(entries))
         if links:

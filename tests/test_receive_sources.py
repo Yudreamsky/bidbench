@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import zipfile
@@ -147,6 +148,116 @@ def test_too_many_or_empty(proj, tmp_path, monkeypatch):
         (tmp_path / "多" / f"{n}.txt").write_text(n)
     with pytest.raises(ValueError, match="请确认选对了文件夹"):
         ingest.receive(proj, tmp_path / "多", "2026-01-01")
+
+
+def _tree(top: Path, n_dirs: int, per_dir: int, size: int = 10) -> Path:
+    for d in range(n_dirs):
+        (top / f"d{d}").mkdir(parents=True)
+        for f in range(per_dir):
+            (top / f"d{d}" / f"f{f:02d}.txt").write_bytes(b"x" * size)
+    return top
+
+
+def test_too_big_folder_stops_counting_early(proj, tmp_path, monkeypatch):
+    """选到了整个共享盘：数到超过上限马上停，不用把整个文件夹列完才说收不下。"""
+    top = _tree(tmp_path / "共享盘", 3, 10)
+    listed = []
+    real = os.scandir
+
+    def scandir(p):
+        listed.append(p)
+        return real(p)
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(ingest, "MAX_SOURCE_FILES", 5)
+    with pytest.raises(ValueError, match="数到第 6 个文件就停下了.*请确认选对了文件夹"):
+        ingest.receive(proj, top, "2026-01-01")
+    assert len(listed) == 2  # 只列了最上一层和第一个子文件夹
+    monkeypatch.setattr(ingest, "MAX_SOURCE_FILES", 100)
+    monkeypatch.setattr(ingest, "MAX_TOTAL_BYTES", 25)
+    with pytest.raises(ValueError, match="超过 0 GB（数到第 3 个文件就停下了）"):
+        ingest.receive(proj, top, "2026-01-01")
+    assert not proj.connect().execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+
+
+def test_folder_receive_reports_progress(proj, tmp_path, monkeypatch):
+    """网络文件夹列得慢：边列边报找到几个，再报复制、登记，看得出没有卡住。"""
+    monkeypatch.setattr(ingest, "LIST_NOTE_EVERY", 2)
+    top = _tree(tmp_path / "图纸", 1, 5)
+    lines = []
+    ops.receive(proj, top, "2026-01-01", av=False, log=lines.append)
+    assert lines[0] == f"列出文件夹里的文件：{top.resolve()}"
+    assert [ln.split("（")[0] for ln in lines if "已找到" in ln] == ["  正在列出文件：已找到 2 个", "  正在列出文件：已找到 4 个"]
+    assert any("5 个文件，共 0.00 GB；复制进项目" in ln for ln in lines) and any("登记文件" in ln for ln in lines)
+
+
+def test_each_source_file_is_read_once(proj, tmp_path, monkeypatch):
+    """来源（比如网络文件夹）里的每个文件只读一遍：复制进项目，认类型、查风险、算指纹、读 PDF 都读项目里那份。"""
+    top = tmp_path / "网络盘"
+    top.mkdir()
+    (top / "建施-01.pdf").write_bytes(_pdf("建施-01", "总说明"))
+    (top / "结构.zip").write_bytes(_zip({"结施-01.pdf": _pdf("结施-01", "总说明")}))
+    (top / "说明.txt").write_text("说明")
+    src = str(top.resolve()).lower()
+    copied, touched = [], []
+    real_copy, real_sha, real_head, real_type = shutil.copyfile, ingest.sha256_file, risk.read_head, ingest._archive_type
+
+    def copy(a, b, **kw):
+        if src in str(a).lower():
+            copied.append(Path(a).name)
+        return real_copy(a, b, **kw)
+
+    def spy(fn):
+        def wrapped(p, *a):
+            if src in str(p).lower():
+                touched.append((fn.__name__, Path(p).name))
+            return fn(p, *a)
+        return wrapped
+    monkeypatch.setattr(shutil, "copyfile", copy)
+    monkeypatch.setattr(ingest, "sha256_file", spy(real_sha))
+    monkeypatch.setattr(risk, "read_head", spy(real_head))
+    monkeypatch.setattr(ingest, "_archive_type", spy(real_type))
+    r = ingest.receive(proj, top, "2026-01-01")
+    assert r.files == 3 and not r.issues and r.nested_archives == []
+    assert sorted(copied) == ["建施-01.pdf", "结构.zip", "说明.txt"] and touched == []
+    assert "批次#1 / 网络盘（文件夹） / 结构.zip / 结施-01.pdf" in _paths(proj, 1)
+
+
+def test_receive_again_after_an_interruption_does_not_copy_again(proj, tmp_path, monkeypatch):
+    """收到一半断了（关了窗口、断网）：再收一次，复制进项目的文件不再从来源读，上次留下的文件清单换成这次的。"""
+    top = _tree(tmp_path / "图纸", 2, 3)
+    real_handle = ingest._Receiver.handle
+    calls = []
+
+    def handle(self, *a, **kw):
+        calls.append(1)
+        if len(calls) == 4:
+            raise KeyboardInterrupt
+        return real_handle(self, *a, **kw)
+    monkeypatch.setattr(ingest._Receiver, "handle", handle)
+    with pytest.raises(KeyboardInterrupt):
+        ingest.receive(proj, top, "2026-01-01")
+    assert list((proj.root / "archives").glob("001-*")) and not proj.connect().execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+    monkeypatch.setattr(ingest._Receiver, "handle", real_handle)
+    copied = []
+    real_copy = shutil.copyfile
+
+    def copy(a, b, **kw):
+        copied.append(a)
+        return real_copy(a, b, **kw)
+    monkeypatch.setattr(shutil, "copyfile", copy)
+    r = ingest.receive(proj, top, "2026-01-01")
+    assert r.seq == 1 and r.files == 6 and copied == []
+    (top / "d0" / "f00.txt").write_bytes(b"changed")  # 改过的文件照样重新复制
+    r2 = ingest.receive(proj, top, "2026-01-02")
+    assert r2.seq == 2 and [Path(a).name for a in copied] == ["f00.txt"]
+
+
+def test_folder_label_for_share_and_disk_roots():
+    from pathlib import PurePosixPath, PureWindowsPath
+    assert ingest.folder_label(PureWindowsPath(r"\\192.168.1.20\图纸")) == "192.168.1.20/图纸"
+    assert ingest.folder_label(PureWindowsPath("Z:\\")) == "Z:"
+    assert ingest.folder_label(PureWindowsPath(r"\\server\share\建筑")) == "建筑"
+    assert ingest.folder_label(PurePosixPath("/srv/图纸")) == "图纸"
 
 
 # ---------------- 同时收到的几个文件 ----------------
