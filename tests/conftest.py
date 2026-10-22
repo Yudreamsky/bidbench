@@ -29,6 +29,7 @@ def _isolated_config(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("BIDBENCH_CONFIG_DIR", str(tmp_path_factory.mktemp("cfg")))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex_home")))  # 接到 Codex 的设置也不写真的
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.mktemp("tmp")))
+    monkeypatch.setenv("BIDBENCH_ACCORECONSOLE", str(tmp_path_factory.mktemp("no_autocad") / "accoreconsole"))  # 不用本机真的 AutoCAD
     yield
     debuglog.close()  # 命令行测试打开的日志文件用完就关，临时目录才删得掉
 
