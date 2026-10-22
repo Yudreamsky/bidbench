@@ -135,7 +135,8 @@ STAGES = [
     ("main", "建模主图", "平面、立面、剖面：建模要照着画的图"),
     ("deep", "按需深入", "详图大样、说明正文、认不出种类的页、DWG 已经读出内容的图：用到哪张再识别哪张"),
 ]
-STAGE_LABEL = {k: v for k, v, _ in STAGES}
+MAP_STAGE = "map"  # 先建大地图：只识别图纸目录、发图单（聚焦识别以前先做，不按聚焦筛）
+STAGE_LABEL = {k: v for k, v, _ in STAGES} | {MAP_STAGE: "图纸目录（大地图）"}
 STAGE_RANK = {k: i for i, (k, _, _) in enumerate(STAGES)}
 STAGE_GROUPS = [  # (分组, 属于哪一步, 名称)，同一步里按这个先后
     ("target", "key", "你指定要看图识别的图"),
@@ -238,6 +239,8 @@ def stage_group(r, hints: dict | None = None, guess: dict | None = None) -> str:
         return "dwg"  # 同图号的 DWG 已经读出图签、文字和引用，PDF 这页用到时再看
     if kind is None and multi and r["page_index"] <= NOTES_HEAD and _kind_of((r["text"] or "")[:400], _STAGE_RULES[:1]):
         return "catalog"  # 认不出种类的合订本：开头一两页写着目录、清单的，多半是这本的目录
+    if kind is None and names.looks_like_list(r["text"]):
+        return "catalog"  # 名字看不出种类，页面文字里列了一大串图号：图纸目录、发图单
     return kind or "other"
 
 
@@ -270,8 +273,9 @@ def focus_floors(floor: str, base: int) -> set[int]:
 def focus_pages(proj: Project, focus: Focus) -> set[str]:
     """聚焦要用的页，每张图只要现行版。专业、塔楼、楼层按图纸台账认，和工作台上看到的一样。
     给了楼层的：这一层的图（含写着几层到几层的标准层）、通用图（说明、没写楼层的柱和核心筒布置），没写楼层、哪一层都要看的
-    剖面、立面、墙身、轴网、目录和表；这些图上已经识别出的索引指到的图也要（往下跟 FOLLOW_DEPTH 层，详图大样多半这样进来）。"""
-    from .state import _same_building, build  # 避免循环导入
+    剖面、立面、墙身、轴网、目录和表；这些图上已经识别出的索引指到的图也要（往下跟 FOLLOW_DEPTH 层，详图大样多半这样进来）。
+    图名只能从文件名看、看不出楼层和种类的（文件名只有图号），用图纸目录上的图名（先识别目录建大地图，见 MAP_STAGE）。"""
+    from .state import GENERAL_SHEET, _same_building, bare, build  # 避免循环导入
     st = build(proj, with_diff=False)
     by_no = {s["no"]: s for s in st["sheets"] if s["status"] not in ("missing", "voided")}
     bases = st.get("floor_bases") or {}
@@ -282,16 +286,21 @@ def focus_pages(proj: Project, focus: Focus) -> set[str]:
     if focus.tower and towers and focus.tower not in towers:
         raise ValueError(f"项目里没有“{focus.tower}”这栋楼，图纸上认出的有：{'、'.join(towers)}")
     here = {"tower": focus.tower}
+    with proj.connect() as con:
+        listed = map_hints(con)["titles"]  # 图号 → 目录上（或识别出的图签上）的图名
 
     def ok(s) -> bool:
         return (not focus.disciplines or s["discipline"] in focus.disciplines) and (not focus.tower or _same_building(s, here))
 
     def core(s) -> bool:
-        if not want or set(s.get("floors") or []) & want or s.get("general"):
+        title = listed.get(bare(s["no"])) if not s.get("floors") else None
+        fl = set(s.get("floors") or []) or (floors.parse_floors(title, bases.get(s.get("tower"), bases.get("*", 1))) if title else set())
+        if not want or fl & want or s.get("general") or (title and GENERAL_SHEET.search(title) and "目录" not in title):
             return True
-        if s.get("floors"):
+        if fl:
             return False  # 别的楼层
-        return names.kind_of(s["title"], s["discipline"])[0] in FOCUS_KINDS or bool(GRID.search(s["title"] or ""))
+        title = title or s["title"] or ""
+        return names.kind_of(title, s["discipline"])[0] in FOCUS_KINDS or bool(GRID.search(title))
 
     picked = {no for no, s in by_no.items() if ok(s) and core(s)}
     if want:
@@ -353,11 +362,12 @@ def stage_plan(proj: Project, scope: str = "new", focus: Focus | None = None) ->
 
 
 def stage_rows(rows, stages: list[str], hints: dict) -> list:
-    """只留这几步的页，按步骤、组排好（同组保持文件顺序）。"""
-    bad = [k for k in stages if k not in STAGE_RANK]
+    """只留这几步的页，按步骤、组排好（同组保持文件顺序）。MAP_STAGE 只要图纸目录、清单。"""
+    bad = [k for k in stages if k not in STAGE_RANK and k != MAP_STAGE]
     if bad:
         raise ValueError(f"未知的识别步骤：{'、'.join(bad)}")
-    keyed = [(GROUP_RANK[g], i, r) for i, r in enumerate(rows) for g in [stage_group(r, hints)] if GROUP_STAGE.get(g) in stages]
+    keyed = [(GROUP_RANK[g], i, r) for i, r in enumerate(rows) for g in [stage_group(r, hints)]
+             if GROUP_STAGE.get(g) in stages or (MAP_STAGE in stages and g == "catalog")]
     return [r for _g, _i, r in sorted(keyed, key=lambda x: (x[0], x[1]))]
 
 

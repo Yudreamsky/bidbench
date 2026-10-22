@@ -39,6 +39,9 @@ def bare_pdf(*lines, pages=1):
     ("建施-01 建筑设计总说明", "建施-01", None, None, "建筑设计总说明"),
     ("结施03 二层梁配筋图", "结施-03", None, None, "二层梁配筋图"),
     ("A-101 First Floor Plan Rev B", "A-101", "B", None, "First Floor Plan"),
+    # 专业-（塔楼）-系列-流水号，塔楼写在方括号里；文件名里只有图号和版次
+    ("ST-[T1]-05-013E_R1", "ST-T1-05-013E", "R1", None, None),
+    ("ST-04-001", "ST-04-001", None, None, None),
     ("Ground Floor GA Plan", None, None, None, "Ground Floor GA Plan"),
 ])
 def test_parse_name(stem, no, rev, status, title):
@@ -52,6 +55,8 @@ def test_iso_role_and_folder_discipline():
     assert state.discipline_of("SKY1-ABC-ZZ-00-DR-S-0001") == "结构"  # 不再按首字母 S 误判
     assert state.norm_no("PRJ1-STR-ZZ-00-DR-S-0001") == "PRJ1-STR-ZZ-00-DR-S-0001"  # 前导零留着
     assert state.norm_no("建施 -5") == "建施-05"
+    assert state.norm_no("ST-[T1]-05-013E") == state.norm_no("ST-T1-05-013E")  # 图签上带不带方括号都是同一张
+    assert names.looks_like_list(" ".join(f"结施-{k:02d}" for k in range(1, 13))) and not names.looks_like_list("详见结施-02、结施-03")
     assert names.words_discipline("Structure") == "结构" and names.words_discipline("Drawings") is None
     assert names.listed_numbers("建施-07~08、10 详图合订本") == ["建施-07", "建施-08", "建施-10"]
 

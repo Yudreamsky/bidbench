@@ -57,6 +57,10 @@ def test_guess_from_file_names():
     assert numbering.need_count(uk) == 0
     assert numbering.guess(uk)["formats"][0]["segments"] == ["project", "originator", "building", "level", "type",
                                                              "discipline", "number"]
+    # 专业-塔楼-系列-流水号：只有两位数字的系列号（03 平面、05 详图）不是楼层，不能按楼层换算
+    short = numbering.items_from([(f"批次#1 / ST-{b}-{s}-{n:03d}_R1.pdf", None)
+                                  for b in ("T1", "T2") for s in ("03", "04", "05", "06") for n in range(1, 13)])
+    assert "level" not in numbering.guess(short)["formats"][0]["segments"]
 
 
 @pytest.mark.parametrize("stem,no,title", [

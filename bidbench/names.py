@@ -44,6 +44,10 @@ STATUS = re.compile(r"^(?:S[0-7]|A[0-7]|B[1-7]|CR|D[1-4])$")           # 状态�
 ISO_NO = re.compile(r"(?<![A-Z0-9-])([A-Z0-9]{1,8}(?:-[A-Z0-9]{1,8}){4,9})(?![A-Z0-9])", re.I)
 CN_NO = re.compile(r"^([一-鿿]{1,3}施)\s*[-－—_]?\s*(\d{1,3}[A-Za-z]?)")
 SIMPLE_NO = re.compile(r"^([A-Z]{1,3})[-－—](\d{2,4}[A-Z]?)(?![\d-])")
+SEG_NO = re.compile(r"^([A-Z]{1,4})-(?:\[?([A-Z]{1,2}\d{1,2})\]?-)?(\d{1,3}[A-Z]?)-(\d{2,4}[A-Z]{0,2})(?![A-Z0-9])")  # ST-04-001、ST-[T1]-05-013E：专业-（塔楼）-系列-流水号
+NO_IN_TEXT = re.compile(r"(?<![A-Z0-9\-\[])(?:[A-Z]{1,4}-(?:\[?[A-Z]{1,2}\d{1,2}\]?-)?\d{1,3}[A-Z]?-\d{2,4}[A-Z]{0,2}"
+                        r"|[A-Z]{1,3}-\d{2,4}[A-Z]?|[一-鿿]{1,3}施-?\d{1,3})(?![A-Z0-9])")  # 页面文字里像图号的
+LIST_PAGE = 12  # 一页文字里有这么多个不同的图号：多半是图纸目录、发图单
 TEXT_LABEL_NO = re.compile(r"(?:图号|图纸编号|drawing\s*(?:no|number)\.?)\s*[:：]?\s*([A-Z0-9一-鿿][A-Z0-9一-鿿\-－—_.]{1,40})", re.I)
 
 
@@ -110,6 +114,11 @@ def parse_name(stem: str) -> dict:
         if m:
             out["no"], out["kind"] = f"{m.group(1)}-{m.group(2)}".upper() if m.re is SIMPLE_NO else f"{m.group(1)}-{m.group(2)}", "simple"
             title = s[m.end():]
+    if not out["no"]:
+        m = SEG_NO.match(s.upper())
+        if m:  # 塔楼写在方括号里的照样认，图号里不留方括号
+            out["no"], out["kind"] = "-".join(x for x in m.groups() if x), "simple"
+            title = s[m.end():]
     m = REV_WORD.search(title)
     if m and m.group(1):
         out["rev"] = out["rev"] or m.group(1).upper()
@@ -141,6 +150,11 @@ def parse_name(stem: str) -> dict:
 
 LIST_START = re.compile(r"([一-鿿]{1,3}施|(?<![A-Za-z])[A-Z]{1,3})\s*[-－—_]?\s*(\d{1,4})(?![\d])")
 LIST_NEXT = re.compile(r"\s*(~|～|至|到|、|,|，|&|及|和)\s*(?:([一-鿿]{1,3}施|[A-Z]{1,3})\s*[-－—_]?\s*)?(\d{1,4})(?![\d])")
+
+
+def looks_like_list(text: str) -> bool:
+    """一页文字里有很多个不同的图号：多半是图纸目录、发图单（文件名里看不出是目录的，靠这个认）。"""
+    return len(set(NO_IN_TEXT.findall((text or "").upper()))) >= LIST_PAGE
 
 
 def listed_numbers(stem: str) -> list[str]:
