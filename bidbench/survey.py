@@ -220,7 +220,7 @@ def plan(root: Folder, include: dict[str, str], exclude: dict[str, str]) -> list
         return {"rel": node.rel, "path": ingest._unlong(node.path),
                 "label": label + ("（这一层直接放的文件）" if direct_only else ""),
                 "exclude": sorted(x[len(node.rel) + 1:] if node.rel else x for x in ex),
-                "files": files, "bytes": size, "reason": why,
+                "files": files, "bytes": size, "reason": why, "date": date_in(node.rel),
                 "too_big": files > ingest.MAX_SOURCE_FILES or size > ingest.MAX_TOTAL_BYTES}
 
     def take(node: Folder, why: str) -> None:
@@ -244,7 +244,30 @@ def plan(root: Folder, include: dict[str, str], exclude: dict[str, str]) -> list
         for c in node.children:
             find(c)
     find(root)
-    return out
+    return in_order(out)
+
+
+DATE = re.compile(r"(?<!\d)(20\d\d)[-._]?(0[1-9]|1[0-2])[-._]?(0[1-9]|[12]\d|3[01])(?!\d)")
+TENDER = re.compile(r"tender|招标|投标|bid", re.I)
+
+
+def date_in(rel: str) -> str | None:
+    """文件夹名字里的日期（20240308、2024-03-08、2024.03.08），最里面一层的为准：一次次接收图纸的文件夹常这样起名。"""
+    for part in reversed(rel.split("/")):
+        found = DATE.findall(part)
+        if found:
+            y, m, d = found[-1]
+            return f"{y}-{m}-{d}"
+    return None
+
+
+def in_order(batches: list[dict]) -> list[dict]:
+    """按先来后到排：招标图在最前，名字里有日期的按日期，其余（汇总、深化等现行的整套）放最后。
+    先收的批次算早到：现行整套要是先收，后面历次接收的旧版本都会被当成“后收到的反而是旧版”。"""
+    first = [b for b in batches if not b["date"] and TENDER.search(b["label"])]
+    dated = sorted((b for b in batches if b["date"]), key=lambda b: b["date"])
+    rest = [b for b in batches if not b["date"] and b not in first]
+    return first + dated + rest
 
 
 def make_plan(proj: Project, top: Path, executor: str = "codex", model: str | None = None, log=print,
@@ -312,18 +335,21 @@ def plan_text(p: dict, short: bool = False) -> str:
     for i, b in enumerate(p["batches"], 1):
         ex = f"；不收 {'、'.join(b['exclude'])}" if b["exclude"] else ""
         big = "（还是超过上限，收不下）" if b["too_big"] else ""
-        lines.append(f"  第 {i} 批 {b['label']}：{b['files']} 个文件（{_gb(b['bytes'])}）{big}——{b['reason']}{ex}")
+        when = f"，{b['date']}" if b.get("date") else ""
+        lines.append(f"  第 {i} 批 {b['label']}：{b['files']} 个文件（{_gb(b['bytes'])}{when}）{big}——{b['reason']}{ex}")
     if p["not_taken"]:
         lines.append("不收：" + "、".join(f"{x['rel']}（{x['files']} 个文件）" for x in p["not_taken"][:30])
                      + ("……" if len(p["not_taken"]) > 30 else ""))
     if not short:
-        lines += ["", "按这个计划收：bidbench receive-plan <这个计划的 json 文件> --date 收图日期"]
+        lines += ["", "先后：招标图在最前，名字里有日期的按日期，汇总、深化等整套放最后；名字里有日期的批次用这个日期当收图日期。",
+                  "按这个计划收：bidbench receive-plan <这个计划的 json 文件> --date 收图日期"]
     return "\n".join(lines)
 
 
 def receive_plan(proj: Project, plan_or_path, date: str, av: bool = True, log=print, progress=None,
                  only: list[int] | None = None) -> dict:
-    """按计划一批批收（only 给了就只收这几批，从 1 数）。收过的批次跳过，一批出错记下来接着收下一批。"""
+    """按计划一批批收（only 给了就只收这几批，从 1 数）。收过的批次跳过，一批出错记下来接着收下一批。
+    文件夹名字里有日期的批次用那个日期当收图日期，其余用 date。"""
     from . import ops
     p = plan_or_path if isinstance(plan_or_path, dict) else json.loads(Path(plan_or_path).read_text(encoding="utf-8"))
     todo = [(i, b) for i, b in enumerate(p["batches"], 1) if only is None or i in only]
@@ -332,8 +358,8 @@ def receive_plan(proj: Project, plan_or_path, date: str, av: bool = True, log=pr
     for n, (i, b) in enumerate(todo, 1):
         log(f"—— 第 {i} 批（{n}/{len(todo)}）：{b['label']}，{b['files']} 个文件（{_gb(b['bytes'])}）——")
         try:
-            r = ops.receive(proj, Path(b["path"]), date, name=b["label"], av=av, log=log, progress=progress,
-                            label=b["label"], exclude=b.get("exclude") or ())
+            r = ops.receive(proj, Path(b["path"]), b.get("date") or date, name=b["label"], av=av, log=log,
+                            progress=progress, label=b["label"], exclude=b.get("exclude") or ())
             out["received"].append({"batch": i, "seq": r["seq"], "files": r["files"]})
         except ValueError as e:
             if "已经收过了" in str(e):

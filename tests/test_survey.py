@@ -157,3 +157,34 @@ def test_workbench_survey_then_receive_plan(share, proj, monkeypatch):
         assert j["status"] == "error" and "一批收不下" in j["error"]
     finally:
         httpd.shutdown()
+
+
+def test_folder_dates_and_order():
+    """历次接收图纸的文件夹名字里有日期：按日期排、用它当收图日期；招标图最前，现行整套放最后。"""
+    assert survey.date_in("008 RECORD/Forcont Archi/建筑001-20240308-接收图纸-新增") == "2024-03-08"
+    assert survey.date_in("MEP/7.#75_2024.08.01/补充") == "2024-08-01"
+    assert survey.date_in("2024-03 季度/会议 20251301") is None  # 不是日期的数字串不算
+    assert survey.date_in("000-FOR-CON DRAWING COMBINED") is None
+
+    def b(label, date=None):
+        return {"label": label, "date": date}
+    got = survey.in_order([b("000-FOR-CON DRAWING COMBINED"), b("STR › 结构002", "2024-06-11"), b("007-TENDER DRAWING"),
+                           b("ARCHI › 建筑001", "2024-03-08"), b("009-SHOP DRAWING"), b("MEP › 机电001", "2024-05-01")])
+    assert [x["label"] for x in got] == ["007-TENDER DRAWING", "ARCHI › 建筑001", "MEP › 机电001", "STR › 结构002",
+                                         "000-FOR-CON DRAWING COMBINED", "009-SHOP DRAWING"]
+
+
+def test_dated_folders_are_received_in_date_order_with_their_dates(tmp_path, proj):
+    top = tmp_path / "记录"
+    for rel in ("现行汇总/建施-01.pdf", "结构/结构002-20240611-接收图纸-变更/结施-01.pdf",
+                "建筑/建筑001-20240308-接收图纸-新增/建施-02.pdf"):
+        (top / rel).parent.mkdir(parents=True, exist_ok=True)
+        (top / rel).write_bytes(_pdf(Path(rel).stem, "图"))
+    root = survey.scan(top)
+    include = {"现行汇总": "整套", "结构/结构002-20240611-接收图纸-变更": "接收", "建筑/建筑001-20240308-接收图纸-新增": "接收"}
+    p = {"batches": survey.plan(root, include, {})}
+    survey.receive_plan(proj, p, "2026-10-22", av=False, log=lambda s: None)
+    with proj.connect() as con:
+        rows = [tuple(r) for r in con.execute("SELECT name, received_at FROM batches ORDER BY seq")]
+    assert rows == [("建筑 › 建筑001-20240308-接收图纸-新增", "2024-03-08"), ("结构 › 结构002-20240611-接收图纸-变更", "2024-06-11"),
+                    ("现行汇总", "2026-10-22")]
