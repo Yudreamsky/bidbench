@@ -188,3 +188,17 @@ def test_dated_folders_are_received_in_date_order_with_their_dates(tmp_path, pro
         rows = [tuple(r) for r in con.execute("SELECT name, received_at FROM batches ORDER BY seq")]
     assert rows == [("建筑 › 建筑001-20240308-接收图纸-新增", "2024-03-08"), ("结构 › 结构002-20240611-接收图纸-变更", "2024-06-11"),
                     ("现行汇总", "2026-10-22")]
+
+
+def test_folder_of_dated_deliveries_is_split_per_delivery(tmp_path):
+    """放得下也拆：下面是一次次接收的图纸（名字里有日期），每次一批，各用各的日期。"""
+    top = tmp_path / "共享"
+    for rel in ("结构/结构001-20240308-接收图纸-新增/结施-01.pdf", "结构/结构002-20240613-接收图纸-变更/结施-01.pdf",
+                "结构/说明.pdf", "建筑/平面/建施-01.pdf"):
+        (top / rel).parent.mkdir(parents=True, exist_ok=True)
+        (top / rel).write_bytes(_pdf(Path(rel).stem, "图"))
+    root = survey.scan(top)
+    got = survey.plan(root, {"结构": "施工图", "建筑": "施工图"}, {})
+    assert [(b["label"], b["date"]) for b in got] == [
+        ("结构 › 结构001-20240308-接收图纸-新增", "2024-03-08"), ("结构 › 结构002-20240613-接收图纸-变更", "2024-06-13"),
+        ("建筑", None), ("结构（这一层直接放的文件）", None)]
