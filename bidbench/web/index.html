@@ -2527,7 +2527,7 @@ function surveyPlan(res) {
   const row = (b, i) => el('li', {}, el('label', {},
     el('input', { type: 'checkbox', checked: take.has(i + 1) ? '' : null, disabled: b.too_big ? '' : null,
       onchange: ev => { ev.target.checked ? take.add(i + 1) : take.delete(i + 1); sum(); } }),
-    el('span', {}, `第 ${i + 1} 批 ${b.label}：${b.files} 个文件（${gb(b.bytes)}）${b.too_big ? '，超过上限收不下' : ''}`)),
+    el('span', {}, `第 ${i + 1} 批 ${b.label}：${b.files} 个文件（${gb(b.bytes)}${b.date ? '，' + b.date : ''}）${b.too_big ? '，超过上限收不下' : ''}`)),
     el('small', { class: 'meta' }, b.reason + (b.exclude.length ? `；不收 ${b.exclude.join('、')}` : '')));
   sum();
   return [el('p', { class: 'meta' }, `${res.how}判断。一级目录共 ${res.total.files} 个文件（${gb(res.total.bytes)}），PDF ${res.total.pdf}、DWG/DXF ${res.total.cad}。`),
