@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import multiprocessing
 import os
 import re
 import shutil
@@ -21,16 +23,21 @@ import stat
 import tarfile
 import tempfile
 import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import extractors, pdfpages, risk
 from .store import Project, sha256_file
 
+logger = logging.getLogger(__name__)
+
 MAX_DEPTH = 8
 MAX_TOTAL_BYTES = 20 * 1024**3  # 单批次解压总量上限，防压缩炸弹
 MAX_SOURCE_FILES = 20000        # 一个文件夹最多收这么多文件，防止选错文件夹（比如整个磁盘）
 LIST_NOTE_EVERY = 2000          # 列文件夹时每找到这么多个文件报一次数（网络文件夹列得慢，不报看着像卡住）
+PDF_WORKERS = max(1, min(8, (os.cpu_count() or 2) - 1))  # 收文件夹时同时读几个 PDF：渲染页面算指纹最费时间，各在自己的进程里读
 SEP = " / "
 FOLDER_MARK = "（文件夹）"       # 文件夹批次出处路径里，文件夹名后面加这个标记
 NEED_PASSWORD = "需要密码（工作台收图时填“压缩包密码”，命令行加 --password）"
@@ -185,6 +192,7 @@ class _Receiver:
         self.total = 0
         self.result: ReceiveResult | None = None
         self.known_sha: dict[str, str | None] = {}  # 收文件夹时先算好的 SHA-256，登记时不用再读一遍
+        self.pdfs: dict[str, tuple] = {}  # 收文件夹时先同时读好的 PDF：SHA-256 → _read_pdf_file 的结果
 
     def issue(self, path: str, kind: str, detail: str) -> None:
         self.con.execute(
@@ -249,7 +257,7 @@ class _Receiver:
         attachments = []
         if kind == "pdf":
             try:
-                pages, attachments = pdfpages.analyze_pdf(stored)
+                pages, attachments = self._read_pdf(sha, stored)
                 page_count = len(pages)
                 has_text = int(any(p.has_text for p in pages))
                 for p in pages:
@@ -274,6 +282,13 @@ class _Receiver:
                 p.write_bytes(data)
                 self.handle(p, f"{display}{SEP}[附件] {p.name}", depth + 1)
         return stored
+
+    def _read_pdf(self, sha: str, stored: Path):
+        """先同时读好了的直接用（读不出的照样抛出，按原因登记），没读过的现在读。"""
+        got, problem = self.pdfs.pop(sha, (None, None))
+        if problem:
+            raise (PermissionError if problem[0] == "encrypted" else ValueError)(problem[1])
+        return got if got is not None else pdfpages.analyze_pdf(stored)
 
     def _risk(self, sha: str, display: str, findings: list) -> None:
         risk.record(self.con, self.seq, sha, display, "static", findings)
@@ -678,6 +693,41 @@ def _stage(proj: Project, src: _Src, staging: Path, index: dict[str, str]) -> No
             pass  # 记不下来只是下次要重新复制
 
 
+def _read_pdf_file(path: Path):
+    """读一个 PDF（在读 PDF 的进程里跑）：返回 (pdfpages.analyze_pdf 的结果, None)，读不出时 (None, (问题种类, 原因))。"""
+    try:
+        return pdfpages.analyze_pdf(path), None
+    except PermissionError as e:
+        return None, ("encrypted", str(e))
+    except Exception as e:  # noqa: BLE001 - 读不出的登记时照原来那样记成问题，不中断收图
+        return None, ("corrupt", str(e))
+
+
+def _read_pdfs(paths: dict[str, Path], log=None, progress=None) -> dict[str, tuple]:
+    """几个进程同时读这一批的 PDF（{SHA-256: 项目里那份}）：返回 {SHA-256: _read_pdf_file 的结果}。
+    PDF 少、或读 PDF 的进程出了问题时，没读到的登记时在这个进程里读。"""
+    workers = min(PDF_WORKERS, len(paths))
+    if workers <= 1:
+        return {}
+    if log:
+        log(f"  读 PDF 页面：{len(paths)} 个文件，{workers} 个同时读……")
+    out: dict[str, tuple] = {}
+    pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
+    try:
+        futures = {pool.submit(_read_pdf_file, p): sha for sha, p in paths.items()}
+        for i, fut in enumerate(as_completed(futures)):
+            out[futures[fut]] = fut.result()
+            if progress:
+                progress(i + 1, len(paths))
+    except (BrokenProcessPool, OSError):
+        logger.exception("同时读 PDF 的进程出了问题")
+        if log:
+            log(f"  同时读 PDF 的进程出了问题，剩下的 {len(paths) - len(out)} 个登记时一个个读。")
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)  # 中途停下（Ctrl+C）：没开始读的不再读
+    return out
+
+
 def _receive_collection(proj: Project, sources: list[Path], received_at: str, name: str | None,
                         passwords: list[str], note: str | None, progress, log=None, label: str | None = None,
                         exclude=()) -> ReceiveResult:
@@ -701,14 +751,23 @@ def _receive_collection(proj: Project, sources: list[Path], received_at: str, na
         _stage(proj, e, staging, index)
     listing = sorted(("/".join(e.rel), e.sha or "?") for e in entries)
     fingerprint = hashlib.sha256("\n".join(f"{a}\t{b}" for a, b in listing).encode("utf-8")).hexdigest()
-    if log:
-        log("  登记文件、读 PDF 页面……")
 
-    with proj.connect() as con:
-        seq = (con.execute("SELECT COALESCE(MAX(seq), 0) FROM batches").fetchone()[0]) + 1
+    def same_as(con):
         dup = con.execute("SELECT seq FROM batches WHERE archive_sha256=?", (fingerprint,)).fetchone()
         if dup:
             raise ValueError(f"{'这个文件夹里的文件' if folder else '这几个文件'}和批次 #{dup['seq']} 收到的完全一样，已经收过了")
+
+    with proj.connect() as con:  # 只读：同时读 PDF 要一阵子，这期间不占着数据库
+        same_as(con)
+        pdfs = {e.sha: e.local for e in entries if e.local is not None and _ext_of(e.rel[-1]) == ".pdf"
+                and not con.execute("SELECT 1 FROM files WHERE sha256=?", (e.sha,)).fetchone()}
+    read = _read_pdfs(pdfs, log, progress)
+    if log:
+        log("  登记文件……" if read else "  登记文件、读 PDF 页面……")
+
+    with proj.connect() as con:
+        seq = (con.execute("SELECT COALESCE(MAX(seq), 0) FROM batches").fetchone()[0]) + 1
+        same_as(con)
         if folder:
             bname, source_name = name or label, label + FOLDER_MARK
         else:
@@ -732,6 +791,7 @@ def _receive_collection(proj: Project, sources: list[Path], received_at: str, na
         )
         r = _Receiver(proj, con, seq, passwords)
         r.result = ReceiveResult(seq=seq, name=bname, source=kind, skipped=noise)
+        r.pdfs = read
         root_display = f"批次#{seq}" + (f"{SEP}{label}{FOLDER_MARK}" if folder else "")
         for i, e in enumerate(entries):
             if progress:

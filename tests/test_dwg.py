@@ -3,6 +3,8 @@
 import json
 import os
 import stat
+from concurrent.futures import Future
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import jsonschema
@@ -509,3 +511,51 @@ def test_read_dwg_goes_on_past_a_file_that_breaks_the_reader(cad_project, monkey
     assert r["failed"] == base + 1 and r["sheets"] > 0 and any("分图时出了意外的错（IndexError）" in x for x in logs)
     unreadable = [i for i in state.build(cad_project)["issues"] if i["kind"] == "DWG 读不出"]
     assert len(unreadable) == base + 1 and any("分图时出了意外的错" in i["detail"] for i in unreadable)  # 问题中心里列出来
+
+
+def _pages(proj):
+    """每页读出的内容（不算什么时候读的）。"""
+    rows = proj.connect().execute("SELECT p.page_id, r.data FROM pages p JOIN recognitions r ON r.page_id = p.page_id"
+                                  " WHERE r.executor = ? ORDER BY p.page_id", (dwg.EXECUTOR,))
+    return [(pid, {k: v for k, v in json.loads(data).items() if k != "run"}) for pid, data in rows]
+
+
+def test_read_dwg_reads_several_files_at_once(cad_project, monkeypatch):
+    """几千个 DWG 一个个读要读一整夜：几个进程同时读，读出的和一个个读的一样，存进项目都在这个进程里。"""
+    base, pages = ops.read_cad(cad_project, again=True, log=lambda s: None), _pages(cad_project)
+    pools = []
+    real = ops.ProcessPoolExecutor
+
+    def pool(workers, **kw):
+        pools.append(workers)
+        return real(workers, **kw)
+
+    monkeypatch.setattr(ops, "ProcessPoolExecutor", pool)
+    assert ops.read_cad(cad_project, again=True, log=lambda s: None, workers=3) == base
+    assert pools == [3] and _pages(cad_project) == pages
+
+
+def test_read_dwg_goes_on_when_the_reading_processes_break(cad_project, monkeypatch):
+    """读图进程意外退出了（比如打包版开不了进程）：剩下的在这个进程里接着读，一个不漏、一个不重。"""
+    base, pages = ops.read_cad(cad_project, again=True, log=lambda s: None), _pages(cad_project)
+
+    class HalfBroken:
+        def __init__(self, workers, **kw):
+            self.n = 0
+
+        def submit(self, fn, *args):
+            self.n += 1
+            fut = Future()
+            if self.n <= 2:
+                fut.set_result(fn(*args))
+            else:
+                fut.set_exception(BrokenProcessPool("读图进程意外退出了"))
+            return fut
+
+        def shutdown(self, **kw):
+            pass
+
+    monkeypatch.setattr(ops, "ProcessPoolExecutor", HalfBroken)
+    logs = []
+    assert ops.read_cad(cad_project, again=True, log=logs.append, workers=4) == base
+    assert _pages(cad_project) == pages and any("同时读的进程出了问题" in x for x in logs)

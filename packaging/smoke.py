@@ -53,7 +53,7 @@ def dwg_check(exe, work):
     proj = work / "dwg-proj"
     run(exe, "init", str(proj), "--name", "DWG 自检")
     out = run(exe, "-p", str(proj), "receive", str(folder), "--date", "2026-10-01", "--no-av")
-    assert "认出 5 张图" in out, out
+    assert "认出 5 张图" in out and "同时读的进程出了问题" not in out, out  # 两个 DWG 各在一个读图进程里读
     asyncio.run(dxf_check(exe, proj))
 
 
