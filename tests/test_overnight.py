@@ -190,3 +190,17 @@ def test_overnight_with_claude_api(night):
     r = overnight.run(night, "claude", client=FakeClient(answer), log=lambda s: None, sleep=_no_sleep, clock=Clock(),
                       workers=1)
     assert (r["done"], r["left"], r["stopped"]) == (4, 0, None)
+
+
+def test_overnight_only_the_disciplines_asked_for(night):
+    """只要结构的图（图号认不出专业的先智能分类）：别的专业的页不识别，也不算在“还剩多少”里，下次再识别。"""
+    fake, lines = _codex(), []
+    r = overnight.run(night, runner=fake, log=lines.append, sleep=_no_sleep, clock=Clock(), workers=1, disciplines=["结构"])
+    assert (r["done"], r["failed"], r["stopped"], r["left"]) == (1, 0, None, 0)
+    left = recognition.pick_pages(night, "new")
+    assert len(left) == 5 and all("建施" in x["first_path"] for x in left)
+    log = "\n".join(_log_lines(r))
+    assert "只识别结构的图" in log and log.index("—— 智能分类 ——") < log.index("—— 建模主图 ——")
+    assert cli._disciplines("建筑，结构") == ["建筑", "结构"]
+    with pytest.raises(SystemExit, match="不认识的专业 机房"):
+        cli._disciplines("建筑,机房")
