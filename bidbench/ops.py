@@ -260,13 +260,14 @@ class LiveImport:
 
 
 def plan_recognition(proj: Project, scope: str = "new", executor: str = "codex", tier: str = "economy",
-                     model: str | None = None, tiles: int | None = None, workers: int | None = None) -> dict | None:
+                     model: str | None = None, tiles: int | None = None, workers: int | None = None,
+                     focus: recognition.Focus | None = None) -> dict | None:
     """估算：要识别多少页、分几步（第一步地图不看图；再重点图、建模主图、按需深入，见 recognition.STAGES），
-    每步、每组要多久或多少钱；也给旧的按优先级分档（priorities）。
+    每步、每组要多久或多少钱；也给旧的按优先级分档（priorities）。focus 给了只算聚焦要用的页。
 
     不生成任务包、不渲染图片，几千页也很快；开始识别时才只为选中的几步准备图片。没有要识别的页面时返回 None。"""
     from .executors import claude, codex
-    sp = recognition.stage_plan(proj, scope)
+    sp = recognition.stage_plan(proj, scope, focus)
     rows = sp.pop("_rows")
     hints = sp.pop("_hints")
     if not rows:
@@ -309,10 +310,12 @@ def duration_text(minutes: float) -> str:
 
 
 def prepare_claude(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
-                   tiles: int | None = None, task: Path | None = None, stages: list[str] | None = None) -> dict | None:
-    """生成任务包并估算花费（不调用 API）；stages 给了只放分步识别的这几步。没有要识别的页面时返回 None。"""
+                   tiles: int | None = None, task: Path | None = None, stages: list[str] | None = None,
+                   focus: recognition.Focus | None = None) -> dict | None:
+    """生成任务包并估算花费（不调用 API）；stages 给了只放分步识别的这几步，focus 给了只放聚焦要用的页。
+    没有要识别的页面时返回 None。"""
     from .executors import claude
-    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages)
+    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages, focus=focus)
     if task is None:
         return None
     return {"task": str(task), **claude.estimate(task, tier, model, tiles)}
@@ -320,10 +323,11 @@ def prepare_claude(proj: Project, scope: str = "new", tier: str = "economy", mod
 
 def prepare_codex(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
                   tiles: int | None = None, task: Path | None = None, workers: int | None = None,
-                  stages: list[str] | None = None) -> dict | None:
-    """生成任务包并估算用时（不调用 Codex）；stages 给了只放分步识别的这几步。没有要识别的页面时返回 None。"""
+                  stages: list[str] | None = None, focus: recognition.Focus | None = None) -> dict | None:
+    """生成任务包并估算用时（不调用 Codex）；stages 给了只放分步识别的这几步，focus 给了只放聚焦要用的页。
+    没有要识别的页面时返回 None。"""
     from .executors import codex
-    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages)
+    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages, focus=focus)
     if task is None:
         return None
     return {"task": str(task), **codex.estimate(task, tier, model, tiles, workers or codex.DEFAULT_WORKERS)}
@@ -353,7 +357,8 @@ STEP_NAMES = ("第一步", "第二步", "第三步", "第四步", "第五步")
 
 def map_text(m: dict) -> str:
     """第一步（地图）做到哪了：只靠文件名、PDF 文字、DWG，不看图。"""
-    text = f"{m['pages']} 页 PDF 里，{m['numbered']} 页从文件名或 PDF 文字认出了图号"
+    text = (f"聚焦 {m['focus']} 要用的图：" if m.get("focus") else "") + \
+        f"{m['pages']} 页 PDF 里，{m['numbered']} 页从文件名或 PDF 文字认出了图号"
     if m["dwg_files"]:
         text += f"；DWG {m['dwg_files']} 个，读了 {m['dwg_read']} 个，读出 {m['dwg_sheets']} 张图"
     if m.get("skipped"):

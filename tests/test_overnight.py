@@ -5,12 +5,14 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
+from conftest import _recognize
 from test_claude_executor import FakeClient, mimic
 from test_classify import ai, pdf
 from test_codex_executor import FakeCodex
 
-from bidbench import cli, oplog, ops, overnight, recognition, state
+from bidbench import cli, ingest, oplog, ops, overnight, recognition, state
 from bidbench.executors import claude, codex
+from bidbench.store import Project
 
 START = datetime(2026, 10, 21, 22, 0)
 
@@ -190,3 +192,68 @@ def test_overnight_with_claude_api(night):
     r = overnight.run(night, "claude", client=FakeClient(answer), log=lambda s: None, sleep=_no_sleep, clock=Clock(),
                       workers=1)
     assert (r["done"], r["left"], r["stopped"]) == (4, 0, None)
+
+
+def test_overnight_only_the_disciplines_asked_for(night):
+    """只要结构的图（图号认不出专业的先智能分类）：别的专业的页不识别，也不算在“还剩多少”里，下次再识别。"""
+    fake, lines = _codex(), []
+    r = overnight.run(night, runner=fake, log=lines.append, sleep=_no_sleep, clock=Clock(), workers=1,
+                      focus=recognition.Focus(("结构",)))
+    assert (r["done"], r["failed"], r["stopped"], r["left"]) == (1, 0, None, 0)
+    left = recognition.pick_pages(night, "new")
+    assert len(left) == 5 and all("建施" in x["first_path"] for x in left)
+    log = "\n".join(_log_lines(r))
+    assert "只识别聚焦 结构 要用的图" in log and log.index("—— 智能分类 ——") < log.index("—— 建模主图 ——")
+    assert cli._disciplines("建筑，结构") == ("建筑", "结构")
+    with pytest.raises(SystemExit, match="不认识的专业 机房"):
+        cli._disciplines("建筑,机房")
+
+
+@pytest.fixture
+def towers(tmp_path):
+    """两栋楼、各层的图：聚焦 T1 九层的建筑、结构。"""
+    files = {
+        "T1/建施-01 建筑设计总说明.pdf": pdf("建施-01", "建筑设计总说明", "地上 20 层"),
+        "T1/建施-03 三层平面图.pdf": pdf("建施-03", "三层平面图"),
+        "T1/建施-09 九层平面图.pdf": pdf("建施-09", "九层平面图", "楼梯详见建施-20"),
+        "T1/建施-10 九至十二层平面图.pdf": pdf("建施-10", "九至十二层平面图"),
+        "T1/建施-05 1-1剖面图.pdf": pdf("建施-05", "1-1剖面图"),
+        "T1/建施-20 楼梯详图.pdf": pdf("建施-20", "楼梯详图", "栏杆详见建施-22"),
+        "T1/建施-21 卫生间详图.pdf": pdf("建施-21", "卫生间详图"),
+        "T1/建施-22 栏杆详图.pdf": pdf("建施-22", "栏杆详图"),
+        "T1/结施-09 九层梁配筋图.pdf": pdf("结施-09", "九层梁配筋图", "KL1 截面 300×650"),
+        "T1/电施-09 九层照明平面图.pdf": pdf("电施-09", "九层照明平面图"),
+        "T2/建施-09 九层平面图.pdf": pdf("建施-09", "九层平面图"),
+    }
+    for rel, data in files.items():
+        (tmp_path / "图纸" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "图纸" / rel).write_bytes(data)
+    proj = Project.init(tmp_path / "p", "双塔")
+    ingest.receive(proj, tmp_path / "图纸", "2026-01-01")
+    return proj
+
+
+def _focus_names(proj, focus) -> set[str]:
+    keep = recognition.focus_pages(proj, focus)
+    with proj.connect() as con:
+        return {r["path"].split(" / ")[-1].split(" ")[0] if not r["path"].split(" / ")[-2].startswith("T2")
+                else "T2·" + r["path"].split(" / ")[-1].split(" ")[0]
+                for r in con.execute("SELECT o.path, p.page_id FROM pages p JOIN occurrences o ON o.sha256 = p.file_sha256")
+                if r["page_id"] in keep}
+
+
+def test_focus_on_one_floor_of_one_tower(towers):
+    """聚焦 T1 九层的建筑、结构：九层的图、标准层、说明、剖面要；九层平面上索引到的楼梯详图、楼梯详图上再索引到的栏杆详图，
+    识别出索引以后跟着要；别的楼层、没被索引的详图、机电、T2 都不要。"""
+    focus = recognition.Focus(("建筑", "结构"), "T1", "9F")
+    first = {"建施-01", "建施-09", "建施-10", "建施-05", "结施-09"}
+    assert _focus_names(towers, focus) == first  # 还没看图识别：不知道索引了哪些详图
+    _recognize(towers)  # 模拟执行器读出文字里的索引
+    assert _focus_names(towers, focus) == first | {"建施-20", "建施-22"}
+    with pytest.raises(ValueError, match="没有“T3”这栋楼"):
+        recognition.focus_pages(towers, recognition.Focus(tower="T3", floor="9F"))
+    with pytest.raises(ValueError, match="看不出“九楼半”是哪一层"):
+        recognition.focus_pages(towers, recognition.Focus(floor="九楼半"))
+    assert recognition.focus_floors("LEVEL 09", 1) == {10} and recognition.focus_floors("LEVEL 09", 0) == {9}
+    assert recognition.focus_floors("9", 1) == {9} == recognition.focus_floors("9F", 0)
+    assert state.build(towers, with_diff=False)["floor_bases"]["*"] in (0, 1)  # 英文写法按项目的数法换算

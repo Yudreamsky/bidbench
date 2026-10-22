@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import shutil
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib import resources
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import jsonschema
 
-from . import dwg, names, pdfpages
+from . import dwg, floors, names, pdfpages
 from .store import PLACEHOLDER_EXECUTORS, Project, now_iso
 
 log = logging.getLogger(__name__)
@@ -240,13 +241,79 @@ def stage_group(r, hints: dict | None = None, guess: dict | None = None) -> str:
     return kind or "other"
 
 
-def stage_plan(proj: Project, scope: str = "new") -> dict:
+@dataclass(frozen=True)
+class Focus:
+    """聚焦识别：只识别给某栋楼、某一层建模要用的图，不是全部图纸都识别一遍（几项都可以不给）。
+    floor 是图上的写法（LEVEL 09，按这个项目英文楼层的数法换算）或第几层（9F、9）。"""
+    disciplines: tuple[str, ...] = ()
+    tower: str | None = None
+    floor: str | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.disciplines or self.tower or self.floor)
+
+    def text(self) -> str:
+        return " ".join(x for x in (self.tower, self.floor, "、".join(self.disciplines)) if x)
+
+
+FOCUS_KINDS = {"图纸目录", "设计说明", "门窗表", "表格", "剖面图", "立面图", "墙身大样"}  # 没写楼层、哪一层都要看的图
+GRID = re.compile(r"轴网|轴线|\bgrids?\b|setting\s*out", re.I)
+FOLLOW_DEPTH = 2  # 聚焦的图上索引到的图（详图、大样……），往下跟几层
+
+
+def focus_floors(floor: str, base: int) -> set[int]:
+    """聚焦的楼层换算成第几层：9F、9 是第几层；LEVEL 09 这类英文写法按项目的数法（base，同 floors.parse_floors）换算。"""
+    m = re.fullmatch(r"\s*(\d{1,3})\s*[fF层]?\s*", floor or "")
+    return {int(m.group(1))} if m else floors.parse_floors(floor, base)
+
+
+def focus_pages(proj: Project, focus: Focus) -> set[str]:
+    """聚焦要用的页，每张图只要现行版。专业、塔楼、楼层按图纸台账认，和工作台上看到的一样。
+    给了楼层的：这一层的图（含写着几层到几层的标准层）、通用图（说明、没写楼层的柱和核心筒布置），没写楼层、哪一层都要看的
+    剖面、立面、墙身、轴网、目录和表；这些图上已经识别出的索引指到的图也要（往下跟 FOLLOW_DEPTH 层，详图大样多半这样进来）。"""
+    from .state import _same_building, build  # 避免循环导入
+    st = build(proj, with_diff=False)
+    by_no = {s["no"]: s for s in st["sheets"] if s["status"] not in ("missing", "voided")}
+    bases = st.get("floor_bases") or {}
+    want = focus_floors(focus.floor, bases.get(focus.tower, bases.get("*", 1))) if focus.floor else set()
+    if focus.floor and not want:
+        raise ValueError(f"看不出“{focus.floor}”是哪一层，请写成 LEVEL 09、9F 这样")
+    towers = [t["name"] for t in (st.get("towers") or {}).get("list") or []]
+    if focus.tower and towers and focus.tower not in towers:
+        raise ValueError(f"项目里没有“{focus.tower}”这栋楼，图纸上认出的有：{'、'.join(towers)}")
+    here = {"tower": focus.tower}
+
+    def ok(s) -> bool:
+        return (not focus.disciplines or s["discipline"] in focus.disciplines) and (not focus.tower or _same_building(s, here))
+
+    def core(s) -> bool:
+        if not want or set(s.get("floors") or []) & want or s.get("general"):
+            return True
+        if s.get("floors"):
+            return False  # 别的楼层
+        return names.kind_of(s["title"], s["discipline"])[0] in FOCUS_KINDS or bool(GRID.search(s["title"] or ""))
+
+    picked = {no for no, s in by_no.items() if ok(s) and core(s)}
+    if want:
+        refs = defaultdict(set)
+        for e in st["edges"]:
+            if e["type"] in ("ref", "cross"):
+                refs[e["from"]].add(e["to"])
+        edge = set(picked)
+        for _ in range(FOLLOW_DEPTH):
+            edge = {t for no in edge for t in refs[no] if t in by_no and t not in picked and ok(by_no[t])}
+            picked |= edge
+    return {x for no in picked for x in [by_no[no].get("current_page"), *(by_no[no].get("depth_pages") or [])] if x}
+
+
+def stage_plan(proj: Project, scope: str = "new", focus: Focus | None = None) -> dict:
     """分步识别的进度：第一步（地图）认出了多少，后面每一步有几页、识别了几页、还要识别哪些（按组举例）。
 
-    每一步的页数按像素去重；“还要识别”按 scope 算（默认是还没看图识别的页）。"""
-    left = {r["page_id"] for r in pick_pages(proj, scope)} if scope != "all" else None
+    每一步的页数按像素去重；“还要识别”按 scope 算（默认是还没看图识别的页）；focus 给了就只算聚焦要用的页。"""
+    keep = focus_pages(proj, focus) if focus else None
+    left = {r["page_id"] for r in pick_pages(proj, scope) if keep is None or r["page_id"] in keep} if scope != "all" else None
     with proj.connect() as con:
-        everything = pages_to_recognize(con, scope="all")
+        everything = [r for r in pages_to_recognize(con, scope="all") if keep is None or r["page_id"] in keep]
         hints = {**map_hints(con), **depth_targets(proj)}
         cad = con.execute("SELECT COUNT(*) AS n, SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE version = ?)) AS done,"
                           " SUM(f.sha256 IN (SELECT sha256 FROM cad_reads WHERE sheets > 0)) AS ok"
@@ -277,7 +344,8 @@ def stage_plan(proj: Project, scope: str = "new") -> dict:
         out.append({**st, "done": st["total"] - st["left"] if left is not None else 0, "groups": groups})
     return {
         "map": {"pages": len(everything), "numbered": numbered, "titles": len(hints["titles"]), "skipped": skipped,
-                "dwg_files": cad["n"] or 0, "dwg_read": cad["done"] or 0, "dwg_ok": cad["ok"] or 0, "dwg_sheets": dwg_sheets},
+                "dwg_files": cad["n"] or 0, "dwg_read": cad["done"] or 0, "dwg_ok": cad["ok"] or 0, "dwg_sheets": dwg_sheets,
+                "focus": focus.text() if focus else None},
         "stages": out,
         "_rows": rows_left,  # 给估算用：还要识别的页（不往外给）
         "_hints": hints,
@@ -294,15 +362,18 @@ def stage_rows(rows, stages: list[str], hints: dict) -> list:
 
 
 def pick_pages(proj: Project, scope: str = "new", priorities: list[str] | None = None,
-               pages: list[str] | None = None, stages: list[str] | None = None) -> list:
+               pages: list[str] | None = None, stages: list[str] | None = None, focus: Focus | None = None) -> list:
     """按范围挑要识别的页面，按优先级排好；priorities 给了就只要这几档；stages 给了就只要分步识别的这几步，
-    按步骤排；pages 给了就只识别这几页（按需识别）。"""
+    按步骤排；pages 给了就只识别这几页（按需识别）；focus 给了就只要聚焦要用的页。"""
     if scope not in SCOPES:
         raise ValueError(f"未知的识别范围 {scope}，可选：{'、'.join(SCOPES)}")
     only = set(pages) if pages is not None else _conflict_pages(proj) if scope == "conflict" else None
     with proj.connect() as con:
         rows = pages_to_recognize(con, scope=scope, only=only)
         hints = map_hints(con) if stages is not None else None
+    if focus:
+        keep = focus_pages(proj, focus)
+        rows = [r for r in rows if r["page_id"] in keep]
     if stages is not None:
         return stage_rows(rows, stages, {**hints, **depth_targets(proj)})
     if priorities is not None:
@@ -371,12 +442,13 @@ def pages_to_recognize(con, include_done: bool = False, scope: str = "new", only
 
 def make_task(proj: Project, include_done: bool = False, render: bool = True, scope: str = "new",
               priorities: list[str] | None = None, progress=None, pages: list[str] | None = None,
-              stages: list[str] | None = None) -> Path | None:
-    """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档，pages 给了就只放这几页。
+              stages: list[str] | None = None, focus: Focus | None = None) -> Path | None:
+    """生成识别任务包：页面按优先级排（目录、说明、平面在前），priorities 给了就只放这几档，pages 给了就只放这几页，
+    focus 给了就只放聚焦要用的页。
 
     渲染页面图片较慢，progress(已完成, 总数) 用来报进度。某一页取文字、出图出错（文件坏了、被删了）不放进任务包，
     记在清单的 skipped 里，别的页照常放。"""
-    rows = pick_pages(proj, "all" if include_done else scope, priorities, pages, stages)
+    rows = pick_pages(proj, "all" if include_done else scope, priorities, pages, stages, focus)
     if not rows:
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

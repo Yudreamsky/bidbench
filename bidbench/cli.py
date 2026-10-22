@@ -8,11 +8,12 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
-from . import debuglog, guide, numbering, oplog, ops, overnight, recognition, state, survey
+from . import classify, debuglog, guide, numbering, oplog, ops, overnight, recognition, state, survey
 from .store import Project, add_decision, latest_decisions, now_iso, revoke_decision
 
 SOURCE = "命令行"
@@ -135,8 +136,21 @@ def cmd_classify(args):
 def cmd_overnight(args):
     proj = _proj(args)
     until = overnight.deadline(args.until) if args.until else None
-    return overnight.run(proj, args.executor, args.scope, args.tier, args.model, args.stage, until, args.wait,
-                         args.workers)
+    focus = recognition.Focus(_disciplines(args.discipline), args.tower, args.floor)
+    try:
+        return overnight.run(proj, args.executor, args.scope, args.tier, args.model, args.stage, until, args.wait,
+                             args.workers, focus=focus or None)
+    except ValueError as e:  # 开始以前查出的：塔楼写错、楼层看不出
+        sys.exit(f"错误：{e}")
+
+
+def _disciplines(text: str | None) -> tuple[str, ...]:
+    """“建筑,结构” → ("建筑", "结构")。"""
+    out = tuple(x for x in re.split(r"[,，、\s]+", text or "") if x)
+    bad = [x for x in out if x not in classify.DISCIPLINES]
+    if bad:
+        sys.exit(f"错误：不认识的专业 {'、'.join(bad)}，可选：{'、'.join(classify.DISCIPLINES)}")
+    return out
 
 
 def cmd_import(args):
@@ -637,6 +651,10 @@ def main(argv=None):
     s.add_argument("--wait", type=float, default=overnight.WAIT_MINUTES,
                    help=f"额度用完后隔几分钟再试（默认 {overnight.WAIT_MINUTES}）")
     s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
+    s.add_argument("--discipline", help="聚焦：只识别这几个专业的图，如 建筑,结构（专业按图纸台账认；图号认不出专业的，先智能分类按图名、文件夹认）")
+    s.add_argument("--tower", help="聚焦：只识别这栋楼的图，如 T1（几栋共用的裙楼、地下室和看不出塔楼的也算）")
+    s.add_argument("--floor", help="聚焦：只识别建这一层要用的图，如 \"LEVEL 09\"（按项目英文楼层的数法换算）或 9F；"
+                                   "这一层的图、标准层、通用图、剖面立面轴网目录和表，再跟着索引识别详图")
     s.set_defaults(fn=cmd_overnight)
 
     s = sub.add_parser("import", help="校验并导入识别结果")

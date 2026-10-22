@@ -257,7 +257,15 @@ bidbench recognize --executor codex --model gpt-6-astra     # 换模型（能用
 ```bash
 bidbench overnight --until 07:30          # 读 DWG → 重点图、建模主图、按需深入一步步识别 → 智能分类 → 算报告
 bidbench overnight --stage key --stage main   # 只识别前两步
+bidbench overnight --discipline 建筑,结构    # 只识别建筑、结构的图，别的专业留到以后
+bidbench overnight --tier strong --discipline 建筑,结构 --tower T1 --floor "LEVEL 09"   # 聚焦：只识别建 T1 这一层要用的图
 ```
+
+- 聚焦识别（`--discipline`、`--tower`、`--floor`，可以只给一两项）：专业、塔楼、楼层都按图纸台账认（图号、图号格式、智能分类、
+  所在文件夹，和工作台上看到的一样）；图号认不出专业的，先智能分类按图名、文件夹认，再开始识别。每张图只识别现行版。
+- `--floor`：这一层的图（含写着几层到几层的标准层）、通用图（说明、没写楼层的柱和核心筒布置），没写楼层、哪一层都要看的
+  剖面、立面、墙身、轴网、目录和表；这些图识别出索引以后，索引到的详图、大样跟着识别（往下跟两层，最多再识别两轮）。
+  写成图上的写法（`LEVEL 09`，按项目英文楼层的数法换算）或第几层（`9F`）。
 
 - 单个文件、单页出错记下来接着做：读不出的 DWG 按文件名暂定，出不了图的页不放进任务包，识别失败的页这一步做完再试一轮。
 - 额度用完就停下等，每隔 20 分钟（`--wait`）试一次，恢复后用同一个任务包接着识别。
