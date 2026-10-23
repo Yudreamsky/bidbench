@@ -61,11 +61,11 @@ FACT_GROUPS = [
 # ---------------- 规范化 ----------------
 
 def norm_no(s: str | None) -> str | None:
-    """图号规范化：去空格，统一连接符，数字补到两位。建施05 / 建施 -5 / 建施－05 → 建施-05。
+    """图号规范化：去空格、方括号，统一连接符，数字补到两位。建施05 / 建施 -5 / 建施－05 → 建施-05，ST-[T1]-05-013E → ST-T1-05-13E。
     已确认图号格式的项目，套得上格式的图号各段照原样，去掉末尾的版次段（docs/图纸字段.md 9.5）。"""
     if not s:
         return None
-    s = re.sub(r"\s+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
+    s = re.sub(r"[\s\[\]]+", "", s).replace("－", "-").replace("—", "-").replace("_", "-").upper()
     fmt = _NUMBERING.get()
     if fmt is not None and fmt.confirmed:
         m = fmt.match(s)
@@ -1417,6 +1417,7 @@ def _compute_state(proj, batches, pages, decisions, ext_issues, baselines_rows, 
         "project": proj.meta, "generated_at": now_iso(), "as_of": as_of,
         "batches": batch_out, "sheets": sheets_list, "edges": edges, "notices": notice_out,
         "issues": issues, "facts": facts, "baselines": baselines, "floor_coverage": floor_coverage,
+        "floor_bases": {k: b for k, (b, _sure) in bases.items()},  # 英文楼层的数法（"*" 或塔楼）：聚焦识别换算楼层用
         "towers": {"multi": keys.multi, "list": [{"name": t, "sheets": sum(1 for x in sheets_list if x.get("tower") == t)}
                                                  for t in keys.all]},
         "guess": {"sheets": sum(1 for e in prov.values() if not e["no"].startswith(NAMELESS)), "nameless": nameless,

@@ -23,7 +23,8 @@ MAX_LINES = 400
 STATUS_WORD = {"done": "完成", "error": "出错", "interrupted": "中断"}
 TITLES = {"estimate": "识别估算", "simulated": "模拟识别", "claude": "Claude 识别", "codex": "Codex 识别", "build": "重新计算报告",
           "current": "导出现行图纸", "mirror": "导出数据镜像", "scan": "文件安全扫描", "tasks": "生成识别任务包",
-          "import": "导入识别结果", "classify": "智能分类", "read_dwg": "读 DWG", "overnight": "整夜识别"}
+          "import": "导入识别结果", "classify": "智能分类", "read_dwg": "读 DWG", "overnight": "整夜识别",
+          "survey": "智能收图规划", "receive_plan": "按计划收图"}
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,11 @@ def _summary(kind: str, r: dict) -> str | None:
         return f"{r['pending']} 个风险文件待确认" if r.get("pending") else "没有待确认的风险文件"
     if kind == "assistant":
         return f"查询 {r.get('tools', 0)} 次" + (f"，生成提议 {r['proposals']} 条" if r.get("proposals") else "")
+    if kind == "survey":
+        return f"{len(r['batches'])} 批，{sum(x['files'] for x in r['batches'])} 个文件"
+    if kind == "receive_plan":
+        return f"收了 {len(r['received'])} 批" + (f"，以前收过 {len(r['skipped'])} 批" if r["skipped"] else "") + \
+            (f"，没收成 {len(r['failed'])} 批" if r["failed"] else "")
     if kind == "overnight":
         return f"识别 {r['done']} 页" + (f"，失败 {r['failed']} 页" if r["failed"] else "") + \
             (f"，还剩 {r['left']} 页" if r.get("left") else "") + (f"；停在：{r['stopped']}" if r.get("stopped") else "")

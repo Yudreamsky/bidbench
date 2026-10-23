@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import os
 import sqlite3
 import threading
 import time
+import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from collections.abc import Callable
 
@@ -34,11 +38,11 @@ def _stop_error(e: Exception, message: str) -> OpError:
 # ---------------- 收图 ----------------
 
 def receive(proj: Project, sources, date: str, name: str | None = None, passwords=(), note: str | None = None,
-            av: bool = True, log: Log = print, progress=None) -> dict:
-    """收一批图纸：sources 是一个压缩包、文件或文件夹，或者同时收到的几个文件（列表）。"""
+            av: bool = True, log: Log = print, progress=None, label: str | None = None, exclude=()) -> dict:
+    """收一批图纸：sources 是一个压缩包、文件或文件夹，或者同时收到的几个文件（列表）。label、exclude 见 ingest.receive。"""
     srcs = [Path(s) for s in sources] if isinstance(sources, (list, tuple)) else [Path(sources)]
     r = ingest.receive(proj, srcs if len(srcs) > 1 else srcs[0], date, name, list(passwords), note, progress=progress,
-                       log=log)
+                       log=log, label=label, exclude=exclude)
     kinds = "、".join(f"{reports.KIND_LABEL.get(k, k)} {n}" for k, n in sorted(r.by_kind.items()))
     how = {"folder": "（文件夹）", "files": f"（{len(srcs)} 个文件）"}.get(r.source, "")
     verb = "收进" if r.source in ("folder", "files") else "解出"
@@ -68,8 +72,12 @@ def receive(proj: Project, sources, date: str, name: str | None = None, password
             "issues": len(r.issues), "risky": len(sec["files"]), "blocked": blocked}
 
 
-def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None) -> dict:
-    """读 DWG、DXF 的图签属性和文字（docs/图纸字段.md 9.7）。收图后自动读新收的和以前没读过的；again 时全部重读。"""
+CAD_WORKERS = max(1, min(8, (os.cpu_count() or 2) - 1))  # 同时读几个：各在自己的进程里读（dwgread 写出几百 MB，读它很费 CPU，开线程快不了）
+
+
+def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None, workers: int | None = None) -> dict:
+    """读 DWG、DXF 的图签属性和文字（docs/图纸字段.md 9.7）。收图后自动读新收的和以前没读过的；again 时全部重读。
+    workers 个进程同时读（默认 CAD_WORKERS），读好一个存一个，存进项目都在这个进程里做。"""
     with proj.connect() as con:
         rows = dwg.unread(con, again)
     out = {"files": 0, "sheets": 0, "failed": 0, "no_tool": 0}
@@ -83,25 +91,11 @@ def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None
         rows = [r for r in rows if r[2] != ".dwg"]
     if rows:
         log(f"读 DWG、DXF 的图签和文字：{len(rows)} 个文件……")
-    for i, (sha, stored, ext, path, batch) in enumerate(rows):
-        d = err = None
-        try:
-            d = dwg.read(proj.root / stored, ext) if ext == ".dxf" else _read_dwg(proj, proj.root / stored, sha, path, tool)
-        except dwg.ReadError as e:
-            err = str(e)
-        except Exception as e:  # noqa: BLE001 - 一个文件出意外的错不能停下整批，也不能让下次每次都卡在它上面
-            logger.exception("读 DWG、DXF 意外出错：%s", sha[:12])
-            err = f"读的时候出了意外的错（{type(e).__name__}），只能按文件名暂定"
-        try:
-            with proj.connect() as con:
-                n = dwg.save(con, sha, path, batch, d, err, now_iso())
-        except sqlite3.Error:
-            raise  # 数据库本身的问题（被占用、磁盘满）不是这个文件的错，停下来
-        except Exception as e:  # noqa: BLE001 - 分图、认图签出错：同样记成读不出，接着读下一个
-            logger.exception("读出的 DWG、DXF 分图出错：%s", sha[:12])
-            d, err = None, f"读出来了但分图时出了意外的错（{type(e).__name__}），只能按文件名暂定"
-            with proj.connect() as con:
-                n = dwg.save(con, sha, path, batch, d, err, now_iso())
+    for i, (row, (d, err, trace)) in enumerate(_read_cad_files(proj, rows, tool, workers or CAD_WORKERS, log)):
+        sha, _stored, _ext, path, batch = row
+        if trace:
+            logger.error("读 DWG、DXF 意外出错：%s\n%s", sha[:12], trace)
+        n, d, err = _save_cad(proj, sha, path, batch, d, err)
         out["files"] += 1
         out["sheets"] += n
         if err:
@@ -114,6 +108,55 @@ def read_cad(proj: Project, again: bool = False, log: Log = print, progress=None
     if rows:
         log(f"  读了 {out['files']} 个文件，认出 {out['sheets']} 张图" + (f"，{out['failed']} 个读不出（按文件名暂定）" if out["failed"] else "") + "。")
     return out
+
+
+def _read_cad_files(proj: Project, rows: list, tool: str | None, workers: int, log: Log):
+    """读好一个交出一个 (row, _read_cad_file 的结果)，谁先读好先交。读图进程出了问题（比如打包版开不了进程），
+    剩下的在这个进程里一个个读，一个不漏、一个不重。"""
+    left = {row[0]: row for row in rows}
+    workers = min(workers, len(rows))
+    if workers > 1:
+        pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
+        try:
+            futures = {pool.submit(_read_cad_file, proj, row, tool): row for row in rows}
+            for fut in as_completed(futures):
+                row = futures.pop(fut)  # 交出去就放掉：几千个文件读出的东西不全留在内存里
+                res = fut.result()
+                del left[row[0]]
+                yield row, res
+        except (BrokenProcessPool, OSError):
+            logger.exception("同时读 DWG、DXF 的进程出了问题")
+            log(f"  同时读的进程出了问题，剩下的 {len(left)} 个一个个读。")
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)  # 中途停下（Ctrl+C、数据库出错）：没开始读的不再读
+    for row in list(left.values()):
+        yield row, _read_cad_file(proj, row, tool)
+
+
+def _read_cad_file(proj: Project, row: tuple, tool: str | None):
+    """读一个 DWG、DXF（多半在读图进程里跑，排错日志写不到这里）：返回 (读出的图, 读不出的原因, 意外出错时的错误堆栈)。"""
+    sha, stored, ext, path, _batch = row
+    try:
+        d = dwg.read(proj.root / stored, ext) if ext == ".dxf" else _read_dwg(proj, proj.root / stored, sha, path, tool)
+        return d, None, None
+    except dwg.ReadError as e:
+        return None, str(e), None
+    except Exception as e:  # noqa: BLE001 - 一个文件出意外的错不能停下整批，也不能让下次每次都卡在它上面
+        return None, f"读的时候出了意外的错（{type(e).__name__}），只能按文件名暂定", traceback.format_exc()
+
+
+def _save_cad(proj: Project, sha: str, path: str, batch: int, d, err):
+    """一个文件读的结果存进项目；分图、认图签出错也记成读不出。返回 (认出几张图, 读出的图, 读不出的原因)。"""
+    try:
+        with proj.connect() as con:
+            return dwg.save(con, sha, path, batch, d, err, now_iso()), d, err
+    except sqlite3.Error:
+        raise  # 数据库本身的问题（被占用、磁盘满）不是这个文件的错，停下来
+    except Exception as e:  # noqa: BLE001 - 分图、认图签出错：同样记成读不出，接着读下一个
+        logger.exception("读出的 DWG、DXF 分图出错：%s", sha[:12])
+        err = f"读出来了但分图时出了意外的错（{type(e).__name__}），只能按文件名暂定"
+        with proj.connect() as con:
+            return dwg.save(con, sha, path, batch, None, err, now_iso()), None, err
 
 
 def _read_dwg(proj: Project, src: Path, sha: str, name: str, tool: str | None) -> dwg.Drawing:
@@ -217,13 +260,14 @@ class LiveImport:
 
 
 def plan_recognition(proj: Project, scope: str = "new", executor: str = "codex", tier: str = "economy",
-                     model: str | None = None, tiles: int | None = None, workers: int | None = None) -> dict | None:
+                     model: str | None = None, tiles: int | None = None, workers: int | None = None,
+                     focus: recognition.Focus | None = None) -> dict | None:
     """估算：要识别多少页、分几步（第一步地图不看图；再重点图、建模主图、按需深入，见 recognition.STAGES），
-    每步、每组要多久或多少钱；也给旧的按优先级分档（priorities）。
+    每步、每组要多久或多少钱；也给旧的按优先级分档（priorities）。focus 给了只算聚焦要用的页。
 
     不生成任务包、不渲染图片，几千页也很快；开始识别时才只为选中的几步准备图片。没有要识别的页面时返回 None。"""
     from .executors import claude, codex
-    sp = recognition.stage_plan(proj, scope)
+    sp = recognition.stage_plan(proj, scope, focus)
     rows = sp.pop("_rows")
     hints = sp.pop("_hints")
     if not rows:
@@ -266,10 +310,12 @@ def duration_text(minutes: float) -> str:
 
 
 def prepare_claude(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
-                   tiles: int | None = None, task: Path | None = None, stages: list[str] | None = None) -> dict | None:
-    """生成任务包并估算花费（不调用 API）；stages 给了只放分步识别的这几步。没有要识别的页面时返回 None。"""
+                   tiles: int | None = None, task: Path | None = None, stages: list[str] | None = None,
+                   focus: recognition.Focus | None = None) -> dict | None:
+    """生成任务包并估算花费（不调用 API）；stages 给了只放分步识别的这几步，focus 给了只放聚焦要用的页。
+    没有要识别的页面时返回 None。"""
     from .executors import claude
-    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages)
+    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages, focus=focus)
     if task is None:
         return None
     return {"task": str(task), **claude.estimate(task, tier, model, tiles)}
@@ -277,10 +323,11 @@ def prepare_claude(proj: Project, scope: str = "new", tier: str = "economy", mod
 
 def prepare_codex(proj: Project, scope: str = "new", tier: str = "economy", model: str | None = None,
                   tiles: int | None = None, task: Path | None = None, workers: int | None = None,
-                  stages: list[str] | None = None) -> dict | None:
-    """生成任务包并估算用时（不调用 Codex）；stages 给了只放分步识别的这几步。没有要识别的页面时返回 None。"""
+                  stages: list[str] | None = None, focus: recognition.Focus | None = None) -> dict | None:
+    """生成任务包并估算用时（不调用 Codex）；stages 给了只放分步识别的这几步，focus 给了只放聚焦要用的页。
+    没有要识别的页面时返回 None。"""
     from .executors import codex
-    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages)
+    task = Path(task) if task else recognition.make_task(proj, render=True, scope=scope, stages=stages, focus=focus)
     if task is None:
         return None
     return {"task": str(task), **codex.estimate(task, tier, model, tiles, workers or codex.DEFAULT_WORKERS)}
@@ -310,7 +357,8 @@ STEP_NAMES = ("第一步", "第二步", "第三步", "第四步", "第五步")
 
 def map_text(m: dict) -> str:
     """第一步（地图）做到哪了：只靠文件名、PDF 文字、DWG，不看图。"""
-    text = f"{m['pages']} 页 PDF 里，{m['numbered']} 页从文件名或 PDF 文字认出了图号"
+    text = (f"聚焦 {m['focus']} 要用的图：" if m.get("focus") else "") + \
+        f"{m['pages']} 页 PDF 里，{m['numbered']} 页从文件名或 PDF 文字认出了图号"
     if m["dwg_files"]:
         text += f"；DWG {m['dwg_files']} 个，读了 {m['dwg_read']} 个，读出 {m['dwg_sheets']} 张图"
     if m.get("skipped"):

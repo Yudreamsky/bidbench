@@ -8,11 +8,12 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
-from . import debuglog, guide, numbering, oplog, ops, overnight, recognition, state
+from . import classify, debuglog, guide, numbering, oplog, ops, overnight, recognition, state, survey
 from .store import Project, add_decision, latest_decisions, now_iso, revoke_decision
 
 SOURCE = "命令行"
@@ -42,6 +43,19 @@ def cmd_receive(args):
 
 def cmd_scan(args):
     return ops.scan(_proj(args), av=not args.no_av)
+
+
+def cmd_survey(args):
+    return survey.make_plan(_proj(args), Path(args.folder), args.executor, args.model)
+
+
+def cmd_receive_plan(args):
+    def progress(n, total):
+        if total >= 20:
+            print(f"\r  已处理 {n}/{total} 个文件", end="" if n < total else "\n", flush=True)
+
+    only = [int(x) for x in args.only.split(",") if x.strip()] if args.only else None
+    return survey.receive_plan(_proj(args), Path(args.plan), args.date, av=not args.no_av, progress=progress, only=only)
 
 
 def cmd_read_dwg(args):
@@ -122,8 +136,21 @@ def cmd_classify(args):
 def cmd_overnight(args):
     proj = _proj(args)
     until = overnight.deadline(args.until) if args.until else None
-    return overnight.run(proj, args.executor, args.scope, args.tier, args.model, args.stage, until, args.wait,
-                         args.workers)
+    focus = recognition.Focus(_disciplines(args.discipline), args.tower, args.floor)
+    try:
+        return overnight.run(proj, args.executor, args.scope, args.tier, args.model, args.stage, until, args.wait,
+                             args.workers, focus=focus or None)
+    except ValueError as e:  # 开始以前查出的：塔楼写错、楼层看不出
+        sys.exit(f"错误：{e}")
+
+
+def _disciplines(text: str | None) -> tuple[str, ...]:
+    """“建筑,结构” → ("建筑", "结构")。"""
+    out = tuple(x for x in re.split(r"[,，、\s]+", text or "") if x)
+    bad = [x for x in out if x not in classify.DISCIPLINES]
+    if bad:
+        sys.exit(f"错误：不认识的专业 {'、'.join(bad)}，可选：{'、'.join(classify.DISCIPLINES)}")
+    return out
 
 
 def cmd_import(args):
@@ -438,6 +465,10 @@ def _op(args) -> tuple[str, str, str] | None:
         return "init", f"新建项目「{args.name}」", args.dir
     if c == "receive":
         return "receive", oplog.receive_title(args.archive), args.project
+    if c == "survey":
+        return "survey", f"{oplog.TITLES['survey']}：{Path(args.folder).name or args.folder}", args.project
+    if c == "receive-plan":
+        return "receive_plan", f"{oplog.TITLES['receive_plan']}：{Path(args.plan).name}", args.project
     if c == "recognize":
         if args.executor == "simulated":
             return "recognize", oplog.TITLES["simulated"], args.project
@@ -546,6 +577,21 @@ def main(argv=None):
     s.add_argument("--no-av", action="store_true", help="不调用杀毒软件（静态检查照做）")
     s.set_defaults(fn=cmd_receive)
 
+    s = sub.add_parser("survey", help="智能收图：给一级目录（比如整个共享盘），只列文件夹不读文件内容，判断收哪些子文件夹、"
+                                      "分几批，写成收图计划（项目 reports 里）")
+    s.add_argument("folder")
+    s.add_argument("--executor", default="codex", choices=["codex", "rules"],
+                   help="codex=让 Codex 判断（只发文件夹名字、各类文件数量和几个图纸文件名）；rules=只按名字和数量的规则")
+    s.add_argument("--model", help="换 Codex 模型")
+    s.set_defaults(fn=cmd_survey)
+
+    s = sub.add_parser("receive-plan", help="按收图计划一批批收（bidbench survey 写的 json）；收过的批次跳过，断了再运行接着收")
+    s.add_argument("plan")
+    s.add_argument("--date", required=True, help="收图日期 YYYY-MM-DD")
+    s.add_argument("--only", help="只收这几批，如 1,3,4")
+    s.add_argument("--no-av", action="store_true", help="不调用杀毒软件（静态检查照做）")
+    s.set_defaults(fn=cmd_receive_plan)
+
     s = sub.add_parser("scan", help="风险文件检查：按最新规则重查全部文件，并用本机杀毒软件扫描")
     s.add_argument("--no-av", action="store_true", help="只做静态检查")
     s.set_defaults(fn=cmd_scan)
@@ -558,8 +604,9 @@ def main(argv=None):
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="挑选哪些页面（默认 new）")
     s.add_argument("--all", action="store_true", help="等同于 --scope all")
     s.add_argument("--no-images", action="store_true", help="不渲染页面图片（仅文字层）")
-    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
-                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES))
+    s.add_argument("--stage", action="append", choices=[recognition.MAP_STAGE, *(k for k, _l, _d in recognition.STAGES)],
+                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES)
+                        + f"；{recognition.MAP_STAGE}=只识别图纸目录、发图单（建大地图）")
     s.set_defaults(fn=cmd_tasks)
 
     s = sub.add_parser("stages", help="分步识别的进度：地图认出了多少，重点图、建模主图、按需深入各还剩几页")
@@ -581,8 +628,9 @@ def main(argv=None):
     s.add_argument("--tiles", type=int, help="局部切片 N×N，0 表示不切")
     s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
     s.add_argument("--dry-run", action="store_true", help="只生成任务包并估算花费，不调用 API")
-    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
-                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES))
+    s.add_argument("--stage", action="append", choices=[recognition.MAP_STAGE, *(k for k, _l, _d in recognition.STAGES)],
+                   help="只识别分步识别的这几步（可写几次）：" + "；".join(f"{k}={lb}" for k, lb, _d in recognition.STAGES)
+                        + f"；{recognition.MAP_STAGE}=只识别图纸目录、发图单（建大地图）")
     s.set_defaults(fn=cmd_recognize)
 
     s = sub.add_parser("classify", help="智能分类：让 AI 给图纸分专业、分小类、起中文简称，给事实分多级目录")
@@ -599,12 +647,16 @@ def main(argv=None):
     s.add_argument("--scope", default="new", choices=list(recognition.SCOPES), help="识别哪些页面（默认 new）")
     s.add_argument("--tier", default="economy", choices=["economy", "strong"], help="同 recognize")
     s.add_argument("--model", help="覆盖档位的默认模型")
-    s.add_argument("--stage", action="append", choices=[k for k, _l, _d in recognition.STAGES],
-                   help="只识别这几步（可写几次）；默认重点图、建模主图、按需深入依次都做")
+    s.add_argument("--stage", action="append", choices=[recognition.MAP_STAGE, *(k for k, _l, _d in recognition.STAGES)],
+                   help="只识别这几步（可写几次）；默认重点图、建模主图、按需深入依次都做，聚焦时先识别图纸目录（map）建大地图")
     s.add_argument("--until", help="最晚做到几点（时:分，如 07:30）：到点不再开始新的页、不再等额度，照样分类、出报告；不写就做完为止")
     s.add_argument("--wait", type=float, default=overnight.WAIT_MINUTES,
                    help=f"额度用完后隔几分钟再试（默认 {overnight.WAIT_MINUTES}）")
     s.add_argument("--workers", type=int, help="同时识别几页（Claude 默认 4，Codex 默认 3）")
+    s.add_argument("--discipline", help="聚焦：只识别这几个专业的图，如 建筑,结构（专业按图纸台账认；图号认不出专业的，先智能分类按图名、文件夹认）")
+    s.add_argument("--tower", help="聚焦：只识别这栋楼的图，如 T1（几栋共用的裙楼、地下室和看不出塔楼的也算）")
+    s.add_argument("--floor", help="聚焦：只识别建这一层要用的图，如 \"LEVEL 09\"（按项目英文楼层的数法换算）或 9F；"
+                                   "这一层的图、标准层、通用图、剖面立面轴网目录和表，再跟着索引识别详图")
     s.set_defaults(fn=cmd_overnight)
 
     s = sub.add_parser("import", help="校验并导入识别结果")

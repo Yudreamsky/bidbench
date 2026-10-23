@@ -211,10 +211,14 @@ def guess(items: list[dict]) -> dict | None:
     for i in range(ni + 1, n):  # 流水号后面的：两位以内的数字或 P01 这类，取值不多 → 版次
         roles[i] = "rev" if share(i, lambda v: bool(REV_SEG.fullmatch(v))) >= 0.9 and len(cols[i]) <= 30 else "other"
     free = [i for i in range(ni) if roles[i] is None]
+
+    def level_like(i):  # 只有两位数字的一段，短图号里多半是系列号（ST-T1-05-013 的 05），带 GF、B1、L09 这类写法或 ISO 那么长才算楼层
+        return n >= 6 or any(LEVEL_RX.fullmatch(v) and not v.isdigit() for v in cols[i])
     for role, test in (("discipline", lambda v: v in KNOWN_DISC), ("type", lambda v: v in KNOWN_TYPE),
                        ("level", lambda v: bool(LEVEL_RX.fullmatch(v)))):
         many = role != "type"  # 专业、楼层只有一个值的多半是项目、单位代码（ARC），类型可以全项目一个（DR）
-        best = max(((share(i, test), -i) for i in free if not many or len(cols[i]) >= 2), default=(0, 0))
+        best = max(((share(i, test), -i) for i in free if (not many or len(cols[i]) >= 2) and (role != "level" or level_like(i))),
+                   default=(0, 0))
         if best[0] >= 0.6:
             roles[-best[1]] = role
             free.remove(-best[1])
