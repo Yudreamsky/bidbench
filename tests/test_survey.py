@@ -19,7 +19,7 @@ def _pdf(no, title):
 @pytest.fixture
 def share(tmp_path):
     """像一个项目共享盘：施工图（建筑、结构，结构下面还有照片）、深化图、邮件、会议纪要。"""
-    top = tmp_path / "OASIS"
+    top = tmp_path / "PRJ1"
     files = {
         "0. EMAIL/re 答复.msg": b"mail", "0. EMAIL/fw 转发.eml": b"mail",
         "1. FOR CONSTRUCTION/1.1 ARCHITECTURE/建施-01 一层平面图.pdf": _pdf("建施-01", "一层平面图"),
@@ -150,7 +150,7 @@ def test_cli_survey_and_receive_plan(share, proj, capsys):
     cli.main(["-p", str(proj.root), "receive-plan", str(plan_file), "--date", "2026-10-22", "--no-av", "--only", "2"])
     assert "收了 1 批" in capsys.readouterr().out
     titles = [e["title"] for e in oplog.read(proj)]
-    assert titles[0] == f"按计划收图：{plan_file.name}" and titles[1] == "智能收图规划：OASIS"
+    assert titles[0] == f"按计划收图：{plan_file.name}" and titles[1] == "智能收图规划：PRJ1"
 
 
 def test_workbench_survey_then_receive_plan(share, proj, monkeypatch):
@@ -167,7 +167,7 @@ def test_workbench_survey_then_receive_plan(share, proj, monkeypatch):
     try:
         assert c.post("/api/job", {"kind": "survey", "path": str(share / "说明.txt")})["_status"] == 400
         j = c.job("survey", path=str(share))
-        assert j["status"] == "done" and j["title"] == "智能收图规划：OASIS", j
+        assert j["status"] == "done" and j["title"] == "智能收图规划：PRJ1", j
         plan = j["result"]
         assert [b["label"] for b in plan["batches"]] == ["1. FOR CONSTRUCTION", "2. SHOPDRAWING"]
         j = c.job("receive_plan", plan=plan["file"], only=[2], date="2026-10-22", av=False)
